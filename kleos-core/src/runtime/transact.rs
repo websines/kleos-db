@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::data::program::ReturnMutation;
 use crate::bail;
+use crate::data::program::ReturnMutation;
 use miette::{Diagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;

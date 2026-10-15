@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use csv::StringRecord;
 use crate::bail;
+use csv::StringRecord;
 use miette::{ensure, IntoDiagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 

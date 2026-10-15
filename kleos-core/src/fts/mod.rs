@@ -6,6 +6,7 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use crate::bail;
 use crate::data::memcmp::MemCmpEncoder;
 use crate::fts::cangjie::tokenizer::CangJieTokenizer;
 use crate::fts::tokenizer::{
@@ -15,7 +16,6 @@ use crate::fts::tokenizer::{
 };
 use crate::DataValue;
 use jieba_rs::Jieba;
-use crate::bail;
 use miette::{ensure, miette, Result};
 use sha2::digest::FixedOutput;
 use sha2::{Digest, Sha256};

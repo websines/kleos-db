@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[allow(unused_imports)]
+use crate::bail;
 use crossbeam::channel::{bounded, Receiver, Sender};
 #[allow(unused_imports)]
 use either::{Left, Right};
@@ -18,7 +20,6 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use miette::IntoDiagnostic;
 #[allow(unused_imports)]
-use crate::bail;
 use miette::{ensure, Diagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;

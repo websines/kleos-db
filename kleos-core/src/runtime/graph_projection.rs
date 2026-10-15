@@ -106,9 +106,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, PoisonError};
 
 #[cfg(feature = "graph-algo")]
-use graph::prelude::{DirectedCsrGraph, Graph};
-#[cfg(feature = "graph-algo")]
 use crate::bail;
+#[cfg(feature = "graph-algo")]
+use graph::prelude::{DirectedCsrGraph, Graph};
 use miette::{ensure, Diagnostic, Result};
 #[cfg(feature = "graph-algo")]
 use smartstring::{LazyCompact, SmartString};
@@ -1377,7 +1377,7 @@ pub(crate) fn sysop_list_graphs(tx: &SessionTx<'_>) -> Result<crate::NamedRows> 
 #[cfg(not(feature = "graph-algo"))]
 mod without_graph_algo {
     use crate::bail;
-    use miette::{Result};
+    use miette::Result;
 
     use crate::runtime::transact::SessionTx;
 

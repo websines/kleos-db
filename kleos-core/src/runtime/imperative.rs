@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use crate::bail;
 use either::{Either, Left, Right};
 use itertools::Itertools;
-use crate::bail;
 use miette::{Diagnostic, Report, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;

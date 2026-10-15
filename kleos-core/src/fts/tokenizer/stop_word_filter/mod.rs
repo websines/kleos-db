@@ -19,7 +19,7 @@ use rustc_hash::FxHashSet;
 
 use super::{BoxTokenStream, Token, TokenFilter, TokenStream};
 use crate::bail;
-use miette::{Result};
+use miette::Result;
 
 /// `TokenFilter` that removes stop words from a token stream
 #[derive(Clone)]

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam::channel::{bounded, Receiver, Sender};
 use crate::bail;
+use crossbeam::channel::{bounded, Receiver, Sender};
 use miette::{Diagnostic, Report, Result};
 use thiserror::Error;
 

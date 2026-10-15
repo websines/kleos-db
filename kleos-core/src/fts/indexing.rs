@@ -6,6 +6,7 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use crate::bail;
 use crate::data::expr::{eval_bytecode, eval_bytecode_pred, Bytecode};
 use crate::data::program::{FtsScoreKind, FtsSearch};
 use crate::data::tuple::{decode_tuple_from_key, Tuple};
@@ -17,7 +18,6 @@ use crate::runtime::relation::{try_decode_val_only, RelationHandle};
 use crate::runtime::transact::SessionTx;
 use crate::{DataValue, SourceSpan};
 use itertools::Itertools;
-use crate::bail;
 use miette::{miette, Diagnostic, Result};
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};

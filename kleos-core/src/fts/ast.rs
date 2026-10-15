@@ -6,8 +6,8 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::fts::tokenizer::TextAnalyzer;
 use crate::bail;
+use crate::fts::tokenizer::TextAnalyzer;
 use miette::{Diagnostic, Result};
 use ordered_float::OrderedFloat;
 use smartstring::{LazyCompact, SmartString};

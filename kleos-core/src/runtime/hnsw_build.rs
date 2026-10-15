@@ -42,7 +42,7 @@ use std::sync::{Mutex, RwLock};
 
 use crate::bail;
 
-use miette::{Result};
+use miette::Result;
 use ordered_float::OrderedFloat;
 use priority_queue::PriorityQueue;
 use rustc_hash::FxHashSet;

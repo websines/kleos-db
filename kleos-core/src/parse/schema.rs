@@ -8,8 +8,8 @@
 
 use std::collections::BTreeSet;
 
-use itertools::Itertools;
 use crate::bail;
+use itertools::Itertools;
 use miette::{ensure, Diagnostic, IntoDiagnostic, Result};
 use smartstring::SmartString;
 use thiserror::Error;

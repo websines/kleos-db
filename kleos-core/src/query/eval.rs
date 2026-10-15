@@ -10,10 +10,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::bail;
 use itertools::Itertools;
 use log::{debug, trace};
-use crate::bail;
-use miette::{Result};
+use miette::Result;
 // `rayon` is an optional dependency (implied by `graph-algo`, absent in a
 // bare `minimal` build): parallel stratum evaluation degrades to sequential
 // without it. The wasm arm below is already sequential.

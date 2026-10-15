@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::mem;
 
-use itertools::Itertools;
 use crate::bail;
+use itertools::Itertools;
 use miette::{miette, Diagnostic, Result};
 use serde::de::{Error, Visitor};
 use serde::{Deserializer, Serializer};

@@ -13,9 +13,9 @@ use std::collections::Bound::Included;
 use std::mem;
 use std::ops::Bound::Excluded;
 
+use crate::bail;
 use either::{Left, Right};
 use itertools::Itertools;
-use crate::bail;
 use miette::{ensure, Result};
 
 use crate::data::aggr::Aggregation;

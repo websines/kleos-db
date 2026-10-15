@@ -11,11 +11,11 @@ use std::fmt::{Display, Formatter};
 use std::mem;
 use std::time::SystemTime;
 
+use crate::bail;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::DateTime;
 use itertools::Itertools;
-use crate::bail;
 use miette::{ensure, Diagnostic, Result};
 use serde_json::Value as JsonValue;
 use smartstring::{LazyCompact, SmartString};

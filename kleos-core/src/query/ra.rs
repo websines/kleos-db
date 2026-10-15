@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter, Write};
 use std::iter;
 
+use crate::bail;
 use either::{Left, Right};
 use itertools::Itertools;
 use log::debug;
-use crate::bail;
 use miette::{Diagnostic, Result};
 use smartstring::SmartString;
 use thiserror::Error;

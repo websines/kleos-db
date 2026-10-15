@@ -31,7 +31,7 @@ use std::fmt::Write;
 
 use crate::bail;
 
-use miette::{Result};
+use miette::Result;
 
 use super::ast::*;
 use super::schema::{CypherGraphSchema, EdgeMap, NodeMap};

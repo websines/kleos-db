@@ -8,9 +8,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::bail;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use crate::bail;
 use miette::{ensure, Diagnostic, Result};
 use pest::pratt_parser::{Op, PrattParser};
 use smartstring::{LazyCompact, SmartString};

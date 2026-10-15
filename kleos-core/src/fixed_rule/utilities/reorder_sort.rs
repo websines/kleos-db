@@ -8,9 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use itertools::Itertools;
 use crate::bail;
-use miette::{Result};
+use itertools::Itertools;
+use miette::Result;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::data::expr::{eval_bytecode, Expr};

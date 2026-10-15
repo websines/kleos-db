@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::Ordering;
 
+use crate::bail;
 use itertools::Itertools;
 use log::error;
-use crate::bail;
 use miette::{ensure, Diagnostic, IntoDiagnostic, Result};
 use pest::Parser;
 use rmp_serde::Serializer;

@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use crate::bail;
 
-use miette::{Result};
+use miette::Result;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::data::expr::Expr;

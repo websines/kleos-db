@@ -8,6 +8,7 @@
 
 // Some ideas are from https://github.com/schelterlabs/rust-minhash
 
+use crate::bail;
 use crate::data::expr::{eval_bytecode, eval_bytecode_pred, Bytecode};
 use crate::data::tuple::Tuple;
 use crate::fts::tokenizer::TextAnalyzer;
@@ -16,7 +17,6 @@ use crate::runtime::relation::RelationHandle;
 use crate::runtime::transact::SessionTx;
 use crate::{DataValue, Expr, SourceSpan, Symbol};
 use itertools::Itertools;
-use crate::bail;
 use miette::{miette, Result};
 use quadrature::integrate;
 use rand::{thread_rng, RngCore};

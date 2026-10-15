@@ -13,9 +13,9 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
+use crate::bail;
 use either::{Left, Right};
 use itertools::Itertools;
-use crate::bail;
 use miette::{ensure, Diagnostic, LabeledSpan, Report, Result};
 use pest::Parser;
 use smartstring::{LazyCompact, SmartString};

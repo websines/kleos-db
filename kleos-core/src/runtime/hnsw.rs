@@ -6,6 +6,7 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use crate::bail;
 use crate::data::expr::{eval_bytecode_pred, Bytecode};
 use crate::data::program::HnswSearch;
 use crate::data::relation::VecElementType;
@@ -17,7 +18,6 @@ use crate::runtime::transact::SessionTx;
 use crate::storage::StoreTx;
 use crate::{DataValue, SourceSpan};
 use itertools::Itertools;
-use crate::bail;
 use miette::{miette, Result};
 use ordered_float::OrderedFloat;
 use priority_queue::PriorityQueue;

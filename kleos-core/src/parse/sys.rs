@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use itertools::Itertools;
 use crate::bail;
+use itertools::Itertools;
 use miette::{ensure, miette, Diagnostic, Result};
 use ordered_float::OrderedFloat;
 use smartstring::{LazyCompact, SmartString};

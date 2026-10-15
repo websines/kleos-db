@@ -50,7 +50,7 @@
 
 use crate::bail;
 
-use miette::{Result};
+use miette::Result;
 
 use crate::data::memcmp::{order_decode_i64, order_encode_i64, VLD_TAG};
 use crate::data::tuple::{decode_tuple_from_key, Tuple, DEFAULT_SIZE_HINT};

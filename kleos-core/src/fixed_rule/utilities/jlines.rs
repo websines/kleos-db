@@ -11,11 +11,12 @@ use std::fs::File;
 use std::io::BufRead;
 use std::{fs, io};
 
+#[allow(unused_imports)]
+use crate::bail;
 use itertools::Itertools;
 #[cfg(feature = "requests")]
 use log::error;
 #[allow(unused_imports)]
-use crate::bail;
 use miette::{miette, Diagnostic, IntoDiagnostic, Result, WrapErr};
 #[cfg(feature = "requests")]
 use minreq::Response;

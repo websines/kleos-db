@@ -8,7 +8,7 @@
 
 use crate::bail;
 
-use miette::{Result};
+use miette::Result;
 
 use crate::data::tuple::Tuple;
 use crate::data::value::ValidityTs;

@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use itertools::Itertools;
 use crate::bail;
+use itertools::Itertools;
 use miette::{ensure, Result};
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
