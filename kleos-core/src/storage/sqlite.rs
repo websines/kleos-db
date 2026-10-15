@@ -149,6 +149,16 @@ const COUNT_RANGE_QUERY: usize = 6;
 
 impl Drop for SqliteTx<'_> {
     fn drop(&mut self) {
+        // Finalize the cached statements while `lock` is still held (kleos,
+        // found by the live-subscription benchmark). A `get` that found a
+        // row leaves its statement un-reset, which keeps a SHARED lock on the
+        // database file. Fields drop in declaration order, `lock` first, so
+        // the statements used to outlive the in-process lock: a writer could
+        // take it in that gap and fail its commit with `database is locked
+        // (code 5)`, since connections set no busy timeout.
+        for stmt in &self.stmts {
+            *stmt.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
         if let Right(ShardedLockWriteGuard { .. }) = self.lock {
             if !self.committed {
                 let query = r#"rollback;"#;
