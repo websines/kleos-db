@@ -93,8 +93,9 @@ impl FixedRule for Rerank {
         let top_n = payload.non_neg_integer_option("top_n", Some(0))?;
         let batch_size = payload.non_neg_integer_option("batch_size", Some(0))?;
 
-        let reranker = match self.registry.read().unwrap().get(model.as_str()) {
-            Some(r) => r.clone(),
+        let found = self.registry.read().unwrap().get(model.as_str()).cloned();
+        let reranker = match found {
+            Some(r) => r,
             None => {
                 let known: Vec<String> = self.registry.read().unwrap().keys().cloned().collect();
                 bail!(
