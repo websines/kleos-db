@@ -166,6 +166,16 @@ fn rust_api_mirrors_the_ops() {
     // enabling an already-enabled custom embedder with no spec is a no-op
     enable_embedder("tg_api", EmbedderSpec::default()).unwrap();
     assert!(kleos::embed::is_embedder_enabled("tg_api"));
+
+    // names that are not identifiers can be quoted
+    register_embedder("tg-dash", m).unwrap();
+    run(&db, "::embedder disable 'tg-dash'");
+    assert!(!kleos::embed::is_embedder_enabled("tg-dash"));
+    run(&db, "::embedder enable \"tg-dash\"");
+    assert!(kleos::embed::is_embedder_enabled("tg-dash"));
+    // inside an imperative block: list/disable/enable work, backfill is refused
+    run(&db, "{::embedder disable tg_api} {::embedder enable tg_api}");
+    assert!(kleos::embed::is_embedder_enabled("tg_api"));
 }
 
 #[test]

@@ -499,7 +499,38 @@ pub fn disable_embedder(name: &str) -> Result<bool> {
         .lock()
         .map_err(|_| miette!("embedder registry poisoned"))?
         .insert(primary, parked);
+    release_freed_memory();
     Ok(true)
+}
+
+/// Ask the system allocator to hand freed pages back to the OS. A model's
+/// weights are a few hundred large allocations; macOS libmalloc keeps freed
+/// large blocks dirty in its cache (measured: the whole 1.2 GB load peak of
+/// EmbeddingGemma stayed in the process footprint after the weights were
+/// dropped, and grew with every enable/disable cycle), and glibc keeps freed
+/// heap tops. Best effort; a no-op elsewhere or under another global allocator.
+pub fn release_freed_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // SAFETY: documented libmalloc API; a null zone means every zone and
+        // a goal of 0 means release as much as possible.
+        unsafe {
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc API, safe to call at any time.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
 }
 
 fn is_disabled(name: &str) -> bool {
