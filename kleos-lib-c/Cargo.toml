@@ -1,0 +1,45 @@
+[package]
+name = "kleos_c"
+version = "0.7.6"
+edition = "2021"
+license = "MPL-2.0"
+homepage = "https://github.com/websines/kleos-db"
+repository = "https://github.com/websines/kleos-db"
+documentation = "https://docs.cozodb.org"
+description = "C bindings for CozoDB"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[features]
+#! # Features
+
+## Enables the `minimal`, `requests` and `graph-algo` features
+compact = ["minimal", "requests", "graph-algo"]
+## Enables the `storage-sqlite` and `graph-algo` features
+mobile = ["storage-sqlite", "graph-algo"]
+## Enables the `minimal`, `requests` and `graph-algo` features in single threaded mode
+compact-single-threaded = ["minimal", "requests", "graph-algo"]
+## Enables the `storage-sqlite` feature
+minimal = ["storage-sqlite"]
+## Enables the [Sqlite](https://www.sqlite.org/index.html) backend, also allows backup and restore with Sqlite data files.
+storage-sqlite = ["kleos/storage-sqlite"]
+## Enables the [RocksDB](http://rocksdb.org/) backend
+storage-rocksdb = ["kleos/storage-rocksdb"]
+## Enables the graph algorithms
+graph-algo = ["kleos/graph-algo"]
+## Allows the utilities to make web requests to fetch data
+requests = ["kleos/requests"]
+## Uses jemalloc as the global allocator, can make a difference in performance
+jemalloc = ["kleos/jemalloc"]
+## Enables io-uring option for the RocksDB storage
+io-uring = ["kleos/io-uring"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+kleos = { version = "0.18.0", path = "../kleos-core", default_features = false }
+lazy_static = "1.4.0"
+
+[build-dependencies]
+cbindgen = "0.26.0"

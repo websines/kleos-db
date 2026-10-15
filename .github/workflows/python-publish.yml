@@ -1,0 +1,378 @@
+# Build + publish the Python packages to PyPI:
+#   - kleos                              (pyo3 binding, cross-platform abi3 wheels)
+#   - langchain-kleos                    (pure Python)
+#   - llama-index-vector-stores-kleos    (pure Python)
+#   - langgraph-store-kleos               (pure Python)
+#   - kleos-mcp                           (pure Python)
+#
+# Publishing uses PyPI **trusted publishing** (OIDC) — no API tokens. Each of the
+# five PyPI projects must have a trusted publisher configured pointing at this
+# repo, workflow file `python-publish.yml`, environment `pypi`.
+#
+# Triggered by `py-v*` tags (and manually). Build-only on workflow_dispatch unless
+# `publish=true` is passed.
+
+name: python-publish
+
+on:
+  push:
+    tags: ["py-v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to PyPI (else build artifacts only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # --- lint + test gate: a broken engine must not ship ---
+  # The kleos wheel wraps the Rust engine (kleos-lib-python/src/lib.rs), so its
+  # correctness gate is the engine test suite — same default/sqlite features and
+  # action versions as build.yml's `test`/`clippy` jobs. All build + publish jobs
+  # depend on this, so a tag push runs the gate before any artifact is uploaded.
+  test:
+    name: test + clippy (kleos engine)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p kleos --verbose
+      - name: Test (lib + integration, incl. fork regressions)
+        run: cargo test -p kleos --verbose
+      - name: Clippy (all targets, -D warnings)
+        run: cargo clippy -p kleos --all-targets -- -D warnings
+
+  # --- kleos binding: cross-platform abi3 wheels via maturin ---
+  build-kleos:
+    name: build kleos (${{ matrix.platform.target }} / ${{ matrix.platform.os }})
+    needs: [test]
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # `features` is a per-leg staged-rollout knob: if one leg's rocksdb
+          # build breaks, drop that leg back to "compact,rdf-io" instead of
+          # holding the whole release. `rdf-io` is the signed Q6 wheel posture
+          # (rdf-boundary-io spec): the wheel ships RdfReader + the implied
+          # data-import readers; keep it on every leg AND in pyproject's
+          # [tool.maturin] features (the sdist path) — the shared host-controlled
+          # `columnar-io` surface must not drift either.
+          # With storage-rocksdb, zstd-sys pulls bindgen, which needs libclang.
+          # The NATIVE manylinux x86_64 image (2014 or 2_28) ships none, so the
+          # build panics "Unable to find libclang" — install it via
+          # before_script. (The aarch64 leg escapes this: its maturin CROSS image
+          # already bundles clang.) 2_28 = AlmaLinux 8, so `dnf install clang-devel`
+          # gives a modern, bindgen-compatible libclang; cost: drops glibc < 2.28.
+          - { os: ubuntu-latest,  target: x86_64,  manylinux: "2_28", features: "compact,storage-rocksdb,rdf-io,columnar-io", before_script: "dnf install -y clang-devel" }
+          # aarch64 needs the 2_28 image: the manylinux2014 cross-GCC is too old
+          # to assemble ring's ARM asm (#error "ARM assembler must define __ARM_ARCH").
+          - { os: ubuntu-latest,  target: aarch64, manylinux: "2_28", features: "compact,storage-rocksdb,rdf-io,columnar-io" }
+          # Intel-mac runners (macos-13) are retired — jobs queue forever.
+          # Cross-compile x86_64 on the arm64 runner instead (rocksdb compiles
+          # via the cc crate, no cmake, so clang cross-compiles it; validated
+          # locally under Rosetta).
+          - { os: macos-14,       target: x86_64,  features: "compact,storage-rocksdb,rdf-io,columnar-io" }
+          - { os: macos-14,       target: aarch64, features: "compact,storage-rocksdb,rdf-io,columnar-io" }
+          - { os: windows-latest, target: x64,     features: "compact,storage-rocksdb,rdf-io,columnar-io" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # rocksdb sources for kleos-rocks — without them every leg fails at
+          # kleos-rocks/build.rs (rocksdb/AUTHORS check).
+          submodules: recursive
+      - uses: PyO3/maturin-action@v1
+        env:
+          # Pin so cc (the C++/rocksdb build) and rustc agree on the macOS
+          # target; moves the mac wheel tags from macosx_10_12_* to
+          # macosx_11_0_* (drops long-EOL 10.x Macs). Empty — and unread — on
+          # the non-mac legs.
+          MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.platform.os, 'macos') && '11.0' || '' }}
+        with:
+          working-directory: kleos-lib-python
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          # Runs inside the manylinux container before the build. Only the native
+          # x86_64 leg sets it (to install libclang for zstd-sys's bindgen);
+          # empty and unread on every other leg.
+          before-script-linux: ${{ matrix.platform.before_script }}
+          # Full feature list on the CLI — robust regardless of how maturin
+          # merges pyproject [tool.maturin] features with CLI flags. pyproject
+          # stays `compact,rdf-io,columnar-io` (none require RocksDB sources) so
+          # `pip install` from the sdist keeps building everywhere.
+          args: --release --out dist --compatibility pypi --no-default-features --features ${{ matrix.platform.features }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kleos-wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: kleos-lib-python/dist
+
+  build-kleos-sdist:
+    name: build kleos sdist
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: kleos-lib-python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kleos-sdist
+          path: kleos-lib-python/dist
+
+  # --- pure-Python adapter packages ---
+  build-adapters:
+    name: build ${{ matrix.pkg }}
+    needs: [test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pkg: [langchain-kleos, llama-index-vector-stores-kleos, langgraph-store-kleos, kleos-mcp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pipx run build --outdir dist
+        working-directory: kleos-lib-python/integrations/${{ matrix.pkg }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.pkg }}
+          path: kleos-lib-python/integrations/${{ matrix.pkg }}/dist
+
+  # --- adapter test suites against this run's candidate wheel ---
+  # Published-wheel tests do not prove compatibility with unreleased engine changes.
+  # Install the wheel built above first; also guard the vendored-copy invariant.
+  test-integrations:
+    name: test ${{ matrix.pkg }}
+    needs: [build-kleos]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg: langchain-kleos
+            deps: langchain-core mem0ai langchain-community
+          - pkg: llama-index-vector-stores-kleos
+            deps: llama-index-core
+          - pkg: langgraph-store-kleos
+            deps: '"langgraph-checkpoint>=4.1,<5" "langgraph>=1.0"'
+          - pkg: kleos-mcp
+            deps: '"mcp>=1.27,<2" "fastembed>=0.8"'
+    steps:
+      - uses: actions/checkout@v4
+      - name: vendored _core.py copies must stay byte-identical
+        run: >
+          diff
+          kleos-lib-python/integrations/langchain-kleos/langchain_kleos/_core.py
+          kleos-lib-python/integrations/llama-index-vector-stores-kleos/llama_index/vector_stores/kleos/_core.py
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/download-artifact@v4
+        with:
+          name: kleos-wheels-ubuntu-latest-x86_64
+          path: candidate-wheels
+      - run: python -m pip install --no-index --find-links candidate-wheels kleos
+      - run: python -m pip install pytest ${{ matrix.deps }}
+      - run: python -m pip install -e kleos-lib-python/integrations/${{ matrix.pkg }}
+      - run: python -m pytest kleos-lib-python/integrations/${{ matrix.pkg }}/tests -q
+
+  # --- wheel smoke test: a wheel whose rocksdb engine doesn't open must not ship ---
+  # One natively runnable runner per built wheel. The mac x86_64 cross wheel has
+  # no native runner (Intel-mac runners are retired); it was validated locally
+  # under Rosetta when this pipeline was designed.
+  test-wheels:
+    name: smoke test wheels (${{ matrix.platform.os }} / Python ${{ matrix.python }})
+    needs: [build-kleos]
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.12"]
+        platform:
+          - { os: ubuntu-latest,    artifact: kleos-wheels-ubuntu-latest-x86_64 }
+          - { os: ubuntu-24.04-arm, artifact: kleos-wheels-ubuntu-latest-aarch64 }
+          - { os: macos-14,         artifact: kleos-wheels-macos-14-aarch64 }
+          - { os: windows-latest,   artifact: kleos-wheels-windows-latest-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.platform.artifact }}
+          path: dist
+      - name: Install wheel
+        run: python -m pip install --no-index --find-links dist kleos
+      - name: String, JSON and FTS compatibility contract
+        run: python kleos-lib-python/tests/test_string_json_contract.py
+      - name: Install columnar test producer
+        run: python -m pip install pyarrow
+      - name: Columnar distribution contract
+        run: python kleos-lib-python/tests/test_columnar_distribution.py
+      - name: Upgrade databases written by released 0.17.0
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys, tempfile
+          with tempfile.TemporaryDirectory() as work:
+              old = str(pathlib.Path(work) / "old-wheel")
+              data = str(pathlib.Path(work) / "databases")
+              subprocess.run([sys.executable, "-m", "pip", "install", "--target", old, "kleos==0.17.0"], check=True)
+              env = os.environ.copy()
+              env["PYTHONPATH"] = old
+              script = "kleos-lib-python/tests/test_upgrade_018.py"
+              subprocess.run([sys.executable, script, "create", data], env=env, check=True)
+              subprocess.run([sys.executable, script, "verify", data], check=True)
+      # `shell: python` runs the block under the setup-python interpreter on
+      # every OS — no bash/pwsh quoting hazards.
+      - name: Smoke test (rocksdb + mem engines)
+        shell: python
+        run: |
+          import os, tempfile
+
+          import kleos
+
+          # mem-backend sanity
+          mem = kleos.CozoDbPy("mem", "", "")
+          res = mem.run_script("?[a] <- [[1]]", {}, True)
+          assert res["rows"] == [[1]], res
+          print("MEM OK:", res["rows"])
+
+          # rocksdb: create relation, put rows, read back
+          path = os.path.join(tempfile.mkdtemp(), "smoke.db")
+          db = kleos.CozoDbPy("rocksdb", path, "")
+          db.run_script(":create t {k: Int => v: String}", {}, False)
+          db.run_script(
+              '?[k, v] <- [[1, "hello-rocksdb"], [2, "world"]] :put t {k => v}',
+              {},
+              False,
+          )
+          rows = db.run_script("?[k, v] := *t[k, v]", {}, True)["rows"]
+          assert rows == [[1, "hello-rocksdb"], [2, "world"]], rows
+          print("ROCKSDB OK:", rows)
+
+  test-sdist:
+    name: build and smoke the isolated sdist
+    needs: [build-kleos-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: kleos-sdist
+          path: candidate-sdist
+      - name: Build and install from source distribution
+        run: python -m pip install candidate-sdist/*.tar.gz
+      - run: python -m pip install pyarrow
+      - run: python kleos-lib-python/tests/test_string_json_contract.py
+      - run: python kleos-lib-python/tests/test_columnar_distribution.py
+
+  # --- publish (OIDC trusted publishing); one job per PyPI project ---
+  publish-kleos:
+    needs: [build-kleos, build-kleos-sdist, test-wheels, test-sdist, test-integrations]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # Guard: the triggering tag (py-vX.Y.Z) must match the published manifest
+      # version. workflow_dispatch runs have no tag, so the check is skipped (a
+      # manual dispatch is build/publish-on-demand and must not hard-fail here).
+      - name: Verify tag matches manifest version
+        run: |
+          MANIFEST_VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('kleos-lib-python/pyproject.toml','rb'))['project']['version'])")"
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "workflow_dispatch run (ref=${{ github.ref }}): no tag to check; manifest version is $MANIFEST_VERSION. Skipping tag/version match guard."
+            exit 0
+          fi
+          TAG_VERSION="${GITHUB_REF#refs/tags/py-v}"
+          echo "Tag version:      $TAG_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag py-v$TAG_VERSION does not match kleos-lib-python/pyproject.toml version $MANIFEST_VERSION. Bump the manifest (and Cargo.toml/Cargo.lock) to match the tag before releasing."
+            exit 1
+          fi
+          echo "Version match OK."
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "kleos-*"
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  publish-langchain-kleos:
+    # The adapters wrap the kleos wheel — don't ship them off a broken wheel set.
+    needs: [build-adapters, test-wheels, test-integrations]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist-langchain-kleos, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  publish-llama-index-vector-stores-kleos:
+    needs: [build-adapters, test-wheels, test-integrations]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist-llama-index-vector-stores-kleos, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  publish-langgraph-store-kleos:
+    needs: [build-adapters, test-wheels, test-integrations]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist-langgraph-store-kleos, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  publish-kleos-mcp:
+    needs: [build-adapters, test-wheels, test-integrations]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist-kleos-mcp, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kleos-mcp"
+version = "0.2.0"
+description = "Local memory MCP server backed by kleos — hybrid BM25+vector+graph recall with per-leg attribution and time travel, all on your machine."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MPL-2.0" }
+authors = [{ name = "Shan Rizvi" }]
+keywords = ["mcp", "model-context-protocol", "memory", "agent-memory", "kleos", "hybrid-search", "cozodb"]
+dependencies = [
+    "kleos>=0.12.2",
+    "mcp>=1.27,<2",
+    "fastembed>=0.8",
+]
+
+[project.scripts]
+kleos-mcp = "kleos_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/websines/kleos-db"
+Repository = "https://github.com/websines/kleos-db"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kleos_mcp"]

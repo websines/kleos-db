@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "kleos-core",
+    "kleos-rocks",
+    "kleos-bin",
+    "kleos-core-examples",
+]
+# Language bindings are deferred in the kleos fork — the fork targets a Rust
+# agentic-memory substrate (consumed by mindgraph-rs). The binding crates are
+# kept in-tree but excluded from the workspace build/maintenance for now.
+exclude = [
+    "kleos-lib-c",
+    "kleos-lib-java",
+    "kleos-lib-wasm",
+    "kleos-lib-swift",
+    "kleos-lib-python",
+    "kleos-lib-nodejs",
+]
+
+[profile.bench]
+lto = true
+debug = true
+
+[profile.dev.package."kleos-rocks"]
+opt-level = 3

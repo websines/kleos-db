@@ -1,0 +1,265 @@
+/*
+ * Copyright 2022, The Cozo Project Authors.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+ * If a copy of the MPL was not distributed with this file,
+ * You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+use miette::{bail, Result};
+
+use crate::data::tuple::Tuple;
+use crate::data::value::ValidityTs;
+use crate::try_decode_tuple_from_kv;
+
+pub(crate) mod mem;
+#[cfg(feature = "storage-new-rocksdb")]
+pub mod newrocks;
+#[cfg(feature = "storage-rocksdb")]
+pub(crate) mod rocks;
+#[cfg(feature = "storage-sled")]
+pub(crate) mod sled;
+#[cfg(feature = "storage-sqlite")]
+pub(crate) mod sqlite;
+pub(crate) mod temp;
+#[cfg(feature = "storage-tikv")]
+pub(crate) mod tikv;
+// pub(crate) mod re;
+
+/// Swappable storage trait for Cozo's storage engine
+pub trait Storage<'s>: Send + Sync + Clone {
+    /// The associated transaction type used by this engine
+    type Tx: StoreTx<'s>;
+
+    /// Returns a string that identifies the storage kind
+    fn storage_kind(&self) -> &'static str;
+
+    /// Create a transaction object. Write ops will only be called when `write == true`.
+    fn transact(&'s self, write: bool) -> Result<Self::Tx>;
+
+    /// Compact the key range. Can be a no-op if the storage engine does not
+    /// have the concept of compaction.
+    fn range_compact(&'s self, lower: &[u8], upper: &[u8]) -> Result<()>;
+
+    /// Put multiple key-value pairs into the database.
+    /// No duplicate data will be sent, and the order data come in is strictly ascending.
+    /// There will be no other access to the database while this function is running.
+    fn batch_put<'a>(
+        &'a self,
+        data: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+    ) -> Result<()>;
+
+    /// Whether this engine can bulk-publish a freshly-built index by ingesting a
+    /// sorted-string table (SST) file — see [`ingest_sorted`](Self::ingest_sorted).
+    /// Defaults to `false`; only the RocksDB backend overrides this. (kleos fork)
+    fn supports_sst_ingest(&self) -> bool {
+        false
+    }
+
+    /// Request that write transactions **fsync on commit** from now on (or stop
+    /// doing so, with `false`). Returns `true` iff this backend honors the
+    /// knob; the default implementation is a no-op returning `false`, so
+    /// third-party [`Storage`] impls keep compiling. (kleos fork)
+    ///
+    /// The contract this makes explicit: the **RocksDB backend commits without
+    /// syncing its WAL by default** — the log is written but not fsynced, so an
+    /// OS crash or power loss can lose the most recent commits (a mere process
+    /// crash cannot; the OS still has the pages). With `set_durable_writes
+    /// (true)` every subsequent write transaction's commit fsyncs first —
+    /// slower, but a power cut loses nothing acknowledged.
+    ///
+    /// Per-backend behavior:
+    /// - `rocksdb` — honored (returns `true`); flips per-transaction
+    ///   `WriteOptions.sync`. NOTE: the bulk paths (`batch_put`,
+    ///   `ingest_sorted`, i.e. `import_relations`/restore) are separate
+    ///   non-transactional channels and are **not** covered by the knob.
+    /// - `sqlite` — not honored (returns `false`), but writes are already
+    ///   durable: it runs with SQLite's default `synchronous=FULL`.
+    /// - `mem` — nothing to sync; not persistent. Returns `false`.
+    /// - `newrocksdb`, `sled`, `tikv` — not wired up (returns `false`).
+    fn set_durable_writes(&self, durable: bool) -> bool {
+        let _ = durable;
+        false
+    }
+
+    /// Bulk-publish strictly-ascending key-value `entries` into the *live*
+    /// database by building an SST file and atomically ingesting it, bypassing
+    /// the transaction write-batch overlay entirely. The engine manages the
+    /// temporary file. Keys MUST arrive in strictly ascending order. (kleos fork)
+    ///
+    /// Unlike a transactional `put`, ingested keys become visible to new reads
+    /// as soon as this returns, independent of any open transaction's commit.
+    /// Callers relying on this for index publishing must therefore ingest the
+    /// index data *before* the metadata that references it becomes visible.
+    ///
+    /// The default implementation errors; engines without SST support should use
+    /// the per-key `put` path instead.
+    fn ingest_sorted<'a>(
+        &'a self,
+        _entries: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+    ) -> Result<()> {
+        bail!("this storage engine does not support SST ingest")
+    }
+}
+
+/// Trait for the associated transaction type of a storage engine.
+/// A transaction needs to guarantee MVCC semantics for all operations.
+pub trait StoreTx<'s>: Sync {
+    /// Get a key. If `for_update` is `true` (only possible in a write transaction),
+    /// then the database needs to guarantee that `commit()` can only succeed if
+    /// the key has not been modified outside the transaction.
+    fn get(&self, key: &[u8], for_update: bool) -> Result<Option<Vec<u8>>>;
+
+    /// Get multiple keys. If `for_update` is `true` (only possible in a write transaction),
+    /// then the database needs to guarantee that `commit()` can only succeed if
+    /// the keys have not been modified outside the transaction.
+    fn multi_get(&self, keys: &[Vec<u8>], for_update: bool) -> Result<Vec<Option<Vec<u8>>>> {
+        keys.iter().map(|k| self.get(k, for_update)).collect()
+    }
+
+    /// Put a key-value pair into the storage. In case of existing key,
+    /// the storage engine needs to overwrite the old value.
+    fn put(&mut self, key: &[u8], val: &[u8]) -> Result<()>;
+
+    /// Put a key whose writes are serialized by a higher-level authority
+    /// (kleos fork; sole current user: the tt commit clock's high-water
+    /// mark, `runtime/tt_clock.rs`). Backends whose write transactions
+    /// snapshot-validate first-locks (RocksDB pessimistic transactions) must
+    /// skip that validation for this key — otherwise any two temporally
+    /// overlapping transactions writing it make the later committer abort
+    /// spuriously (`Resource busy`; the 0.8.4 `avgdl` hot-key failure mode).
+    /// Default: a plain `put` (sqlite/mem take storage-level write locks, so
+    /// overlapping write transactions cannot exist there).
+    fn put_externally_serialized(&mut self, key: &[u8], val: &[u8]) -> Result<()> {
+        self.put(key, val)
+    }
+
+    /// Should return true if the engine supports parallel put, false otherwise.
+    fn supports_par_put(&self) -> bool;
+
+    /// Put a key-value pair into the storage. In case of existing key,
+    /// the storage engine needs to overwrite the old value.
+    /// The difference between this one and `put` is the mutability of self.
+    /// It is OK to always panic if `supports_par_put` returns `false`.
+    fn par_put(&self, _key: &[u8], _val: &[u8]) -> Result<()> {
+        panic!("par_put is not supported")
+    }
+
+    /// Delete a key-value pair from the storage.
+    fn del(&mut self, key: &[u8]) -> Result<()>;
+
+    /// Delete a key-value pair from the storage.
+    /// The difference between this one and `del` is the mutability of self.
+    /// It is OK to always panic if `supports_par_put` returns `false`.
+    fn par_del(&self, _key: &[u8]) -> Result<()> {
+        panic!("par_del is not supported")
+    }
+
+    /// Delete a range from persisted data only.
+    fn del_range_from_persisted(&mut self, lower: &[u8], upper: &[u8]) -> Result<()>;
+
+    /// Check if a key exists. If `for_update` is `true` (only possible in a write transaction),
+    /// then the database needs to guarantee that `commit()` can only succeed if
+    /// the key has not been modified outside the transaction.
+    fn exists(&self, key: &[u8], for_update: bool) -> Result<bool>;
+
+    /// Commit a transaction. Must return an `Err` if MVCC consistency cannot be guaranteed,
+    /// and discard all changes introduced by this transaction.
+    fn commit(&mut self) -> Result<()>;
+
+    /// Scan on a range. `lower` is inclusive whereas `upper` is exclusive.
+    /// The default implementation calls [`range_scan_owned`](Self::range_scan) and converts the results.
+    ///
+    /// The implementation must call
+    /// [`try_decode_tuple_from_kv`](crate::try_decode_tuple_from_kv) to obtain a decoded tuple in
+    /// the loop of the iterator.
+    fn range_scan_tuple<'a>(
+        &'a self,
+        lower: &[u8],
+        upper: &[u8],
+    ) -> Box<dyn Iterator<Item = Result<Tuple>> + 'a>
+    where
+        's: 'a,
+    {
+        let it = self.range_scan(lower, upper);
+        Box::new(it.map(|pair| {
+            let (key, value) = pair?;
+            try_decode_tuple_from_kv(&key, &value, None)
+        }))
+    }
+
+    /// Scan on a range with a certain validity.
+    ///
+    /// `lower` is inclusive whereas `upper` is exclusive.
+    /// For tuples that differ only with respect to their validity, which must be at
+    /// the last slot of the key,
+    /// only the tuple that has validity equal to or earlier than (i.e. greater by the comparator)
+    /// `valid_at` should be considered for returning, and only those with an assertive validity
+    /// should be returned. Every other tuple should be skipped.
+    ///
+    /// Ideally, implementations should take advantage of seeking capabilities of the
+    /// underlying storage so that not every tuple within the `lower` and `upper` range
+    /// need to be looked at.
+    ///
+    /// For custom implementations, it is OK to return an iterator that always error out,
+    /// in which case the database with the engine does not support time travelling.
+    /// You should indicate this clearly in your error message.
+    fn range_skip_scan_tuple<'a>(
+        &'a self,
+        lower: &[u8],
+        upper: &[u8],
+        valid_at: ValidityTs,
+    ) -> Box<dyn Iterator<Item = Result<Tuple>> + 'a>;
+
+    /// Two-level bitemporal scan (kleos fork, bitemporality step 4b; see
+    /// `data/bitemporal.rs`). The default implementation drives the generic
+    /// probe loop over `range_scan` — one fresh range per probe. Correct on
+    /// every backend; hot backends may override with a pinned-iterator seek
+    /// loop (step 6 measures before optimizing).
+    fn range_bitemporal_scan_tuple<'a>(
+        &'a self,
+        lower: &[u8],
+        upper: &[u8],
+        vt_at: Option<ValidityTs>,
+        tt_at: ValidityTs,
+    ) -> Box<dyn Iterator<Item = Result<Tuple>> + 'a> {
+        let upper = upper.to_vec();
+        Box::new(crate::data::bitemporal::BitemporalIter::new(
+            move |bound: &[u8], _far: bool| -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+                // A probe bound past the range end means the walk is done —
+                // never hand an inverted range to the backend (mem's
+                // BTreeMap::range panics on start > end).
+                if bound >= upper.as_slice() {
+                    return Ok(None);
+                }
+                match self.range_scan(bound, &upper).next() {
+                    None => Ok(None),
+                    Some(kv) => Ok(Some(kv?)),
+                }
+            },
+            lower.to_vec(),
+            vt_at,
+            tt_at,
+        ))
+    }
+
+    /// Scan on a range and return the raw results.
+    /// `lower` is inclusive whereas `upper` is exclusive.
+    fn range_scan<'a>(
+        &'a self,
+        lower: &[u8],
+        upper: &[u8],
+    ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>
+    where
+        's: 'a;
+
+    /// Return the number of rows in the range.
+    fn range_count<'a>(&'a self, lower: &[u8], upper: &[u8]) -> Result<usize>
+    where
+        's: 'a;
+
+    /// Scan for all rows. The rows are required to be in ascending order.
+    fn total_scan<'a>(&'a self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>
+    where
+        's: 'a;
+}

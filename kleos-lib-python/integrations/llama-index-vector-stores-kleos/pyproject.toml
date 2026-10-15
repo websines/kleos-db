@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llama-index-vector-stores-kleos"
+version = "0.2.1"
+description = "LlamaIndex vector store for kleos — embedded graph + vector + full-text store with one-call hybrid retrieval."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MPL-2.0" }
+authors = [{ name = "Shan Rizvi" }]
+keywords = ["llamaindex", "llama-index", "kleos", "vector-store", "hybrid-search", "rag", "cozodb"]
+dependencies = [
+    "kleos>=0.8.3",
+    "llama-index-core>=0.12,<0.15",
+]
+
+[project.urls]
+Homepage = "https://github.com/websines/kleos-db"
+Repository = "https://github.com/websines/kleos-db"
+
+[tool.hatch.build.targets.wheel]
+# PEP 420 namespace package: no __init__.py at llama_index/ or
+# llama_index/vector_stores/; only the kleos leaf is a regular package.
+packages = ["llama_index"]

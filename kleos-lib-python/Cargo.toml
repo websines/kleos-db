@@ -1,0 +1,60 @@
+[package]
+name = "kleos-py"
+version = "0.18.0"
+edition = "2021"
+description = "kleos database for Python — a maintained fork of CozoDB (embedded graph + vector + full-text store for agentic memory)"
+authors = ["Shan Rizvi (mnestic fork)", "Ziyang Hu"]
+license = "MPL-2.0"
+homepage = "https://github.com/websines/kleos-db"
+repository = "https://github.com/websines/kleos-db"
+documentation = "https://docs.cozodb.org"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "kleos"
+crate-type = ["cdylib"]
+
+[features]
+#! # Features
+
+## Enables the `minimal`, `requests` and `graph-algo` features
+compact = ["minimal", "requests", "graph-algo"]
+## Enables the `storage-sqlite` and `graph-algo` features
+mobile = ["storage-sqlite", "graph-algo"]
+## Enables the `minimal`, `requests` and `graph-algo` features in single threaded mode
+compact-single-threaded = ["minimal", "requests", "graph-algo"]
+## Enables the `storage-sqlite` feature
+minimal = ["storage-sqlite"]
+## Enables the [Sqlite](https://www.sqlite.org/index.html) backend, also allows backup and restore with Sqlite data files.
+storage-sqlite = ["kleos/storage-sqlite"]
+## Enables the [RocksDB](http://rocksdb.org/) backend
+storage-rocksdb = ["kleos/storage-rocksdb"]
+## Enables the graph algorithms
+graph-algo = ["kleos/graph-algo"]
+## Allows the utilities to make web requests to fetch data
+requests = ["kleos/requests"]
+## Read-only Cypher query surface (kleos fork): exposes `run_cypher`.
+cypher = ["kleos/cypher"]
+## RDF boundary I/O (kleos fork): registers the RdfReader fixed rule and the
+## RDF export API. Implies the engine's `data-import` trust gate, so enabling
+## this also registers CsvReader/JsonReader — script-controlled file reads
+## (and, since the wheel compiles `requests`, script-controlled HTTP fetch).
+## The published wheel SHIPS this by signed decision (rdf-boundary-io spec
+## §12 Q6, a deliberate reversal of the 0.14.0 wheel-reader posture).
+rdf-io = ["kleos/rdf-io"]
+## Host-controlled Parquet/Arrow IPC import. Unlike `rdf-io`, this adds no
+## CozoScript reader and does not widen script authority.
+columnar-io = ["kleos/columnar-io"]
+## Uses jemalloc as the global allocator, can make a difference in performance
+jemalloc = ["kleos/jemalloc"]
+## Enables io-uring option for the RocksDB storage
+io-uring = ["kleos/io-uring"]
+
+
+[dependencies]
+kleos = { version = "0.18.0", path = "../kleos-core", default-features = false }
+pyo3 = { version = "0.21.2", features = ["extension-module", "abi3", "abi3-py37"] }
+miette = "5.10.0"
+serde_json = "1.0.116"
+rayon = "1.10.0"

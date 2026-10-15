@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (kleos, default/sqlite features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Default features are SQLite-only, so no RocksDB submodule / C++ build is
+      # needed here — keeps the correctness gate fast. RocksDB is covered below.
+      - name: Build
+        run: cargo build -p kleos --verbose
+      - name: Test (lib + integration, incl. fork regressions)
+        run: cargo test -p kleos --verbose
+      # `test-hooks` suites are `#![cfg(feature = "test-hooks")]`, so the default
+      # job above compiles them to zero tests. They must be named explicitly here
+      # or they silently never run.
+      - name: Test (test-hooks suites)
+        run: cargo test -p kleos --features test-hooks --test commit_fence --test callback_commit_contract --test governed_transaction --verbose
+      - name: Test (columnar import contract)
+        run: cargo test -p kleos --features columnar-io,test-hooks --test columnar_import --verbose
+
+  # The secondary backends are non-default features, so nothing above compiles
+  # them. Both carried a silent transaction-contract bug until 0.12.1 (sled's
+  # `del()` never deleted — upstream #306; newrocksdb lost concurrent updates),
+  # and a backend nobody builds in CI is a backend nobody notices breaking.
+  secondary-backends:
+    name: test (sled + newrocksdb transaction contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (sled)
+        run: cargo test -p kleos --features storage-sled --test backend_transaction_contract --verbose
+      - name: Test (newrocksdb)
+        run: cargo test -p kleos --features storage-new-rocksdb --test backend_transaction_contract --verbose
+
+  # TiKV is the only distributed backend. A compile-only check cannot prove
+  # that relation IDs are serialized across independent client processes, so
+  # this job boots real PD/TiKV servers and exercises that boundary directly.
+  tikv:
+    name: test (TiKV multi-client relation IDs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Start PD and TiKV
+        run: |
+          # Official PingCAP v8.5.0 amd64 image manifests, pinned immutably.
+          docker run --detach --name kleos-pd --network host \
+            pingcap/pd@sha256:51570618f3c4307f73efac23634f40acf42f314b23bd5afae903b3c413e51346 \
+            --name=pd \
+            --data-dir=/tmp/pd \
+            --client-urls=http://127.0.0.1:2379 \
+            --peer-urls=http://127.0.0.1:2380 \
+            --initial-cluster=pd=http://127.0.0.1:2380
+
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:2379/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "PD did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          docker run --detach --name kleos-tikv --network host \
+            --ulimit nofile=262144:262144 \
+            pingcap/tikv@sha256:eed41be14384a2123b5ffabffae7e8322a027ea94d6482646e1d3a1d0fd8bbac \
+            --pd-endpoints=127.0.0.1:2379 \
+            --addr=127.0.0.1:20160 \
+            --status-addr=127.0.0.1:20180 \
+            --data-dir=/tmp/tikv
+
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:20180/status >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "TiKV did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Test two-client relation ID allocation
+        env:
+          KLEOS_TIKV_PD_ENDPOINT: 127.0.0.1:2379
+        run: >
+          cargo test -p kleos
+          --no-default-features
+          --features storage-tikv
+          --test tikv_relation_id_concurrency
+          -- --ignored --exact two_clients_allocate_distinct_relation_ids_concurrently
+      - name: Dump TiKV logs on failure
+        if: failure()
+        run: |
+          docker logs kleos-pd || true
+          docker logs kleos-tikv || true
+      - name: Stop PD and TiKV
+        if: always()
+        run: docker rm --force kleos-tikv kleos-pd
+
+  rocksdb:
+    name: build (storage-rocksdb, C++ bridge)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with RocksDB backend
+        run: cargo build -p kleos --features storage-rocksdb --verbose
+      # The graph-projection freshness protocol has race windows that mem and
+      # sqlite cannot reach: both pin a read transaction by holding a store-wide
+      # read guard, so no writer can run alongside a long-lived reader. RocksDB
+      # pins with a snapshot and takes no such guard. This is the only job that
+      # can run the interleaving suite.
+      - name: Test (graph-projection interleaving)
+        run: cargo test -p kleos --features storage-rocksdb,test-hooks --test graph_projection_interleaving --verbose
+      - name: Test (governed read and write transactions)
+        run: cargo test -p kleos --features storage-rocksdb,test-hooks --test governed_transaction --verbose
+      - name: Test (columnar rollback and concurrency on RocksDB)
+        run: >
+          cargo test -p kleos
+          --features storage-rocksdb,columnar-io
+          --test columnar_import
+          --verbose
+          rocksdb_
+
+  # The `minimal` combination (no `graph-algo`, no `rayon`) is what a
+  # `--no-default-features --features minimal` consumer gets — and until this
+  # job existed it was never compiled anywhere: an ungated `rayon` import in
+  # eval.rs had made a bare minimal build UNCOMPILABLE with nobody noticing.
+  # It also runs the ungated hybrid suites, whose
+  # `budgeted_leg_errors_loudly_without_graph_algo` test only exists (and can
+  # only run) without `graph-algo` — the sole guard on the feature-seam loud
+  # error (design §a0, 0.14.0).
+  minimal:
+    name: test (minimal features, no graph-algo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (hybrid suites under minimal)
+        run: cargo test -p kleos --no-default-features --features minimal --test hybrid_graph_leg --test hybrid_helper --verbose
+
+  clippy:
+    name: clippy (blocking, -D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Blocking lint gate on default (SQLite) features — fast, no C++ build.
+      # Inherited upstream lints (missing_docs, dead_code, mutable_key_type, ...)
+      # are allow-listed with rationale in kleos-core/src/lib.rs, so this gate
+      # catches NEW clippy issues. `cargo fmt --check` is intentionally NOT part
+      # of the gate yet: the inherited tree isn't rustfmt-clean and reformatting
+      # ~178 mostly-upstream files is deferred to a dedicated pass.
+      - name: Clippy (all targets)
+        run: cargo clippy -p kleos --all-targets -- -D warnings
+      - name: Clippy (columnar feature)
+        run: cargo clippy -p kleos --features columnar-io,test-hooks --test columnar_import -- -D warnings
