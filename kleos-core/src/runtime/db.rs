@@ -171,6 +171,9 @@ pub struct Db<S> {
     pub(crate) queries_count: Arc<AtomicU64>,
     pub(crate) running_queries: Arc<Mutex<BTreeMap<u64, RunningQueryHandle>>>,
     pub(crate) fixed_rules: Arc<ShardedLock<BTreeMap<String, Arc<Box<dyn FixedRule>>>>>,
+    /// Host-registered re-rank models (kleos fork, hybrid C2), resolved by
+    /// the per-`Db` `Rerank` fixed rule. See [`Db::register_reranker`].
+    rerankers: crate::fixed_rule::utilities::rerank::RerankerRegistry,
     pub(crate) tokenizers: Arc<TokenizerCache>,
     #[cfg(not(target_arch = "wasm32"))]
     callback_count: Arc<AtomicU32>,
@@ -412,6 +415,14 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// You must call [`initialize`](Self::initialize) immediately after creation.
     /// Due to lifetime restrictions we are not able to call that for you automatically.
     pub fn new(storage: S) -> Result<Self> {
+        let rerankers = crate::fixed_rule::utilities::rerank::RerankerRegistry::default();
+        let mut fixed_rules = DEFAULT_FIXED_RULES.clone();
+        fixed_rules.insert(
+            crate::fixed_rule::utilities::rerank::RERANK_RULE_NAME.to_string(),
+            Arc::new(Box::new(crate::fixed_rule::utilities::rerank::Rerank {
+                registry: rerankers.clone(),
+            })),
+        );
         let ret = Self {
             db: storage,
             temp_db: Default::default(),
@@ -422,7 +433,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             custom_bounded_meets: Default::default(),
             queries_count: Default::default(),
             running_queries: Default::default(),
-            fixed_rules: Arc::new(ShardedLock::new(DEFAULT_FIXED_RULES.clone())),
+            fixed_rules: Arc::new(ShardedLock::new(fixed_rules)),
+            rerankers,
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
@@ -1737,10 +1749,37 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     /// Unregister a custom fixed rule implementation.
     pub fn unregister_fixed_rule(&self, name: &str) -> Result<bool> {
-        if DEFAULT_FIXED_RULES.contains_key(name) {
+        if DEFAULT_FIXED_RULES.contains_key(name)
+            || name == crate::fixed_rule::utilities::rerank::RERANK_RULE_NAME
+        {
             bail!("Cannot unregister builtin fixed rule {}", name);
         }
         Ok(self.fixed_rules.write().unwrap().remove(name).is_some())
+    }
+
+    /// Register a re-rank model (kleos fork, hybrid C2) under `name`, making
+    /// it callable as `Rerank(..., model: name, ...)` from CozoScript and as
+    /// [`crate::RerankParams::model`] from [`Db::hybrid_search`]. Errors if
+    /// `name` is taken. In-memory and `Db`-scoped, like custom fixed rules.
+    pub fn register_reranker(
+        &self,
+        name: impl Into<String>,
+        reranker: Arc<dyn crate::Reranker>,
+    ) -> Result<()> {
+        match self.rerankers.write().unwrap().entry(name.into()) {
+            Entry::Vacant(ent) => {
+                ent.insert(reranker);
+                Ok(())
+            }
+            Entry::Occupied(ent) => {
+                bail!("A reranker with the name {} is already registered", ent.key())
+            }
+        }
+    }
+
+    /// Unregister a re-rank model. Returns whether one was registered.
+    pub fn unregister_reranker(&self, name: &str) -> bool {
+        self.rerankers.write().unwrap().remove(name).is_some()
     }
 
     /// Register a custom aggregate — a user-supplied ⊕ operator usable in

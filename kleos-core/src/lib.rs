@@ -97,7 +97,11 @@ pub use runtime::diagnostics::QueryWarning;
 pub use runtime::graph_projection::{
     GraphSource, GraphVariant, ProjectionVariant, VariantKey, VariantSpec,
 };
-pub use runtime::hybrid::{build_hybrid_query, GraphLeg, HybridList, HybridSearch, MmrParams};
+pub use fixed_rule::utilities::rerank::Reranker;
+pub use runtime::hybrid::{
+    build_hybrid_query, Fusion, GraphLeg, HybridList, HybridSearch, MmrParams, RerankParams,
+    ScoreNorm, WeightedFusionParams,
+};
 pub use runtime::relation::{decode_tuple_from_kv, try_decode_tuple_from_kv};
 pub use runtime::temp_store::RegularTempStore;
 pub use storage::mem::{new_cozo_mem, MemStorage, MemTx};
@@ -1068,6 +1072,42 @@ impl DbInstance {
             DbInstance::Sled(db) => db.unregister_fixed_rule(name),
             #[cfg(feature = "storage-tikv")]
             DbInstance::TiKv(db) => db.unregister_fixed_rule(name),
+        }
+    }
+    /// Dispatcher method. See [crate::Db::register_reranker].
+    pub fn register_reranker(
+        &self,
+        name: impl Into<String>,
+        reranker: std::sync::Arc<dyn Reranker>,
+    ) -> Result<()> {
+        match self {
+            DbInstance::Mem(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.register_reranker(name, reranker),
+        }
+    }
+    /// Dispatcher method. See [crate::Db::unregister_reranker].
+    pub fn unregister_reranker(&self, name: &str) -> bool {
+        match self {
+            DbInstance::Mem(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.unregister_reranker(name),
         }
     }
 

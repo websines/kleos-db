@@ -68,6 +68,177 @@ impl Default for MmrParams {
     }
 }
 
+/// How the configured legs are fused into one ranking.
+///
+/// `Rrf` (the default) fuses within-leg *ranks* with [`HybridSearch::rrf_k`];
+/// `Weighted` fuses *normalized scores* as a convex combination (Bruch et
+/// al., arXiv 2210.11934) via the `WeightedFusion` fixed rule.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub enum Fusion {
+    /// Reciprocal Rank Fusion (default).
+    #[default]
+    Rrf,
+    /// Convex combination of normalized leg scores.
+    Weighted(WeightedFusionParams),
+}
+
+/// Per-leg score normalization for [`Fusion::Weighted`]. Leg scores are
+/// higher-is-better: the vector leg emits `-distance`, the FTS leg the BM25
+/// score, graph legs `-hops` / `-path_cost`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum ScoreNorm {
+    /// `(s - min) / (max - min)` over the leg's hits (default).
+    MinMax,
+    /// `(s - mean) / std` over the leg's hits.
+    ZScore,
+    /// Raw scores, unnormalized.
+    Raw,
+    /// Theoretical: the score is a negated cosine distance in `[-2, 0]` (the
+    /// vector leg over a `Cosine` HNSW index) ⇒ `(1 + cos_sim) / 2`.
+    NegCosineDistance,
+    /// Theoretical: a cosine similarity in `[-1, 1]` ⇒ `(s + 1) / 2`.
+    CosineSimilarity,
+    /// Theoretical min-max for BM25 (lower bound 0): `s / max`.
+    Bm25,
+    /// A known fixed range ⇒ `(s - lo) / (hi - lo)`, clamped to `[0, 1]`.
+    Range {
+        /// Lower bound.
+        lo: f64,
+        /// Upper bound (`> lo`).
+        hi: f64,
+    },
+    /// Theoretical lower bound, observed max ⇒ `(s - lo) / (max - lo)`.
+    Tmm {
+        /// Theoretical lower bound of the score.
+        lo: f64,
+    },
+}
+
+impl ScoreNorm {
+    fn validate(&self) -> Result<()> {
+        match *self {
+            ScoreNorm::Range { lo, hi } => ensure!(
+                lo.is_finite() && hi.is_finite() && hi > lo,
+                "hybrid_search: ScoreNorm::Range needs finite bounds with hi > lo"
+            ),
+            ScoreNorm::Tmm { lo } => ensure!(
+                lo.is_finite(),
+                "hybrid_search: ScoreNorm::Tmm needs a finite lower bound"
+            ),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The `WeightedFusion` option literal for this normalization.
+    fn literal(&self) -> String {
+        match *self {
+            ScoreNorm::MinMax => "'minmax'".into(),
+            ScoreNorm::ZScore => "'zscore'".into(),
+            ScoreNorm::Raw => "'none'".into(),
+            ScoreNorm::NegCosineDistance => "'neg_cosine_distance'".into(),
+            ScoreNorm::CosineSimilarity => "'cosine_similarity'".into(),
+            ScoreNorm::Bm25 => "'bm25'".into(),
+            ScoreNorm::Range { lo, hi } => format!("['range', {}, {}]", fmt_f64(lo), fmt_f64(hi)),
+            ScoreNorm::Tmm { lo } => format!("['tmm', {}]", fmt_f64(lo)),
+        }
+    }
+}
+
+/// Parameters for [`Fusion::Weighted`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct WeightedFusionParams {
+    /// `(leg label, weight)` pairs — labels are `"semantic"` (vector leg),
+    /// `"text"` (FTS leg), and each graph / extra leg's own label. Empty =
+    /// equal weights; otherwise **every** configured leg must be named.
+    /// Weights must be finite and `>= 0` (sum them to 1 for a convex
+    /// combination).
+    pub weights: Vec<(String, f64)>,
+    /// Normalization applied to every leg without an override. Default
+    /// [`ScoreNorm::MinMax`].
+    pub norm: ScoreNorm,
+    /// Per-leg normalization overrides, `(leg label, norm)`.
+    pub leg_norms: Vec<(String, ScoreNorm)>,
+}
+
+impl Default for WeightedFusionParams {
+    fn default() -> Self {
+        WeightedFusionParams {
+            weights: Vec::new(),
+            norm: ScoreNorm::MinMax,
+            leg_norms: Vec::new(),
+        }
+    }
+}
+
+impl WeightedFusionParams {
+    /// Weighted fusion with the given `(leg label, weight)` pairs and min-max
+    /// normalization.
+    pub fn new<L: Into<String>>(weights: impl IntoIterator<Item = (L, f64)>) -> Self {
+        WeightedFusionParams {
+            weights: weights.into_iter().map(|(l, w)| (l.into(), w)).collect(),
+            ..Default::default()
+        }
+    }
+    /// Set the default normalization.
+    pub fn with_norm(mut self, norm: ScoreNorm) -> Self {
+        self.norm = norm;
+        self
+    }
+    /// Override the normalization of one leg.
+    pub fn with_leg_norm(mut self, label: impl Into<String>, norm: ScoreNorm) -> Self {
+        self.leg_norms.push((label.into(), norm));
+        self
+    }
+}
+
+/// A re-rank stage applied after fusion (and before MMR): the top `top_n`
+/// fused candidates are re-scored by a model registered with
+/// [`crate::Db::register_reranker`], via the `Rerank` fixed rule. Only the
+/// re-scored candidates are returned, ordered by the model's score.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct RerankParams {
+    /// Registered reranker name.
+    pub model: String,
+    /// How many fused candidates to re-score (`>= 1`). Default `50`.
+    pub top_n: usize,
+    /// Column of the base relation holding the text the model reads.
+    /// Default `"text"`.
+    pub text_field: String,
+    /// The query the model scores against. `None` = [`HybridSearch::query_text`]
+    /// (set this when the FTS query is not natural language, or there is no
+    /// FTS leg).
+    pub query: Option<String>,
+    /// Split the model call into batches of this size (`0` = one call).
+    pub batch_size: usize,
+}
+
+impl Default for RerankParams {
+    fn default() -> Self {
+        RerankParams {
+            model: String::new(),
+            top_n: 50,
+            text_field: "text".into(),
+            query: None,
+            batch_size: 0,
+        }
+    }
+}
+
+impl RerankParams {
+    /// Re-rank with the reranker registered as `model`, default settings.
+    pub fn new(model: impl Into<String>) -> Self {
+        RerankParams {
+            model: model.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// An extra ranked list folded into the fusion alongside the vector and keyword
 /// legs — e.g. an n-hop graph-traversal signal.
 ///
@@ -258,8 +429,13 @@ pub struct HybridSearch {
     /// Typed k-hop graph-proximity legs folded into the fusion (native 3-way
     /// fused recall). See [`GraphLeg`].
     pub graph_legs: Vec<GraphLeg>,
-    /// RRF `k` constant (rank-bias damping). Default `60.0`.
+    /// RRF `k` constant (rank-bias damping). Default `60.0`. Only used by
+    /// [`Fusion::Rrf`].
     pub rrf_k: f64,
+    /// Fusion function. Default [`Fusion::Rrf`].
+    pub fusion: Fusion,
+    /// Optional re-rank stage after fusion (before MMR). `None` = no re-rank.
+    pub rerank: Option<RerankParams>,
     /// Optional MMR diversity rerank. `None` returns the fused ranking directly.
     pub mmr: Option<MmrParams>,
     /// Max rows when no MMR rerank is applied (MMR uses its own `k`).
@@ -293,6 +469,8 @@ impl Default for HybridSearch {
             extra_lists: Vec::new(),
             graph_legs: Vec::new(),
             rrf_k: 60.0,
+            fusion: Fusion::Rrf,
+            rerank: None,
             mmr: None,
             limit: 10,
             detailed: false,
@@ -502,6 +680,67 @@ pub fn build_hybrid_query(q: &HybridSearch) -> Result<(String, BTreeMap<String, 
         ensure!(
             m.lambda.is_finite(),
             "hybrid_search: mmr.lambda must be finite"
+        );
+    }
+    // Weighted fusion: every named leg must exist (a typo'd label would
+    // otherwise surface as a runtime "no weight" error, or silently never
+    // match), and with explicit weights every configured leg needs one.
+    if let Fusion::Weighted(w) = &q.fusion {
+        let mut configured: Vec<&str> = Vec::new();
+        if q.vector_index.is_some() {
+            configured.push("semantic");
+        }
+        if q.fts_index.is_some() {
+            configured.push("text");
+        }
+        configured.extend(q.extra_lists.iter().map(|l| l.label.as_str()));
+        configured.extend(q.graph_legs.iter().map(|g| g.label.as_str()));
+        w.norm.validate()?;
+        let mut weighted = BTreeSet::new();
+        for (l, x) in &w.weights {
+            ensure!(
+                configured.contains(&l.as_str()),
+                "hybrid_search: weighted fusion names leg '{l}', which is not configured \
+                 (configured legs: {configured:?})"
+            );
+            ensure!(
+                weighted.insert(l.as_str()),
+                "hybrid_search: weighted fusion names leg '{l}' twice"
+            );
+            ensure!(
+                x.is_finite() && *x >= 0.0,
+                "hybrid_search: weight for leg '{l}' must be finite and >= 0"
+            );
+        }
+        if !w.weights.is_empty() {
+            for c in &configured {
+                ensure!(
+                    weighted.contains(c),
+                    "hybrid_search: weighted fusion has no weight for configured leg '{c}'"
+                );
+            }
+        }
+        let mut normed = BTreeSet::new();
+        for (l, n) in &w.leg_norms {
+            ensure!(
+                configured.contains(&l.as_str()),
+                "hybrid_search: leg_norms names leg '{l}', which is not configured \
+                 (configured legs: {configured:?})"
+            );
+            ensure!(
+                normed.insert(l.as_str()),
+                "hybrid_search: leg_norms names leg '{l}' twice"
+            );
+            n.validate()?;
+        }
+    }
+    if let Some(r) = &q.rerank {
+        ensure!(!r.model.is_empty(), "hybrid_search: rerank.model is empty");
+        ensure!(r.top_n > 0, "hybrid_search: rerank.top_n must be > 0");
+        validate_ident(&r.text_field, "rerank.text_field")?;
+        ensure!(
+            !r.query.as_deref().unwrap_or(q.query_text.as_str()).is_empty(),
+            "hybrid_search: rerank needs a query — set rerank.query (or query_text)"
         );
     }
 
@@ -747,31 +986,95 @@ pub fn build_hybrid_query(q: &HybridSearch) -> Result<(String, BTreeMap<String, 
         .iter()
         .map(|(_, label)| format!(", list_id != '{label}'"))
         .collect();
+    // The fusion call: RRF (default — byte-identical to previous releases) or
+    // weighted convex fusion.
+    let fuse = |detailed: bool| -> String {
+        let d = if detailed { ", detailed: true" } else { "" };
+        match &q.fusion {
+            Fusion::Rrf => format!("ReciprocalRankFusion(combined[__lid, id, score], k: {rrf_k}{d})"),
+            Fusion::Weighted(w) => {
+                let mut o = String::new();
+                if !w.weights.is_empty() {
+                    let ws: Vec<String> = w
+                        .weights
+                        .iter()
+                        .map(|(l, x)| format!("['{l}', {}]", fmt_f64(*x)))
+                        .collect();
+                    write!(o, ", weights: [{}]", ws.join(", ")).unwrap();
+                }
+                write!(o, ", norm: {}", w.norm.literal()).unwrap();
+                if !w.leg_norms.is_empty() {
+                    let ns: Vec<String> = w
+                        .leg_norms
+                        .iter()
+                        .map(|(l, n)| format!("['{l}', {}]", n.literal()))
+                        .collect();
+                    write!(o, ", norms: [{}]", ns.join(", ")).unwrap();
+                }
+                format!("WeightedFusion(combined[__lid, id, score]{o}{d})")
+            }
+        }
+    };
+    // Optional re-rank stage: fuse, join the text column, re-score the top_n
+    // with the registered model. Model name and query travel as params.
+    let rerank_call = q.rerank.as_ref().map(|r| {
+        let mut c = format!(
+            "Rerank(rr_in[id, __text, score], model: $rr_model, query: $rr_query, top_n: {}",
+            r.top_n
+        );
+        if r.batch_size > 0 {
+            write!(c, ", batch_size: {}", r.batch_size).unwrap();
+        }
+        c.push(')');
+        c
+    });
+    if let Some(r) = &q.rerank {
+        writeln!(s, "fused[id, score] <~ {}", fuse(false)).unwrap();
+        writeln!(
+            s,
+            "rr_in[id, __text, score] := fused[id, score], *{rel}{{ {idc}: id, {tf}: __text }}",
+            tf = r.text_field,
+        )
+        .unwrap();
+        params.insert("rr_model".to_string(), DataValue::from(r.model.as_str()));
+        let rq = r.query.as_deref().unwrap_or(q.query_text.as_str());
+        params.insert("rr_query".to_string(), DataValue::from(rq));
+    }
+    // How a detailed row gets its `score`: the fusion score, or — re-ranked —
+    // the model's score (the per-leg columns still explain the fusion).
+    let detail_atom = if q.rerank.is_some() {
+        "reranked[id, score], detail[id, __fs, list_id, leg_rank, leg_score]"
+    } else {
+        "detail[id, score, list_id, leg_rank, leg_score]"
+    };
     match (&q.mmr, q.detailed) {
         (None, false) => {
-            writeln!(
-                s,
-                "?[id, score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: {rrf_k})"
-            )
-            .unwrap();
+            match &rerank_call {
+                Some(rc) => writeln!(s, "?[id, score] <~ {rc}").unwrap(),
+                None => writeln!(s, "?[id, score] <~ {}", fuse(false)).unwrap(),
+            }
             writeln!(s, ":order -score").unwrap();
             writeln!(s, ":limit {}", q.limit).unwrap();
         }
         (None, true) if witness_head => {
+            if let Some(rc) = &rerank_call {
+                writeln!(s, "reranked[id, score] <~ {rc}").unwrap();
+            }
             writeln!(
                 s,
-                "detail[id, score, list_id, leg_rank, leg_score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: {rrf_k}, detailed: true)"
+                "detail[id, score, list_id, leg_rank, leg_score] <~ {}",
+                fuse(true)
             )
             .unwrap();
             writeln!(
                 s,
-                "?[id, score, list_id, leg_rank, leg_score, parent, depth] := detail[id, score, list_id, leg_rank, leg_score]{non_budgeted_guard}, parent = null, depth = null"
+                "?[id, score, list_id, leg_rank, leg_score, parent, depth] := {detail_atom}{non_budgeted_guard}, parent = null, depth = null"
             )
             .unwrap();
             for (i, label) in &budgeted_labels {
                 writeln!(
                     s,
-                    "?[id, score, list_id, leg_rank, leg_score, parent, depth] := detail[id, score, list_id, leg_rank, leg_score], list_id == '{label}', hg{i}_bt[id, _, parent, depth]"
+                    "?[id, score, list_id, leg_rank, leg_score, parent, depth] := {detail_atom}, list_id == '{label}', hg{i}_bt[id, _, parent, depth]"
                 )
                 .unwrap();
             }
@@ -782,23 +1085,45 @@ pub fn build_hybrid_query(q: &HybridSearch) -> Result<(String, BTreeMap<String, 
             // Long format: one row per (item, contributing leg). Widen the row
             // limit by the leg count so the top `limit` items are always fully
             // covered; order keeps an item's rows adjacent.
-            writeln!(
-                s,
-                "?[id, score, list_id, leg_rank, leg_score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: {rrf_k}, detailed: true)"
-            )
-            .unwrap();
+            match &rerank_call {
+                Some(rc) => {
+                    writeln!(s, "reranked[id, score] <~ {rc}").unwrap();
+                    writeln!(
+                        s,
+                        "detail[id, score, list_id, leg_rank, leg_score] <~ {}",
+                        fuse(true)
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "?[id, score, list_id, leg_rank, leg_score] := {detail_atom}"
+                    )
+                    .unwrap();
+                }
+                None => writeln!(
+                    s,
+                    "?[id, score, list_id, leg_rank, leg_score] <~ {}",
+                    fuse(true)
+                )
+                .unwrap(),
+            }
             writeln!(s, ":order -score, id, list_id").unwrap();
             writeln!(s, ":limit {}", q.limit.saturating_mul(num_legs)).unwrap();
         }
         (Some(m), detailed) => {
+            let src = match &rerank_call {
+                Some(rc) => {
+                    writeln!(s, "reranked[id, score] <~ {rc}").unwrap();
+                    "reranked"
+                }
+                None => {
+                    writeln!(s, "fused[id, score] <~ {}", fuse(false)).unwrap();
+                    "fused"
+                }
+            };
             writeln!(
                 s,
-                "fused[id, score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: {rrf_k})"
-            )
-            .unwrap();
-            writeln!(
-                s,
-                "cand[id, score, __emb] := fused[id, score], *{rel}{{ {idc}: id, {emb}: __emb }}",
+                "cand[id, score, __emb] := {src}[id, score], *{rel}{{ {idc}: id, {emb}: __emb }}",
                 emb = m.embedding_col,
             )
             .unwrap();
@@ -814,26 +1139,27 @@ pub fn build_hybrid_query(q: &HybridSearch) -> Result<(String, BTreeMap<String, 
                 .unwrap();
                 writeln!(
                     s,
-                    "detail[id, score, list_id, leg_rank, leg_score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: {rrf_k}, detailed: true)"
+                    "detail[id, score, list_id, leg_rank, leg_score] <~ {}",
+                    fuse(true)
                 )
                 .unwrap();
                 if witness_head {
                     writeln!(
                         s,
-                        "?[id, rank, score, list_id, leg_rank, leg_score, parent, depth] := mmrsel[id, rank], detail[id, score, list_id, leg_rank, leg_score]{non_budgeted_guard}, parent = null, depth = null"
+                        "?[id, rank, score, list_id, leg_rank, leg_score, parent, depth] := mmrsel[id, rank], {detail_atom}{non_budgeted_guard}, parent = null, depth = null"
                     )
                     .unwrap();
                     for (i, label) in &budgeted_labels {
                         writeln!(
                             s,
-                            "?[id, rank, score, list_id, leg_rank, leg_score, parent, depth] := mmrsel[id, rank], detail[id, score, list_id, leg_rank, leg_score], list_id == '{label}', hg{i}_bt[id, _, parent, depth]"
+                            "?[id, rank, score, list_id, leg_rank, leg_score, parent, depth] := mmrsel[id, rank], {detail_atom}, list_id == '{label}', hg{i}_bt[id, _, parent, depth]"
                         )
                         .unwrap();
                     }
                 } else {
                     writeln!(
                         s,
-                        "?[id, rank, score, list_id, leg_rank, leg_score] := mmrsel[id, rank], detail[id, score, list_id, leg_rank, leg_score]"
+                        "?[id, rank, score, list_id, leg_rank, leg_score] := mmrsel[id, rank], {detail_atom}"
                     )
                     .unwrap();
                 }
@@ -1042,6 +1368,107 @@ mod tests {
              :order -score, id, list_id\n\
              :limit 20\n"
         );
+    }
+
+    #[test]
+    fn weighted_fusion_script_is_byte_stable() {
+        let q = HybridSearch {
+            fusion: Fusion::Weighted(
+                WeightedFusionParams::new([("semantic", 0.7), ("text", 0.3)])
+                    .with_leg_norm("semantic", ScoreNorm::NegCosineDistance)
+                    .with_leg_norm("text", ScoreNorm::Range { lo: 0.0, hi: 20.0 }),
+            ),
+            ..both_legs()
+        };
+        assert_eq!(
+            script(&q),
+            "sem[id, score] := ~docs:vec{ id: id | query: vec($qv), k: 10, ef: 50, bind_distance: __dist }, score = -__dist\n\
+             txt[id, score] := ~docs:fts{ id: id | query: $qt, k: 10, bind_score: score }\n\
+             combined[__lid, id, score] := sem[id, score], __lid = 'semantic'\n\
+             combined[__lid, id, score] := txt[id, score], __lid = 'text'\n\
+             ?[id, score] <~ WeightedFusion(combined[__lid, id, score], weights: [['semantic', 0.7], ['text', 0.3]], norm: 'minmax', norms: [['semantic', 'neg_cosine_distance'], ['text', ['range', 0.0, 20.0]]])\n\
+             :order -score\n\
+             :limit 10\n"
+        );
+    }
+
+    #[test]
+    fn rerank_script_is_byte_stable() {
+        let q = HybridSearch {
+            rerank: Some(RerankParams {
+                top_n: 20,
+                ..RerankParams::new("ce")
+            }),
+            ..both_legs()
+        };
+        assert_eq!(
+            script(&q),
+            "sem[id, score] := ~docs:vec{ id: id | query: vec($qv), k: 10, ef: 50, bind_distance: __dist }, score = -__dist\n\
+             txt[id, score] := ~docs:fts{ id: id | query: $qt, k: 10, bind_score: score }\n\
+             combined[__lid, id, score] := sem[id, score], __lid = 'semantic'\n\
+             combined[__lid, id, score] := txt[id, score], __lid = 'text'\n\
+             fused[id, score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: 60.0)\n\
+             rr_in[id, __text, score] := fused[id, score], *docs{ id: id, text: __text }\n\
+             ?[id, score] <~ Rerank(rr_in[id, __text, score], model: $rr_model, query: $rr_query, top_n: 20)\n\
+             :order -score\n\
+             :limit 10\n"
+        );
+        let (_, params) = build_hybrid_query(&q).unwrap();
+        assert_eq!(params["rr_model"], DataValue::from("ce"));
+        // the rerank query defaults to the FTS query text
+        assert_eq!(params["rr_query"], DataValue::from("cat"));
+        // detailed + MMR + rerank: MMR consumes the re-ranked scores and the
+        // detail rows carry the model score
+        let q = HybridSearch {
+            detailed: true,
+            mmr: Some(MmrParams::default()),
+            ..q
+        };
+        let sc = script(&q);
+        assert!(sc.contains("reranked[id, score] <~ Rerank("), "{sc}");
+        assert!(sc.contains("cand[id, score, __emb] := reranked[id, score]"), "{sc}");
+        assert!(sc.contains(
+            ":= mmrsel[id, rank], reranked[id, score], detail[id, __fs, list_id, leg_rank, leg_score]"
+        ), "{sc}");
+    }
+
+    #[test]
+    fn fusion_and_rerank_validation() {
+        let w = |p: WeightedFusionParams| HybridSearch {
+            fusion: Fusion::Weighted(p),
+            ..both_legs()
+        };
+        assert!(err(&w(WeightedFusionParams::new([("semantic", 1.0), ("txt", 1.0)])))
+            .contains("'txt', which is not configured"));
+        assert!(err(&w(WeightedFusionParams::new([("semantic", 1.0)])))
+            .contains("no weight for configured leg 'text'"));
+        assert!(err(&w(WeightedFusionParams::new([("semantic", -1.0), ("text", 1.0)])))
+            .contains("finite and >= 0"));
+        assert!(err(&w(WeightedFusionParams::default()
+            .with_norm(ScoreNorm::Range { lo: 1.0, hi: 1.0 })))
+        .contains("hi > lo"));
+        // equal weights (no weights given) is fine
+        assert!(build_hybrid_query(&w(WeightedFusionParams::default())).is_ok());
+
+        let r = |p: RerankParams| HybridSearch {
+            rerank: Some(p),
+            ..both_legs()
+        };
+        assert!(err(&r(RerankParams::default())).contains("rerank.model is empty"));
+        assert!(err(&r(RerankParams {
+            text_field: "a b".into(),
+            ..RerankParams::new("ce")
+        }))
+        .contains("text_field"));
+        // vector-only + rerank has no query text to fall back on
+        let q = HybridSearch {
+            relation: "docs".into(),
+            vector_index: Some("vec".into()),
+            query_vector: vec![1.0],
+            rerank: Some(RerankParams::new("ce")),
+            ..Default::default()
+        };
+        assert!(err(&q).contains("rerank needs a query"));
     }
 
     #[test]
