@@ -158,7 +158,53 @@ last result twice (in query order and sorted, for the diff).
 are under contention). N point-lookup subscriptions with distinct parameters (no dedup);
 `hot` = all N on the written relation, `cold` = all N on another relation.
 
-RESULTS_TABLE
+Best of 3 interleaved runs, load average about 3 at the time (other agents' builds
+had paused; earlier runs under load averages of 40 to 78 were 2 to 3 times slower across the
+board). Throughput: 20,000 single-row `:put` transactions from one thread, each to a new
+key, so no subscribed result changes but every `hot` subscription is re-evaluated.
+
+| N | subs on | txns/s | writer CPU µs/txn | process CPU ms | re-evaluations | worker rounds | catch-up after last write |
+|---|---|---|---|---|---|---|---|
+| 0 | – | 32,288 | 30.9 | 619 | 0 | – | – |
+| 10 | cold | 32,801 | 30.5 | 610 | 0 | – | – |
+| 100 | cold | 31,656 | 31.6 | 632 | 0 | – | – |
+| 1000 | cold | 30,917 | 32.3 | 646 | 0 | – | – |
+| 10 | hot | 14,811 | 49.1 | 2,008 | 20,200 | 2,020 | 3 ms |
+| 100 | hot | 14,204 | 50.6 | 2,082 | 20,500 | 205 | 6 ms |
+| 1000 | hot | 14,358 | 50.5 | 2,143 | 22,000 | 22 | 66 ms |
+
+Latency: 1000 writes, 2 ms apart, to a probe key whose subscription the worker evaluates
+last (after all N others). Measured from the start of the probe's `:put` call (median
+36–67 µs) to delivery of the first delta that includes it.
+
+| N | subs on | p50 | p99 | max | deltas / writes |
+|---|---|---|---|---|---|
+| 0 | – | 77 µs | 225 µs | 291 µs | 1000 / 1000 |
+| 1000 | cold | 95 µs | 323 µs | 590 µs | 1000 / 1000 |
+| 10 | hot | 362 µs | 542 µs | 761 µs | 1000 / 1000 |
+| 100 | hot | 1.8 ms | 3.9 ms | 10.6 ms | 856 / 1000 |
+| 1000 | hot | 18.4 ms | 37.5 ms | 61.2 ms | 85 / 1000 |
+
+Reading it:
+
+- Subscriptions on relations a write does not touch cost the writer nothing measurable
+  at 1000 subscriptions (the filter is a map lookup per dirty relation).
+- Subscriptions on the written relation halve single-writer throughput on `mem`,
+  independently of N: the worker re-evaluates continuously, and on `mem` every read
+  transaction holds the store-wide lock, so its reads and the writer's commits take turns.
+  Coalescing is what keeps N from mattering: 20,000 commits cost 2,020 rounds at N = 10
+  and 22 rounds at N = 1000.
+- A re-evaluation is a full query run (parse, compile, read transaction, diff). In the
+  paced N = 1000 hot run a round of 1000 point lookups took about 26 ms (~26 µs each), so
+  a write waits for the rest of the current round and possibly one more: delivery latency
+  grows linearly with the number of affected groups. Writes 2 ms apart were coalesced
+  about 12 to 1. With the writer running flat out, evaluations slow further because they
+  share the `mem` lock with it.
+- sqlite (2,000 writes, best of 3, load average 10–78, so noisy): about 2.7 ms per commit
+  dominates. 0 subscriptions: 208 txns/s; 1000 cold: 169; 1000 hot: 163. Latency p50 2.9 ms
+  with no or cold subscriptions, 3.5 ms with 10 hot, 80 ms with 1000 hot (each evaluation
+  opens a sqlite read; 12 deltas for 300 writes). This run also exposed a pre-existing
+  sqlite race (§9).
 
 ## 9. Limits and caveats
 
@@ -174,6 +220,14 @@ RESULTS_TABLE
   alive, even if every other handle was dropped.
 - Imperative scripts cannot be subscribed (split into a single query, or subscribe to
   each part).
+- Found and fixed while benchmarking: on sqlite, a read whose point lookup found a row
+  left its cached statement holding a SHARED lock after the in-process lock was
+  released, so a concurrent writer could fail with `database is locked (code 5)`. Any
+  concurrent reader could trigger it; subscriptions, which read right after every
+  commit, triggered it within seconds. `SqliteTx::drop` now finalizes its statements
+  first. A debug-build regression test did not reproduce the race (the window is too
+  narrow), so the evidence is the release benchmark: it failed in its first run before
+  the fix and completed 3 × 14 configurations after it.
 - `kleos-bin`'s SSE stream polls for client disconnect once a second, so a dropped
   client's subscription lingers for up to a second.
 
