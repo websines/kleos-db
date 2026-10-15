@@ -78,16 +78,17 @@ fn unclosed_block_comments_parse_in_linear_time() {
     assert!(parses_quickly(nested));
 }
 
-/// The block-comment rule as it was before the linear-time rewrite, with PEG
-/// semantics (ordered choice, greedy repetition that never backtracks):
+/// The block-comment rule before the linear-time rewrite, with PEG semantics
+/// (ordered choice, greedy repetition that never backtracks):
 /// `"/*" ~ (BLOCK_COMMENT | !"*/" ~ ANY)* ~ "*/"`. Returns the end position.
-fn reference_block_comment(s: &[u8], p: usize) -> Option<usize> {
+/// Exponential itself, so only usable on short strings.
+fn old_block_comment(s: &[u8], p: usize) -> Option<usize> {
     if !s[p..].starts_with(b"/*") {
         return None;
     }
     let mut i = p + 2;
     loop {
-        if let Some(end) = reference_block_comment(s, i) {
+        if let Some(end) = old_block_comment(s, i) {
             i = end;
         } else if i < s.len() && !s[i..].starts_with(b"*/") {
             i += 1;
@@ -98,13 +99,36 @@ fn reference_block_comment(s: &[u8], p: usize) -> Option<usize> {
     s[i..].starts_with(b"*/").then_some(i + 2)
 }
 
-/// Whether `s` is entirely whitespace and block comments under the reference rule.
-fn reference_is_trivia(s: &[u8]) -> bool {
+/// Rust-style nesting: a depth-counting lexer. Returns the end position.
+fn nested_block_comment(s: &[u8], p: usize) -> Option<usize> {
+    if !s[p..].starts_with(b"/*") {
+        return None;
+    }
+    let (mut i, mut depth) = (p + 2, 1);
+    while i < s.len() {
+        if s[i..].starts_with(b"/*") {
+            depth += 1;
+            i += 2;
+        } else if s[i..].starts_with(b"*/") {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return Some(i);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Whether `s` is entirely spaces and block comments under `comment`.
+fn is_trivia(s: &[u8], comment: fn(&[u8], usize) -> Option<usize>) -> bool {
     let mut i = 0;
     while i < s.len() {
         if s[i] == b' ' {
             i += 1;
-        } else if let Some(end) = reference_block_comment(s, i) {
+        } else if let Some(end) = comment(s, i) {
             i = end;
         } else {
             return false;
@@ -113,13 +137,16 @@ fn reference_is_trivia(s: &[u8]) -> bool {
     true
 }
 
-/// The rewritten rule must accept exactly the comments the old one did:
-/// compare against the reference on every string over `/ * a ␣` up to length 8.
+/// The rule must nest exactly like Rust, and accept nothing the old rule
+/// rejected. The only comments it gives up are ones where a `/*/` closed the
+/// comment because the `/*` it starts never closed (`/* a /*/`): those are now
+/// a parse error rather than a silent reinterpretation. Checked on every
+/// string over `/ * a ␣` up to length 8.
 #[test]
-fn block_comments_accept_the_same_language_as_before() {
+fn block_comments_nest_like_rust() {
     let db = DbInstance::new("mem", "", "").unwrap();
     let alphabet = *b"/*a ";
-    let mut checked = 0;
+    let (mut checked, mut dropped) = (0, 0);
     for len in 0..=8u32 {
         for mut n in 0..4usize.pow(len) {
             let mut s = Vec::with_capacity(len as usize);
@@ -132,13 +159,38 @@ fn block_comments_accept_the_same_language_as_before() {
             let parsed = db
                 .run_script(&script, BTreeMap::new(), ScriptMutability::Immutable)
                 .is_ok();
+            let bytes = text.as_bytes();
             assert_eq!(
                 parsed,
-                reference_is_trivia(text.as_bytes()),
+                is_trivia(bytes, nested_block_comment),
                 "comment text {text:?}"
             );
+            let old = is_trivia(bytes, old_block_comment);
+            assert!(!parsed || old, "newly accepted: {text:?}");
+            if old && !parsed {
+                assert!(text.contains("/*/"), "unexpectedly dropped: {text:?}");
+                dropped += 1;
+            }
             checked += 1;
         }
     }
     assert_eq!(checked, (0..=8).map(|l| 4usize.pow(l)).sum::<usize>());
+    assert!(dropped > 0);
+}
+
+/// Found by fuzzing: the old rule's fallback (a `/*` whose nested comment fails
+/// is read as text) made runs of `/*/` exponential, closable or not.
+#[test]
+fn slash_star_slash_runs_parse_in_linear_time() {
+    let n = 200;
+    for text in [
+        format!("/*{}", "/*/".repeat(n)),
+        "a /*/ ".repeat(n),
+        format!("?[x] <- [[1]] {}", "/*/ ".repeat(n)),
+        "?[x,y /*eted?,*[ y/x  /*/:dehe/t\n".repeat(n),
+    ] {
+        assert!(!parses_quickly(text));
+    }
+    let closed = format!("{}{} ?[x] <- [[1]]", "/*/ ".repeat(n), "*/ ".repeat(n));
+    assert!(parses_quickly(closed));
 }

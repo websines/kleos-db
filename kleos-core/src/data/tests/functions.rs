@@ -1522,6 +1522,50 @@ fn generated_sizes_are_validated() {
     assert_eq!(list("?[a] := a = length(rand_vec(3))"), json!(3));
 }
 
+#[test]
+fn integer_arithmetic_overflow_is_an_error() {
+    let db = DbInstance::default();
+    let val = |s: &str| db.run_default(s).unwrap().into_json()["rows"][0][0].clone();
+    let err = |s: &str| format!("{:?}", db.run_default(s).unwrap_err());
+    const MIN: &str = "(-9223372036854775807 - 1)";
+
+    // Found by fuzzing: these panicked in debug builds and wrapped in release.
+    assert!(err("?[a] := a = 77777777777777776 * 777777777777777").contains("overflow"));
+    assert!(err("?[a] := a = 9223372036854775807 + 1").contains("overflow"));
+    assert!(err(&format!("?[a] := a = {MIN} - 1")).contains("overflow"));
+    assert!(err(&format!("?[a] := a = -{MIN}")).contains("overflow"));
+    assert!(err(&format!("?[a] := a = abs({MIN})")).contains("overflow"));
+    assert!(err("?[a] := a = mul(4611686018427387904, 1, 2)").contains("overflow"));
+
+    // `i64::MIN % -1` panicked even in release builds; its value is 0.
+    assert_eq!(val(&format!("?[a] := a = {MIN} % -1")), json!(0));
+    assert_eq!(
+        val(&format!("?[a] := a = {MIN} + 1")),
+        json!(-9223372036854775807i64)
+    );
+    assert_eq!(
+        val("?[a] := a = 3037000499 * 3037000499"),
+        json!(9223372030926249001i64)
+    );
+    // A float operand still takes the float path.
+    assert_eq!(
+        val("?[a] := a = 9223372036854775807 * 2.0"),
+        json!(1.8446744073709552e19)
+    );
+}
+
+#[test]
+fn variadic_vector_multiplication_multiplies() {
+    let db = DbInstance::default();
+    let val = |s: &str| db.run_default(s).unwrap().into_json()["rows"][0][0].clone();
+    // The prefix used to be folded with `add_vecs`, giving (a + b) * c.
+    assert_eq!(
+        val("?[a] := a = mul(vec([1, 2]), vec([3, 4]), vec([5, 6]))"),
+        json!([15.0, 48.0])
+    );
+    assert_eq!(val("?[a] := a = mul(vec([1, 2]), 3)"), json!([3.0, 6.0]));
+}
+
 // ---- kleos fork (0.13.0): datetime function library ----
 
 fn dt_secs(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DataValue {

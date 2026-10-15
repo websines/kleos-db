@@ -380,12 +380,20 @@ pub(crate) fn op_le(args: &[DataValue]) -> Result<DataValue> {
 }
 
 define_op!(OP_ADD, 0, true);
+/// Integer arithmetic is checked: a plain operator panics in debug builds and
+/// silently wraps in release builds, and a wrapped value is a wrong answer.
+fn int_overflow(op: &str) -> miette::Report {
+    miette!("integer overflow in '{}'", op)
+}
+
 pub(crate) fn op_add(args: &[DataValue]) -> Result<DataValue> {
     let mut i_accum = 0i64;
     let mut f_accum = 0.0f64;
     for arg in args {
         match arg {
-            DataValue::Num(Num::Int(i)) => i_accum += i,
+            DataValue::Num(Num::Int(i)) => {
+                i_accum = i_accum.checked_add(*i).ok_or_else(|| int_overflow("+"))?
+            }
             DataValue::Num(Num::Float(f)) => f_accum += f,
             DataValue::Vec(_) => return add_vecs(args),
             _ => bail!("addition requires numbers"),
@@ -483,9 +491,9 @@ pub(crate) fn op_min(args: &[DataValue]) -> Result<DataValue> {
 define_op!(OP_SUB, 2, false);
 pub(crate) fn op_sub(args: &[DataValue]) -> Result<DataValue> {
     Ok(match (&args[0], &args[1]) {
-        (DataValue::Num(Num::Int(a)), DataValue::Num(Num::Int(b))) => {
-            DataValue::Num(Num::Int(*a - *b))
-        }
+        (DataValue::Num(Num::Int(a)), DataValue::Num(Num::Int(b))) => DataValue::Num(Num::Int(
+            a.checked_sub(*b).ok_or_else(|| int_overflow("-"))?,
+        )),
         (DataValue::Num(Num::Float(a)), DataValue::Num(Num::Float(b))) => {
             DataValue::Num(Num::Float(*a - *b))
         }
@@ -547,7 +555,9 @@ pub(crate) fn op_mul(args: &[DataValue]) -> Result<DataValue> {
     let mut f_accum = 1.0f64;
     for arg in args {
         match arg {
-            DataValue::Num(Num::Int(i)) => i_accum *= i,
+            DataValue::Num(Num::Int(i)) => {
+                i_accum = i_accum.checked_mul(*i).ok_or_else(|| int_overflow("*"))?
+            }
             DataValue::Num(Num::Float(f)) => f_accum *= f,
             DataValue::Vec(_) => return mul_vecs(args),
             _ => bail!("multiplication requires numbers"),
@@ -565,11 +575,11 @@ fn mul_vecs(args: &[DataValue]) -> Result<DataValue> {
         return Ok(args[0].clone());
     }
     let (last, first) = args.split_last().unwrap();
-    let first = add_vecs(first)?;
+    let first = mul_vecs(first)?;
     match (first, last) {
         (DataValue::Vec(a), DataValue::Vec(b)) => {
             if a.len() != b.len() {
-                bail!("can only add vectors of the same length");
+                bail!("can only multiply vectors of the same length");
             }
             match (a, b) {
                 (Vector::F32(a), Vector::F32(b)) => Ok(DataValue::Vec(Vector::F32(a * b))),
@@ -587,7 +597,7 @@ fn mul_vecs(args: &[DataValue]) -> Result<DataValue> {
         (DataValue::Vec(a), b) => {
             let f = b
                 .get_float()
-                .ok_or_else(|| miette!("can only add numbers to vectors"))?;
+                .ok_or_else(|| miette!("can only multiply vectors by numbers"))?;
             match a {
                 Vector::F32(mut v) => {
                     v *= f as f32;
@@ -602,13 +612,13 @@ fn mul_vecs(args: &[DataValue]) -> Result<DataValue> {
         (a, DataValue::Vec(b)) => {
             let f = a
                 .get_float()
-                .ok_or_else(|| miette!("can only add numbers to vectors"))?;
+                .ok_or_else(|| miette!("can only multiply vectors by numbers"))?;
             match b {
                 Vector::F32(v) => Ok(DataValue::Vec(Vector::F32(v * f as f32))),
                 Vector::F64(v) => Ok(DataValue::Vec(Vector::F64(v * f))),
             }
         }
-        _ => bail!("addition requires numbers"),
+        _ => bail!("multiplication requires numbers"),
     }
 }
 
@@ -670,7 +680,9 @@ pub(crate) fn op_div(args: &[DataValue]) -> Result<DataValue> {
 define_op!(OP_MINUS, 1, false);
 pub(crate) fn op_minus(args: &[DataValue]) -> Result<DataValue> {
     Ok(match &args[0] {
-        DataValue::Num(Num::Int(i)) => DataValue::Num(Num::Int(-(*i))),
+        DataValue::Num(Num::Int(i)) => {
+            DataValue::Num(Num::Int(i.checked_neg().ok_or_else(|| int_overflow("-"))?))
+        }
         DataValue::Num(Num::Float(f)) => DataValue::Num(Num::Float(-(*f))),
         DataValue::Vec(Vector::F64(v)) => DataValue::Vec(Vector::F64(0. - v)),
         DataValue::Vec(Vector::F32(v)) => DataValue::Vec(Vector::F32(0. - v)),
@@ -681,7 +693,9 @@ pub(crate) fn op_minus(args: &[DataValue]) -> Result<DataValue> {
 define_op!(OP_ABS, 1, false);
 pub(crate) fn op_abs(args: &[DataValue]) -> Result<DataValue> {
     Ok(match &args[0] {
-        DataValue::Num(Num::Int(i)) => DataValue::Num(Num::Int(i.abs())),
+        DataValue::Num(Num::Int(i)) => DataValue::Num(Num::Int(
+            i.checked_abs().ok_or_else(|| int_overflow("abs"))?,
+        )),
         DataValue::Num(Num::Float(f)) => DataValue::Num(Num::Float(f.abs())),
         DataValue::Vec(Vector::F64(v)) => DataValue::Vec(Vector::F64(v.mapv(|x| x.abs()))),
         DataValue::Vec(Vector::F32(v)) => DataValue::Vec(Vector::F32(v.mapv(|x| x.abs()))),
@@ -1073,7 +1087,8 @@ pub(crate) fn op_mod(args: &[DataValue]) -> Result<DataValue> {
             if *b == 0 {
                 bail!("'mod' requires non-zero divisor")
             }
-            DataValue::Num(Num::Int(a.rem(b)))
+            // `i64::MIN % -1` is mathematically 0 but panics with a plain `%`.
+            DataValue::Num(Num::Int(a.wrapping_rem(*b)))
         }
         (DataValue::Num(Num::Float(a)), DataValue::Num(Num::Float(b))) => {
             DataValue::Num(Num::Float(a.rem(*b)))

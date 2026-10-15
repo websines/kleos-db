@@ -39,13 +39,24 @@ to kleos.
   `(x ~ ("," ~ x)* ~ ","?)?`, which accepts the same language (trailing commas
   included) and produces the same parse tree. Depth 40 parses in milliseconds.
   Regression test: `tests/parser_nesting.rs`.
-- Unclosed block comments no longer take exponential time to reject. When a nested
-  `/*` failed to close, the comment rule treated it as text and retried every later
-  `/*`, doubling the work per unclosed `/*` (18 took 2.7 s; the fuzzer found a
-  439-byte script that hung). The rule now stops at a nested comment that cannot
-  close, which cannot change the result, since the enclosing comment cannot close
-  either. A differential test checks the new rule against a reference implementation
-  of the old one on all 87,381 strings over `/ * a ␣` up to length 8.
+- Block comments no longer take exponential time to parse. When a nested `/*` failed
+  to close, the comment rule fell back to reading it as text and rescanned the rest
+  of the input (pest does not memoize), doubling the work per `/*`: 18 unclosed `/*`
+  took 2.7 s, and a run of `/*/` blew up even when the comment could close (64 of
+  them did not finish in 10 minutes; the fuzzer found 1.5 KB scripts that took
+  seconds). Block comments now nest exactly like Rust's: every `/*` opens a level and
+  every `*/` closes one, and parsing is linear. The new rule accepts nothing the old
+  one rejected; the only comments it gives up are ones that a `/*/` closed because the
+  `/*` it starts never closed (`/* a /*/`), which are now a parse error instead of a
+  silent reinterpretation. A differential test checks both properties on all 87,381
+  strings over `/ * a ␣` up to length 8.
+- Integer arithmetic no longer wraps or panics on overflow (found by fuzzing).
+  `+`, `-`, `*`, unary minus and `abs` on `Int` used plain operators, which panic in
+  debug builds and silently wrap in release builds (`9223372036854775807 + 1` returned
+  a large negative number). They now fail with "integer overflow". `i64::MIN % -1`
+  panicked even in release builds and now returns `0`.
+- `mul` with three or more vector arguments now multiplies. The running product
+  was folded with vector addition, so `mul(a, b, c)` computed `(a + b) * c`.
 
 - Bulk loads no longer leave search-index entries for rows they delete or replace
   (upstream CozoDB #232). `import_relations`, columnar import and
@@ -88,6 +99,11 @@ to kleos.
 
 ### Changed
 
+- **BREAKING (results): Integer overflow is an error.** `Int` arithmetic that does not
+  fit in `i64` fails the query instead of returning a wrapped value. Use a float operand
+  (`x * 2.0`) for arithmetic that may exceed the range.
+- **BREAKING (parse): Block comments nest like Rust's.** A comment that relied on `/*/`
+  closing it after an unclosed nested `/*` (`/* a /*/`) is now a parse error.
 - `ROADMAP.md` rewritten for kleos: agent-memory north star, a hardening phase first, and the
   inherited mnestic backlog as unscheduled candidates. mnestic's 0.19 plan is marked as an
   inherited record.
