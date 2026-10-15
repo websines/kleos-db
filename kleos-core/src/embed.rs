@@ -23,6 +23,12 @@
 //!   recomputes it. Rows written by one statement are embedded in batches
 //!   (see [`EmbedPrefetch`]) rather than one model call per row.
 //!
+//! * Embedders are switched on and off at runtime with [`enable_embedder`] /
+//!   [`disable_embedder`] / [`embedders`], or `::embedder enable | disable |
+//!   list | backfill` in CozoScript. `embed()` on a disabled model errors;
+//!   `embed_or_null()` returns null instead, for nullable computed columns
+//!   that must keep accepting writes (docs/specs/embedder-toggle.md).
+//!
 //! The registry and the cache are process-wide, not per [`crate::Db`]: a
 //! model is a process resource, and every open database shares it. Register
 //! an embedder under a name before running scripts that use that name;
@@ -252,6 +258,46 @@ impl EmbedderSpec {
     }
     fn is_empty(&self) -> bool {
         self == &Self::default()
+    }
+}
+
+impl EmbedderSpec {
+    /// Parse a command-line embedder argument,
+    /// `name=model[:precision[:device[:dim]]]`, e.g. `gemma=embeddinggemma:int8`,
+    /// `gemma=embeddinggemma:int8:metal:256` or `potion=minishlab/potion-base-8M`.
+    /// Empty fields keep their defaults (`g=embeddinggemma::cpu`).
+    pub fn parse_cli(arg: &str) -> Result<(String, EmbedderSpec)> {
+        let Some((name, rest)) = arg.split_once('=') else {
+            bail!("embedder argument '{arg}' must look like name=model[:precision[:device[:dim]]]");
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("embedder argument '{arg}' has an empty name");
+        }
+        let mut parts = rest.split(':').map(str::trim);
+        let field = |p: Option<&str>| p.filter(|s| !s.is_empty()).map(str::to_string);
+        let model = field(parts.next());
+        let precision = field(parts.next());
+        let device = field(parts.next());
+        let dim = match field(parts.next()) {
+            None => None,
+            Some(d) => match d.parse::<usize>() {
+                Ok(n) if n > 0 => Some(n),
+                _ => bail!("embedder argument '{arg}': dim must be a positive integer"),
+            },
+        };
+        if parts.next().is_some() {
+            bail!("embedder argument '{arg}' has too many ':' fields");
+        }
+        Ok((
+            name.to_string(),
+            EmbedderSpec {
+                model,
+                precision,
+                device,
+                dim,
+            },
+        ))
     }
 }
 

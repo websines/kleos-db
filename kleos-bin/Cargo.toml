@@ -40,6 +40,10 @@ requests = ["kleos/requests"]
 jemalloc = ["kleos/jemalloc"]
 ## Enables io-uring option for the RocksDB storage
 io-uring = ["kleos/io-uring"]
+## Built-in embedders for `--embedder` / `::embedder enable` (needs rustc >= 1.99)
+infer = ["kleos/infer"]
+## `infer` plus Apple-GPU (Metal) kernels; macOS only
+infer-metal = ["infer", "kleos/infer-metal"]
 ## Enables the [Sled](https://github.com/spacejam/sled) backend
 storage-sled = ["kleos/storage-sled"]
 ## Enables the [TiKV](https://tikv.org/) client backend

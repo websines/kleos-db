@@ -1291,6 +1291,36 @@ fn py_registered_embedders() -> Vec<(String, usize)> {
     ::kleos::embed::registered_embedders()
 }
 
+/// Module-level twin of `CozoDbPy.enable_embedder` (the registry is
+/// process-wide, so no handle is needed).
+#[pyfunction]
+#[pyo3(name = "enable_embedder", signature = (name, model=None, precision=None, device=None, dim=None))]
+fn py_enable_embedder(
+    py: Python<'_>,
+    name: &str,
+    model: Option<String>,
+    precision: Option<String>,
+    device: Option<String>,
+    dim: Option<usize>,
+) -> PyResult<()> {
+    let spec = ::kleos::embed::EmbedderSpec {
+        model,
+        precision,
+        device,
+        dim,
+    };
+    py.allow_threads(|| ::kleos::embed::enable_embedder(name, spec))
+        .map_err(report2py)
+}
+
+/// Module-level twin of `CozoDbPy.disable_embedder`.
+#[pyfunction]
+#[pyo3(name = "disable_embedder")]
+fn py_disable_embedder(py: Python<'_>, name: &str) -> PyResult<bool> {
+    py.allow_threads(|| ::kleos::embed::disable_embedder(name))
+        .map_err(report2py)
+}
+
 #[pymodule]
 fn kleos(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<CozoDbPy>()?;
@@ -1300,5 +1330,7 @@ fn kleos(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_register_embedder, m)?)?;
     m.add_function(wrap_pyfunction!(py_unregister_embedder, m)?)?;
     m.add_function(wrap_pyfunction!(py_registered_embedders, m)?)?;
+    m.add_function(wrap_pyfunction!(py_enable_embedder, m)?)?;
+    m.add_function(wrap_pyfunction!(py_disable_embedder, m)?)?;
     Ok(())
 }

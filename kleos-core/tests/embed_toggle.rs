@@ -169,6 +169,21 @@ fn rust_api_mirrors_the_ops() {
 }
 
 #[test]
+fn cli_embedder_argument() {
+    let (n, s) = EmbedderSpec::parse_cli("gemma=embeddinggemma:int8").unwrap();
+    assert_eq!(n, "gemma");
+    assert_eq!(s.model.as_deref(), Some("embeddinggemma"));
+    assert_eq!(s.precision.as_deref(), Some("int8"));
+    assert_eq!((s.device, s.dim), (None, None));
+    let (_, s) = EmbedderSpec::parse_cli("g=embeddinggemma::metal:256").unwrap();
+    assert_eq!((s.precision, s.device.as_deref(), s.dim), (None, Some("metal"), Some(256)));
+    let (_, s) = EmbedderSpec::parse_cli("p=minishlab/potion-base-8M").unwrap();
+    assert_eq!(s, EmbedderSpec::model("minishlab/potion-base-8M"));
+    assert!(EmbedderSpec::parse_cli("noequals").is_err());
+    assert!(EmbedderSpec::parse_cli("g=a:b:c:notanumber").is_err());
+}
+
+#[test]
 fn strict_put_fails_while_off() {
     let m = Letters::new(8, 32);
     register_embedder("tg_strict", m).unwrap();
