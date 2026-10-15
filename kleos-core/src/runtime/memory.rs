@@ -381,14 +381,17 @@ impl Timeline {
 }
 
 /// Rewrite one `:put` batch (rows in the canonical layout: plain keys, vt,
-/// values) under a supersession rule. Returns the rows to write: the input
-/// minus no-op re-assertions, plus the retractions that end superseded rows.
+/// values) under a supersession rule. Returns `(written, generated)`: the
+/// input rows to write (minus no-op re-assertions unless `keep_redundant`,
+/// which `:insert` sets so that its existence check still fires) and the
+/// retractions that end superseded rows.
 pub(crate) fn apply_supersession(
     tx: &SessionTx<'_>,
     h: &RelationHandle,
     rule: &SupersedeRule,
     rows: Vec<Tuple>,
-) -> Result<Vec<Tuple>> {
+    keep_redundant: bool,
+) -> Result<(Vec<Tuple>, Vec<Tuple>)> {
     let shape = axes(h);
     ensure!(
         matches!(shape, Axes::Vt | Axes::Bitemporal),
@@ -404,7 +407,11 @@ pub(crate) fn apply_supersession(
         groups.entry(row[..f].to_vec()).or_default().push(row);
     }
 
-    let mut out = Vec::new();
+    let mut out = Out {
+        written: vec![],
+        generated: vec![],
+        keep_redundant,
+    };
     for (fk, mut incoming) in groups {
         // ascending valid time, stable: a batch is replayed in time order,
         // and two writes of one key at one instant keep last-write-wins
@@ -419,7 +426,13 @@ pub(crate) fn apply_supersession(
             supersede_one(h, &mut tl, &fk, f, p, bitemporal, r, &mut out)?;
         }
     }
-    Ok(out)
+    Ok((out.written, out.generated))
+}
+
+struct Out {
+    written: Vec<Tuple>,
+    generated: Vec<Tuple>,
+    keep_redundant: bool,
 }
 
 fn load_group(
@@ -490,14 +503,14 @@ fn supersede_one(
     p: usize,
     bitemporal: bool,
     r: Tuple,
-    out: &mut Vec<Tuple>,
+    out: &mut Out,
 ) -> Result<()> {
     let vk: Tuple = r[f..p].to_vec();
     let (t, is_assert) = vt_of(&r[p])?;
     let vals = r[p + 1..].to_vec();
     if !is_assert {
         // an explicit retraction ends only its own key: nothing to supersede
-        out.push(r);
+        out.written.push(r);
         tl.record(
             vk,
             t,
@@ -514,8 +527,8 @@ fn supersede_one(
     // idempotence: re-asserting the fact that is already current at t (same
     // values) writes nothing — no new version, no new history entry
     let redundant = matches!(tl.state(&vk, t), Some((_, e)) if e.assert && e.vals == vals);
-    if !redundant {
-        out.push(r);
+    if !redundant || out.keep_redundant {
+        out.written.push(r);
         tl.record(
             vk.clone(),
             t,
@@ -562,7 +575,7 @@ fn supersede_one(
                 });
             }
         }
-        out.push(retract_row(fk, &y, t, &yvals));
+        out.generated.push(retract_row(fk, &y, t, &yvals));
         tl.record(
             y,
             t,
@@ -593,7 +606,7 @@ fn supersede_one(
             _ => None,
         };
         if let Some(xvals) = still_current {
-            out.push(retract_row(fk, &vk, tn, &xvals));
+            out.generated.push(retract_row(fk, &vk, tn, &xvals));
             tl.record(
                 vk,
                 tn,
@@ -1295,7 +1308,11 @@ fn remove_source<'s, S: Storage<'s>>(
                         }
                     }
                 };
-                emit(depth + 1, &l.derived, &d, action);
+                // a derived row that already was not current changes nothing:
+                // not reported, but its own dependents are still checked
+                if action != "not_current" {
+                    emit(depth + 1, &l.derived, &d, action);
+                }
                 queue.push_back((l.derived.clone(), d, depth + 1, d_erased));
             }
         }

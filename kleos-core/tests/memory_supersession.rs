@@ -200,6 +200,16 @@ fn agent_memory_timeline() {
         ["Acme"]
     );
     assert!(objects_known(&db, "alice", "works_at", d(0) + 3_600_000_000, tt_before_late).is_empty());
+    // what was learned between two transaction times (about day 8)
+    let learned = run(
+        &db,
+        &format!(
+            "?[o] := *fact{{subject: 'alice', predicate: 'works_at', object: o @ (vt: {v}, tt: 'NOW')}}, \
+                     not *fact{{subject: 'alice', predicate: 'works_at', object: o @ (vt: {v}, tt: {tt_before_late})}}",
+            v = d(8)
+        ),
+    );
+    assert_eq!(col(&learned), ["Initech"]);
 
     // --- typo correction (same valid time, later transaction time) ---------
     episode(&db, "ep4", 12, "Bob started at Initec");
@@ -578,4 +588,62 @@ fn provenance_declaration_checks() {
     );
     run(&db, "::provenance drop claim_doc");
     assert!(run(&db, "::provenance list").rows.is_empty());
+}
+
+#[test]
+fn insert_imperative_and_explicit_times() {
+    let (_dir, db) = open();
+    schema(&db);
+    fact(&db, "frank", "works_at", "A", 1, &[]);
+    // :insert keeps its existence check on the caller's rows only; the
+    // retraction it generates for the superseded sibling is not an insert
+    run(
+        &db,
+        &format!(
+            "?[subject, predicate, object, vt] <- [['frank', 'works_at', 'B', [{}, true]]] \
+             :insert fact {{subject, predicate, object, vt}}",
+            d(5)
+        ),
+    );
+    assert_eq!(objects_at(&db, "frank", "works_at", d(6)), ["B"]);
+    assert!(try_run(
+        &db,
+        &format!(
+            "?[subject, predicate, object, vt] <- [['frank', 'works_at', 'B', [{}, true]]] \
+             :insert fact {{subject, predicate, object, vt}}",
+            d(9)
+        ),
+    )
+    .is_err());
+
+    // a tt-only (system-versioned) derived relation is retracted with :rm
+    run(&db, ":create badge {who: String, tt: TxTime => label: String}");
+    run(&db, ":create badge_src {who: String, id: String}");
+    run(&db, "::provenance create badge_src {derived: badge, source: episode}");
+    episode(&db, "ep1", 1, "Frank earned a badge");
+    run(
+        &db,
+        "{?[who, label] <- [['frank', 'gold']] :put badge {who => label}} \
+         {?[who, id] <- [['frank', 'ep1']] :put badge_src {who, id}}",
+    );
+    // explicit valid time, inside an imperative script
+    let r = run(&db, &format!("{{::retract episode [['ep1']] @ {}}}", d(3)));
+    assert_eq!(
+        table(&r),
+        [
+            vec!["0", "episode", "[ep1]", "retracted"],
+            vec!["1", "badge", "[frank]", "retracted"],
+        ]
+    );
+    assert!(run(&db, "?[l] := *badge{who: 'frank', label: l}").rows.is_empty());
+    assert_eq!(
+        col(&run(&db, &format!("?[i] := *episode{{id: i @ {}}}", d(2)))),
+        ["ep1"]
+    );
+    assert!(run(&db, &format!("?[i] := *episode{{id: i @ {}}}", d(4)))
+        .rows
+        .is_empty());
+    // retracting again is a no-op
+    let r = run(&db, &format!("::retract episode [['ep1']] @ {}", d(4)));
+    assert_eq!(table(&r), [["0", "episode", "[ep1]", "not_current"]]);
 }

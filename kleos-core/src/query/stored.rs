@@ -231,28 +231,47 @@ impl<'a> SessionTx<'a> {
                     callback_targets.contains(&relation_store.name)
                         || force_collect == relation_store.name,
                 )?;
-                let rows =
-                    crate::runtime::memory::apply_supersession(self, &relation_store, &rule, rows)?;
+                let is_insert = op == RelationOp::Insert;
+                let (mut written, generated) = crate::runtime::memory::apply_supersession(
+                    self,
+                    &relation_store,
+                    &rule,
+                    rows,
+                    is_insert,
+                )?;
                 let (canon, canon_headers) =
                     crate::runtime::memory::canonical_input(&relation_store);
-                self.put_into_relation(
-                    db,
-                    rows.into_iter(),
-                    &canon_headers,
-                    cur_vld,
-                    callback_targets,
-                    callback_collector,
-                    propagate_triggers,
-                    &mut to_clear,
-                    &relation_store,
-                    &canon.metadata,
-                    &canon.key_bindings,
-                    &canon.dep_bindings,
-                    op == RelationOp::Insert,
-                    false,
-                    force_collect,
-                    *span,
-                )?
+                // :insert checks only the caller's rows; the generated
+                // retractions address keys that exist by construction
+                let batches = if is_insert {
+                    vec![(written, true), (generated, false)]
+                } else {
+                    written.extend(generated);
+                    vec![(written, false)]
+                };
+                for (rows, insert) in batches {
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    self.put_into_relation(
+                        db,
+                        rows.into_iter(),
+                        &canon_headers,
+                        cur_vld,
+                        callback_targets,
+                        callback_collector,
+                        propagate_triggers,
+                        &mut to_clear,
+                        &relation_store,
+                        &canon.metadata,
+                        &canon.key_bindings,
+                        &canon.dep_bindings,
+                        insert,
+                        false,
+                        force_collect,
+                        *span,
+                    )?;
+                }
             }
             RelationOp::Create | RelationOp::Replace | RelationOp::Put | RelationOp::Insert => self
                 .put_into_relation(
