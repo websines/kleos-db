@@ -139,10 +139,12 @@ pub use crate::runtime::governed_transaction::{
     GovernedTransactionWorker,
 };
 pub use crate::runtime::relation::AccessLevel;
+pub use embed::{register_embedder, Embedder};
 
 #[cfg(feature = "cypher")]
 pub mod cypher;
 pub mod data;
+pub mod embed;
 pub(crate) mod fixed_rule;
 pub(crate) mod fts;
 /// Test-support metric, not a public API: process-wide FTS posting-scan
