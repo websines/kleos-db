@@ -33,6 +33,34 @@ to kleos.
   explains a row back to its sources. Spec:
   `docs/specs/memory-supersession-provenance.md`; tests:
   `kleos-core/tests/memory_supersession.rs`.
+- Weighted (convex) score fusion for hybrid search, beside RRF (Bruch et al.,
+  arXiv 2210.11934). New fixed rule `WeightedFusion(rel[list_id, item, score],
+  weights: [['semantic', 0.6], ['text', 0.4]], norm: 'minmax', norms: [...])`
+  normalizes each list and sums `weight × normalized score`. Normalizations:
+  `'minmax'`, `'zscore'`, `'none'`, and theory-based ones for known ranges:
+  `'neg_cosine_distance'` (the vector leg's `-distance`), `'cosine_similarity'`,
+  `'bm25'` (`s / max`), `['range', lo, hi]`, `['tmm', lo]`. `detailed: true` gives
+  the same 5 columns as RRF. In `HybridSearch`, set
+  `fusion: Fusion::Weighted(WeightedFusionParams::new([("semantic", 0.6), ("text", 0.4)]))`;
+  RRF stays the default and its generated script is unchanged. Weights naming an
+  unconfigured leg, or missing a configured one, are rejected.
+- Pluggable re-rank stage. Implement `Reranker` (`fn rerank(&self, query: &str,
+  docs: &[&str]) -> Result<Vec<f32>>`), register it with
+  `Db::register_reranker(name, Arc<dyn Reranker>)` /
+  `DbInstance::register_reranker`, and call it from CozoScript as
+  `Rerank(rel[item, text, prior_score], model: 'name', query: $q, top_n: 50)` or
+  from `HybridSearch` with `rerank: Some(RerankParams::new("name"))` (`top_n`,
+  `text_field`, `query`, `batch_size`). Re-ranking runs after fusion and before
+  MMR. kleos ships no model. Python: `db.register_reranker(name, fn)` plus
+  `fusion` / `rerank` keys in `hybrid_search`.
+- `examples/hybrid_eval.rs`: a BEIR SciFact harness (300 test queries,
+  bge-small-en-v1.5 vectors, kleos BM25, ms-marco-MiniLM-L-6-v2 cross-encoder
+  scores served through the `Reranker` hook). nDCG@10 / Recall@100: BM25
+  0.688 / 0.923, vector 0.713 / 0.945, RRF 0.718 / 0.968, weighted min-max
+  (α_vec = 0.6, tuned on 200 train queries) **0.734 / 0.975**. This MiniLM
+  re-ranker scores about 0.69 on top of every first stage, so it helps BM25
+  only. That matches its published SciFact score; a re-ranker is only worth
+  using if it beats the first stage on your data.
 
 ### Fixed
 

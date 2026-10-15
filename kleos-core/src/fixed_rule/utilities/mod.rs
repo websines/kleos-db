@@ -15,7 +15,9 @@ pub(crate) mod mmr;
 #[cfg(feature = "rdf-io")]
 pub(crate) mod rdf;
 pub(crate) mod reorder_sort;
+pub(crate) mod rerank;
 pub(crate) mod rrf;
+pub(crate) mod weighted_fusion;
 
 #[cfg(feature = "data-import")]
 pub(crate) use self::csv::CsvReader;
@@ -27,3 +29,4 @@ pub(crate) use mmr::MaximalMarginalRelevance;
 pub(crate) use rdf::RdfReader;
 pub(crate) use reorder_sort::ReorderSort;
 pub(crate) use rrf::ReciprocalRankFusion;
+pub(crate) use weighted_fusion::WeightedFusion;
