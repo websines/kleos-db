@@ -27,3 +27,4 @@ pub(crate) mod temp_store;
 mod tests;
 pub(crate) mod transact;
 pub(crate) mod tt_clock;
+pub(crate) mod vec_quant;
