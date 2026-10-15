@@ -151,6 +151,10 @@ to kleos.
   1.7 more). On that index the scan takes over at 10% from `ef: 128` and at 2% and
   below for every `ef`.
 
+- `kleos::RocksDbTx` is exported with the `storage-rocksdb` feature, like `SqliteTx`
+  and `MemTx`. It was public but could not be named (an `unnameable_types` warning on
+  every rocksdb build).
+
 - sqlite: a write could fail with `database is locked (code 5)` while another thread
   was reading. A read that found a row left its cached statement holding a SHARED lock
   on the file, and the statements were finalized only after the in-process lock was
