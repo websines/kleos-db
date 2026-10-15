@@ -148,6 +148,11 @@ impl<'a> SessionTx<'a> {
             ..
         } = meta;
 
+        let supersede = if matches!(op, RelationOp::Put | RelationOp::Insert) {
+            crate::runtime::memory::supersede_rule(self, &relation_store)?
+        } else {
+            None
+        };
         match op {
             RelationOp::Rm | RelationOp::Delete => self.remove_from_relation(
                 db,
@@ -210,6 +215,64 @@ impl<'a> SessionTx<'a> {
                 force_collect,
                 *span,
             )?,
+            // kleos fork, agent memory E1: a relation with a declared
+            // supersession key rewrites the batch before the ordinary put
+            // (see `runtime/memory.rs`).
+            RelationOp::Put | RelationOp::Insert if supersede.is_some() => {
+                let rule = supersede.expect("checked by the guard");
+                let rows = self.extract_canonical_rows(
+                    res_iter,
+                    headers,
+                    cur_vld,
+                    &relation_store,
+                    metadata,
+                    key_bindings,
+                    dep_bindings,
+                    callback_targets.contains(&relation_store.name)
+                        || force_collect == relation_store.name,
+                )?;
+                let is_insert = op == RelationOp::Insert;
+                let (mut written, generated) = crate::runtime::memory::apply_supersession(
+                    self,
+                    &relation_store,
+                    &rule,
+                    rows,
+                    is_insert,
+                )?;
+                let (canon, canon_headers) =
+                    crate::runtime::memory::canonical_input(&relation_store);
+                // :insert checks only the caller's rows; the generated
+                // retractions address keys that exist by construction
+                let batches = if is_insert {
+                    vec![(written, true), (generated, false)]
+                } else {
+                    written.extend(generated);
+                    vec![(written, false)]
+                };
+                for (rows, insert) in batches {
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    self.put_into_relation(
+                        db,
+                        rows.into_iter(),
+                        &canon_headers,
+                        cur_vld,
+                        callback_targets,
+                        callback_collector,
+                        propagate_triggers,
+                        &mut to_clear,
+                        &relation_store,
+                        &canon.metadata,
+                        &canon.key_bindings,
+                        &canon.dep_bindings,
+                        insert,
+                        false,
+                        force_collect,
+                        *span,
+                    )?;
+                }
+            }
             RelationOp::Create | RelationOp::Replace | RelationOp::Put | RelationOp::Insert => self
                 .put_into_relation(
                     db,
@@ -232,6 +295,58 @@ impl<'a> SessionTx<'a> {
         };
 
         Ok(to_clear)
+    }
+
+    /// Extract a `:put` input into the relation's canonical layout (every
+    /// column but TxTime, stored order), applying defaults and coercions
+    /// exactly as the put itself would (kleos fork, agent memory E1).
+    #[allow(clippy::too_many_arguments)]
+    fn extract_canonical_rows(
+        &self,
+        res_iter: impl Iterator<Item = Tuple>,
+        headers: &[Symbol],
+        cur_vld: ValidityTs,
+        relation_store: &RelationHandle,
+        metadata: &StoredRelationMetadata,
+        key_bindings: &[Symbol],
+        dep_bindings: &[Symbol],
+        is_callback_target: bool,
+    ) -> Result<Vec<Tuple>> {
+        let n_keys = if relation_store.has_txtime() {
+            Self::check_tt_write_shape(relation_store, metadata, is_callback_target, ":put")?;
+            relation_store.metadata.keys.len() - 1
+        } else {
+            relation_store.metadata.keys.len()
+        };
+        let mut extractors = make_extractors(
+            &relation_store.metadata.keys[..n_keys],
+            &metadata.keys,
+            key_bindings,
+            headers,
+        )?;
+        extractors.extend(if metadata.non_keys.is_empty() {
+            make_extractors(
+                &relation_store.metadata.non_keys,
+                &metadata.keys,
+                key_bindings,
+                headers,
+            )?
+        } else {
+            make_extractors(
+                &relation_store.metadata.non_keys,
+                &metadata.non_keys,
+                dep_bindings,
+                headers,
+            )?
+        });
+        res_iter
+            .map(|tuple| {
+                extractors
+                    .iter()
+                    .map(|ex| ex.extract_data(&tuple, cur_vld))
+                    .try_collect()
+            })
+            .try_collect()
     }
 
     fn put_into_relation<'s, S: Storage<'s>>(

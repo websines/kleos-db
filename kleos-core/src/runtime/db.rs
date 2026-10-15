@@ -1389,6 +1389,16 @@ impl<'s, S: Storage<'s>> Db<S> {
                     handle.access_level
                 ));
             }
+            // kleos fork, agent memory E1: supersession rewrites :put
+            // batches; a raw bulk import would bypass it silently.
+            if crate::runtime::memory::supersede_rule(&tx, &handle)?.is_some() {
+                bail!(
+                    "cannot bulk-import into relation '{}': it declares a supersession key \
+                     (::supersede), which bulk import does not apply; write with :put, or \
+                     ::supersede drop it first",
+                    relation
+                );
+            }
 
             let mut search = ImportSearchIndexes::new(&tx, &handle)?;
             #[cfg(any(test, feature = "test-hooks"))]
@@ -2558,7 +2568,10 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// The reserved eviction-audit relation (kleos fork, bitemporality
     /// step 5), created lazily on first `::evict`. Keys: (relation, key
     /// marker, tt); value: rows_deleted.
-    fn tt_evict_audit_relation(&'s self, tx: &mut SessionTx<'_>) -> Result<RelationHandle> {
+    pub(crate) fn tt_evict_audit_relation(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+    ) -> Result<RelationHandle> {
         use crate::data::relation::{ColType, ColumnDef, NullableColType, StoredRelationMetadata};
         let col = |name: &str, coltype: ColType| ColumnDef {
             name: SmartString::from(name),
@@ -2698,6 +2711,10 @@ impl<'s, S: Storage<'s>> Db<S> {
                 stored_queries::remove(tx, name)
             }
             SysOp::ListStoredQueries => stored_queries::list(tx),
+            // kleos fork, agent memory (UPGRADE_PLAN E1/E2)
+            SysOp::Memory(op) => {
+                crate::runtime::memory::run_memory_op(self, tx, op, read_only, skip_locking)
+            }
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3083,20 +3100,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 // salt for the audit key-hash, generated once per store
                 // (locking read: two racing first-evicts must not each mint
                 // a salt, or the loser's audit markers become unlinkable)
-                let salt_key = {
-                    let t = vec![DataValue::Null, DataValue::from("EVICT_SALT")];
-                    t.encode_as_key(RelationId::SYSTEM)
-                };
-                let salt = match tx.store_tx.get(&salt_key, true)? {
-                    Some(s) => s,
-                    None => {
-                        let mut buf = [0u8; 16];
-                        rand::Rng::fill(&mut rand::thread_rng(), &mut buf);
-                        tx.store_tx.put(&salt_key, &buf)?;
-                        buf.to_vec()
-                    }
-                };
-                let ns = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &salt);
+                let ns = crate::runtime::memory::evict_key_namespace(tx)?;
 
                 let audit = self.tt_evict_audit_relation(tx)?;
                 // Graph-projection dirty-set hook (spec §3.4 row 12, second

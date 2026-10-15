@@ -1343,7 +1343,7 @@ fn parse_temporal_clause(
     }
 }
 
-fn expr2vld_spec(expr: Expr, cur_vld: ValidityTs) -> Result<ValidityTs> {
+pub(crate) fn expr2vld_spec(expr: Expr, cur_vld: ValidityTs) -> Result<ValidityTs> {
     let vld_span = expr.span();
     match expr.eval_to_const()? {
         DataValue::Num(n) => {
