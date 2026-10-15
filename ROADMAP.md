@@ -1,116 +1,76 @@
 # kleos — Roadmap
 
-kleos is an actively maintained fork of [CozoDB](https://github.com/cozodb/cozo), focused on
-being the best embedded substrate for agentic memory. This is the public, forward-looking roadmap.
-Shipped detail lives in [`CHANGELOG.md`](CHANGELOG.md); implementation contracts live in
-[`docs/specs/`](docs/specs/); provenance and attribution live in [`NOTICE.md`](NOTICE.md).
+kleos is an embedded memory engine for AI agents. It is derived from
+[CozoDB](https://github.com/cozodb/cozo) via the mnestic fork (see [`NOTICE.md`](NOTICE.md)).
+This is the public, forward-looking roadmap. Shipped detail lives in
+[`CHANGELOG.md`](CHANGELOG.md), and implementation contracts live in [`docs/specs/`](docs/specs/).
 
-## Commitment and north star
+## North star
 
-Kleos provides steady maintenance, clear releases, and a focused path for developers building
-long-lived local or embedded memory. Its defining combination is:
+An agent's long-term memory should live in one embedded engine, not be stitched together from
+a vector store, a search index, a graph database and an audit log. kleos combines:
 
-- vector, full-text, and graph retrieval in one engine;
-- valid-time and transaction-time history;
-- recursive inference and proof-carrying results;
-- incremental indexes and bounded operations; and
-- trustworthy production maintenance without a separate database service.
+- vector (HNSW), full-text (BM25) and graph retrieval, fusable in a single query;
+- valid-time and transaction-time history ("what did the agent believe, and when?");
+- recursive Datalog inference with proof-carrying results;
+- incremental indexes and budgeted, interruptible operations; and
+- transactional storage with no separate database service.
 
-Every new feature must fit that agentic-memory wedge as a general engine mechanism.
+A change belongs in kleos when it makes that combination more correct, more robust, faster or
+easier to adopt. It has to be a general engine mechanism, not a special case for one consumer.
 
 ## Current state
 
-- `kleos` 0.18.0 and `kleos-rocks` 0.1.12 are the latest published releases.
-- Atomic Parquet/Arrow import and candidate-aware FTS shipped in 0.17.0.
-- Arrow export is not implemented and remains demand-gated.
-- LangChain, LlamaIndex, LangGraph, and MCP integrations are published.
+- Code base: mnestic 0.18.0+ (`352bf205`), renamed. The engine is functionally identical to mnestic.
+- **Nothing has been published under the kleos name yet.** The `kleos` crate, `kleos-rocks` and
+  the `kleos` Python package exist in this repository only.
+- Maintained surfaces: the Rust crate, the RocksDB bridge, the server/REPL binary, and the Python
+  package with its LangChain, LlamaIndex, LangGraph and MCP integrations.
+- Unmaintained and excluded from the workspace: the C, Java, Node.js, Swift and WASM bindings.
 
-### Already shipped through 0.18.0
+## Phase 1 — Hardening (current)
 
-| Capability | Release | Boundary |
-|---|---:|---|
-| String-literal correctness (#53) | 0.18.0 | Quoted escapes decode and raw strings preserve contents; audit scripts and stored-query bodies |
-| Canonical nested JSON (#54) | 0.18.0 | UUID/base64/infinity forms match top-level JSON; stored JSON is not rewritten |
-| FTS prefix normalization (#55) | 0.18.0 | Lowercase and ASCII folding apply to prefixes of indexed terms; integer boosts no longer panic |
-| Atomic Parquet/Arrow copy-in | 0.17.0 | One local file into an existing non-`TxTime` relation; Arrow export remains demand-gated |
-| Candidate-aware FTS | 0.17.0 | Exact primary-key allowlist before top-k; BM25 statistics remain corpus-global |
+An embedded database runs inside its host's process, so its panics crash the host and its bugs
+corrupt the host's data. Before adding features, kleos has to be boringly reliable.
 
-## After 0.18.0
-
-0.18.0 ships the reviewed [string-literal](docs/specs/string-literals.md),
-[canonical JSON](docs/specs/json-canonical.md), and
-[FTS prefix](docs/specs/fts-prefix.md) contracts, plus the integer-FTS-boost panic fix.
-The crate and Python release tags identify commit `1d13aedc`; storage format and bridge
-version are unchanged. Read the [migration notes](CHANGELOG.md) before upgrading:
-existing script literals and newly constructed JSON can change.
-
-Implementation evidence remains in the [string/JSON review](docs/reviews/2026-09-05-string-json.md)
-and [FTS review](docs/reviews/2026-09-05-fts-prefix.md); these are historical implementation
-snapshots, separate from release evidence. Consumer compatibility changes are merged in core
-PR #80; core adoption of `v0.18.0` merged in
-[PR #81](https://github.com/shuruheel/mindgraph-rs/pull/81). The
-[documentation update](https://github.com/shuruheel/mnestic-site/pull/3) is deployed.
-These are separately verified delivery states; no cloud deployment is implied.
-
-### 0.19 planning
-
-The [0.19 planning record](docs/plans/0.19-planning.md) separates the existing warning-removal
-commitment from proposed maintenance, investigation and demand-gated work. Reconciliation on
-September 6 establishes current status; it does not select a final feature scope or release date.
-
-| Work | State | Gate |
-|---|---|---|
-| Remove temporary `parser.string_decoding_changed` warning | Scheduled for 0.19.0 | Keep the migration guidance after removing the diagnostic |
-| [HNSW integrity #56](https://github.com/shuruheel/mnestic/issues/56) | Proposed first investigation | Failure fixtures and verified invariants before a read-only verifier; reproduce a current failure before committing repair |
-| [Temporary-relation diagnostics #12](https://github.com/shuruheel/mnestic/issues/12) | Proposed maintenance candidate | Agree warning behavior and preserve legitimate transaction-scoped relations |
-| [SQLite WITHOUT ROWID #6](https://github.com/shuruheel/mnestic/issues/6) | Conditional benchmark candidate | Demonstrate benefit across representative row sizes and workloads; preserve existing databases |
-
-Broader HNSW, Arrow export and quantization work remains subject to the evidence gates below.
-
-[Arrow export #11](https://github.com/shuruheel/mnestic/issues/11) tracks the unimplemented,
-demand-gated export work. Its import half shipped in 0.17.0 and is retained as completed history.
-
-## Adoption work
-
-- Verify clean installation and first successful use of published integrations.
-- Improve discovery, examples, and error quality before adding another adapter.
-- Accept a framework integration only when it exposes on-wedge capabilities and has a credible
-  distribution path.
-- Remeasure public benchmark claims on the current engine before reusing them.
-
-## Evidence-gated work
-
-| Area | Activation evidence |
+| Work | Done when |
 |---|---|
-| Arrow export | A released-import user names an Arrow-native or zero-copy workflow |
-| HNSW long-run prevention | Measured degradation after churn |
-| Plan cache | Repeated planning cost on a real high-frequency workload |
-| Filtered-vector redesign | A measured low-selectivity failure beyond bounded widening |
-| FTS scale work | User-visible latency or documented corpus-scale pressure |
-| Phrase-prefix / phrases inside NEAR | Concrete demand beyond current named errors and workarounds; agree matching and resource-limit contracts |
-| Vector quantization | Corpus-scale storage pressure plus accepted recall bounds |
-| Shared-cache expansion | Multi-instance memory evidence |
-| Extended Cypher read | Observed evaluator friction |
-| Additional query-language features | Concrete agentic-memory demand and a signed compatibility contract |
+| Green CI on current stable Rust | Every gate in `build.yml` passes on the latest stable toolchain |
+| Triage inherited upstream bugs | Each open CozoDB/mnestic bug is fixed with a regression test, or recorded as not reproducible |
+| Panic-proof user-input paths | Malformed scripts, parameters, imports and stored data return errors instead of panicking. `unwrap`/`panic!` remain only where an invariant is proven |
+| Fuzzing | `cargo-fuzz` targets cover the CozoScript parser, the query pipeline and the value codec, and CI runs a short fuzz pass |
+| HNSW integrity verification | A read-only verifier detects damaged vector indexes (inherited mnestic #56). `::reindex` remains the repair path |
+| Storage upgrade | RocksDB moves from v8.8.1 to a current release, with storage-compatibility tests against databases written by the old version |
+| Release pipeline | The first kleos release publishes `kleos-rocks`, `kleos` and the Python package from tags, with the version gates green |
 
-Correctness defects, storage contract tests, operational visibility, backup ergonomics, schema
-migrations, and actionable errors remain valid maintenance or contributor work. The issue tracker
-owns item-level status.
+## Phase 2 — Candidate work (not yet scheduled)
+
+These items are inherited from the mnestic backlog (mnestic issue numbers in brackets) or follow
+from the north star. Phase 1 findings decide the order.
+
+| Area | Item |
+|---|---|
+| Correctness | Diagnostic for surprising top-level temporary relations [#12]; sled valid-time scans [#5] |
+| Operability | Versioned schema migrations with diff and rollback [#10]; backup and restore ergonomics; operational metrics |
+| Performance | Baseline benchmark suite first; then plan caching, SQLite `WITHOUT ROWID` [#6], vector quantization with float rescore [#57] |
+| Retrieval | Multi-token phrase-prefix FTS [#19]; phrases inside `NEAR` [#20]; filtered-vector search at low selectivity |
+| Interop | Arrow query-result export [#11]; first-class ULID keys [#8] |
+| Reach | Node.js/TypeScript bindings, the most-requested ecosystem for agent frameworks |
 
 ## Scope boundaries
 
-Kleos will not pursue:
+kleos will not pursue:
 
 - federation, virtualization, lakehouse breadth, or an extension marketplace;
-- document/KV/time-series multi-model breadth or multiple write languages;
+- document, KV or time-series multi-model breadth, or multiple write languages;
 - distributed clustering or consensus inside the embedded engine;
 - Cypher writes, CRDT sync, or browser/WASM persistence;
 - native RDF/triple storage, SPARQL, or OWL reasoning;
 - worst-case-optimal joins or competitive cyclic-subgraph matching; or
-- a SOTA FTS rewrite or embedded Tantivy.
+- a from-scratch FTS engine or embedded Tantivy.
 
-Boundary readers, read-only interoperability, and targeted general primitives remain valid when
-they preserve the relational/Datalog core.
+Boundary readers, read-only interoperability, and targeted general primitives remain in scope
+when they preserve the relational/Datalog core.
 
 ## Contributing and releases
 
@@ -118,9 +78,6 @@ they preserve the relational/Datalog core.
 - Make performance work baseline-first and keep inherited semantics green.
 - Use the SQLite backend for planner and stored-relation tests; see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
-- Preserve MPL-2.0 and inherited Cozo attribution.
+- Preserve MPL-2.0 and the inherited CozoDB and mnestic attribution.
 - Publish `kleos-rocks` before `kleos` whenever the bridge changes.
-- Treat roadmap text as intent; releases, registries, source, tests, and CI are delivery evidence.
-
-Kleos is developed alongside MindGraph, its most demanding consumer, but remains an independent
-engine for the broader embedded and local-first agent-memory community.
+- Treat roadmap text as intent. Releases, registries, source, tests and CI are the evidence.

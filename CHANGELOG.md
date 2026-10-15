@@ -9,7 +9,19 @@ to kleos.
 
 ## Unreleased
 
-_Nothing yet._
+### Fixed
+
+- The clippy CI gate passes again on Rust 1.99. miette's `bail!` expands with a trailing
+  semicolon, which rustc's `semicolon_in_expressions_from_non_local_macros` future-compat
+  lint rejects in expression position (289 sites). The core crate now uses an
+  expression-safe crate-local `bail!` with the same arguments and errors.
+- Broken gitee mirror links and a stale `cozo-lib-*` reference left by the rename.
+
+### Changed
+
+- `ROADMAP.md` rewritten for kleos: agent-memory north star, a hardening phase first, and the
+  inherited mnestic backlog as unscheduled candidates. mnestic's 0.19 plan is marked as an
+  inherited record.
 
 ## mnestic, unreleased after 0.18.0 (included in the kleos base)
 

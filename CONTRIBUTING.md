@@ -33,7 +33,7 @@ deliberate non-goals: federation, multi-model breadth, clustering, Cypher
 The workspace's active members are `kleos-core` (published as the `kleos`
 crate), `kleos-rocks` (RocksDB bridge, published as `kleos-rocks`), `kleos-bin`
 (server/REPL), and `kleos-core-examples`. The language bindings under
-`cozo-lib-*` are excluded from the workspace; only the Python one
+`kleos-lib-*` are excluded from the workspace; only the Python one
 (`kleos-lib-python`, published to PyPI as `kleos`) is actively maintained.
 
 ```bash

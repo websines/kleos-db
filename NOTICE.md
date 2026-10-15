@@ -12,6 +12,12 @@ kleos started from the mnestic commit above, renamed throughout. The git
 history of both projects is not carried in this repository; use the commits
 above to compare or port changes.
 
+The design records under `docs/specs/`, `docs/reviews/`, `docs/plans/`,
+`docs/research/` and `docs/concepts/` were written for mnestic. The rename
+replaced the product name in them, so where they say "kleos", the decisions,
+sign-offs, releases and issue numbers they describe belong to mnestic and its
+maintainer. mnestic's release history in `CHANGELOG.md` is kept verbatim.
+
 ## Relationship to CozoDB and mnestic
 
 kleos is **not** CozoDB or mnestic, and is not affiliated with or endorsed by

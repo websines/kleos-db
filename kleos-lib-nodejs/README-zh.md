@@ -15,7 +15,7 @@ npm install --save kleos-node
 安装过程中需要从 [GitHub 发布页](https://github.com/cozodb/cozo-lib-nodejs/releases/) 下载二进制文件。如果因为网络问题失败，可以使用此 [镜像](https://github.com/cozodb/cozo-lib-nodejs/releases/) ，使用方法为
 
 ```bash
-npm install --save kleos-node --cozo_node_prebuilt_binary_host_mirror=https://gitee.com/cozodb/kleos-lib-nodejs/releases/download/
+npm install --save kleos-node --cozo_node_prebuilt_binary_host_mirror=https://gitee.com/cozodb/cozo-lib-nodejs/releases/download/
 ```
 
 注意：如果你用的是 Yarn 而不是 NPM，类似的命令 [可能不奏效](https://github.com/mapbox/node-pre-gyp/issues/514) 。
