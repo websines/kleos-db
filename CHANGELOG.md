@@ -34,6 +34,13 @@ to kleos.
   opt-in: not a default workspace member, and kleos-core only uses it behind the new
   off-by-default `infer` / `infer-metal` features (`kleos::embed::builtin`). candle 0.11
   does not build on Rust 1.90 (unstable `stdarch_neon_f16`); it is verified on 1.99.
+  Measured on SciFact (M3, Metal, shared with other jobs): EmbeddingGemma int8
+  scores nDCG@10 0.785 on the full corpus through kleos (auto-embed on `:put`, HNSW,
+  `embed()` queries), the same as exact search; on a 1,500-document subset f32,
+  f16, bf16 and int8 all score 0.871-0.873 and int4 0.866, and the 256-d Matryoshka
+  prefix loses 0.006. int8 is the default: lowest load peak (1.1 GB vs 2.8 GB for
+  f32) at equal quality. potion-base-8M is the near-free fallback (0.506, about
+  4,000 documents/s on the CPU, 100 MB).
 
 ### Fixed
 
