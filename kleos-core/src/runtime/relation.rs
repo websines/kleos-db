@@ -924,19 +924,24 @@ struct CorruptValueBlob {
     reason: String,
 }
 
-fn decode_val_blob(val: &[u8], key: String) -> Result<Vec<DataValue>> {
-    let encoded = val
-        .get(ENCODED_KEY_MIN_LEN..)
-        .ok_or_else(|| CorruptValueBlob {
-            key: key.clone(),
+/// Decode a stored value blob. `key` renders the row's key for the error
+/// message and is only called on failure: formatting it eagerly (a Debug
+/// dump of the key tuple, or a hex dump of its bytes) used to cost more than
+/// the decode itself on every row read (kleos fork).
+fn decode_val_blob(val: &[u8], key: impl FnOnce() -> String) -> Result<Vec<DataValue>> {
+    let Some(encoded) = val.get(ENCODED_KEY_MIN_LEN..) else {
+        return Err(CorruptValueBlob {
+            key: key(),
             reason: format!(
                 "value is {} bytes; expected at least {ENCODED_KEY_MIN_LEN}",
                 val.len()
             ),
-        })?;
+        }
+        .into());
+    };
     rmp_serde::from_slice(encoded).map_err(|error| {
         CorruptValueBlob {
-            key,
+            key: key(),
             reason: error.to_string(),
         }
         .into()
@@ -967,7 +972,7 @@ pub fn extend_tuple_from_v(key: &mut Tuple, val: &[u8]) {
 
 pub(crate) fn try_extend_tuple_from_v(key: &mut Tuple, val: &[u8]) -> Result<()> {
     if !val.is_empty() {
-        let vals = decode_val_blob(val, format!("tuple {key:?}"))?;
+        let vals = decode_val_blob(val, || format!("tuple {key:?}"))?;
         key.extend(vals);
     }
     Ok(())
@@ -977,7 +982,7 @@ pub(crate) fn try_decode_val_only(key: &[u8], val: &[u8]) -> Result<Tuple> {
     if val.is_empty() {
         Ok(Vec::new())
     } else {
-        decode_val_blob(val, encoded_key_label(key))
+        decode_val_blob(val, || encoded_key_label(key))
     }
 }
 
