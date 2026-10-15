@@ -56,6 +56,19 @@ impl HnswIndexManifest {
 
 type CompoundKey = (Tuple, usize, i32);
 
+/// Key of an index row at `layer`: the edge `from -> to`, or the self-row of
+/// `from` when `to == from`.
+fn hnsw_row_key(layer: i64, from: &CompoundKey, to: &CompoundKey) -> Vec<DataValue> {
+    let mut key = Vec::with_capacity(from.0.len() + to.0.len() + 5);
+    key.push(DataValue::from(layer));
+    for (k, idx, subidx) in [from, to] {
+        key.extend_from_slice(k);
+        key.push(DataValue::from(*idx as i64));
+        key.push(DataValue::from(*subidx as i64));
+    }
+    key
+}
+
 #[inline]
 pub(crate) fn cosine_distance(a_norm_sq: f64, b_norm_sq: f64, dot: f64) -> f64 {
     let denominator = (a_norm_sq * b_norm_sq).sqrt();
@@ -1083,6 +1096,17 @@ impl<'a> SessionTx<'a> {
         idx_table: &RelationHandle,
     ) -> Result<()> {
         let compound_key = (tuple_key.to_vec(), idx, subidx);
+        // The manifest drives the repair below; a handle without it (never
+        // expected) degrades to the old unlink-only removal.
+        let manifest = orig_table
+            .hnsw_indices
+            .values()
+            .find(|(h, _)| h.name == idx_table.name)
+            .map(|(_, m)| m.clone());
+        let mut vec_cache = manifest.as_ref().map(|m| VectorCache {
+            cache: Default::default(),
+            distance: m.distance,
+        });
         // Go down the layers and remove all the links
         let mut encountered_singletons = false;
         for neg_layer in 0i64.. {
@@ -1104,6 +1128,7 @@ impl<'a> SessionTx<'a> {
                 .hnsw_get_neighbours(&compound_key, layer, idx_table, true)?
                 .collect_vec();
             encountered_singletons |= neigbours.is_empty();
+            let orphans = neigbours.iter().map(|(k, _)| k.clone()).collect_vec();
             for (neighbour_key, _) in neigbours {
                 // REMARK: this still has some probability of disconnecting the graph.
                 // Should we accept that as a consequence of the probabilistic nature of the algorithm?
@@ -1151,6 +1176,11 @@ impl<'a> SessionTx<'a> {
                     &neighbour_val_bytes_new,
                 )?;
             }
+            if let (Some(manifest), Some(vec_cache)) = (&manifest, &mut vec_cache) {
+                self.hnsw_repair_orphans(
+                    &orphans, layer, manifest, orig_table, idx_table, vec_cache,
+                )?;
+            }
         }
 
         if encountered_singletons {
@@ -1194,6 +1224,110 @@ impl<'a> SessionTx<'a> {
 
         Ok(())
     }
+    /// Reconnect the former neighbours of a removed node at `layer`.
+    ///
+    /// Unlinking alone can disconnect the graph: a removed hub leaves its
+    /// neighbours with no path to each other, and search silently stops
+    /// returning everything outside the entry point's component. Upstream
+    /// CozoDB only noted this ("still has some probability of disconnecting
+    /// the graph"). As in hnswlib's repair-on-delete, each orphan re-runs
+    /// neighbour selection over its remaining links plus the other orphans,
+    /// and gains the selected links it lacks. Existing links are kept, so the
+    /// repair only adds connectivity; over-full nodes are shrunk as on insert.
+    fn hnsw_repair_orphans(
+        &mut self,
+        orphans: &[CompoundKey],
+        layer: i64,
+        manifest: &HnswIndexManifest,
+        orig_table: &RelationHandle,
+        idx_table: &RelationHandle,
+        vec_cache: &mut VectorCache,
+    ) -> Result<()> {
+        if orphans.len() < 2 {
+            return Ok(());
+        }
+        let m_max = if layer == 0 {
+            manifest.m_max0
+        } else {
+            manifest.m_max
+        };
+        for node in orphans {
+            vec_cache.ensure_key(node, orig_table, self)?;
+            let q = vec_cache.get_key(node).clone();
+            let current: FxHashSet<CompoundKey> = self
+                .hnsw_get_neighbours(node, layer, idx_table, false)?
+                .map(|(k, _)| k)
+                .collect();
+            let mut found = PriorityQueue::new();
+            for cand in current.iter().chain(orphans.iter().filter(|c| *c != node)) {
+                vec_cache.ensure_key(cand, orig_table, self)?;
+                found.push(cand.clone(), OrderedFloat(vec_cache.v_dist(&q, cand)));
+            }
+            let selected = self.hnsw_select_neighbours_heuristic(
+                &q, &found, m_max, layer, manifest, idx_table, orig_table, vec_cache,
+            )?;
+            for (cand, Reverse(OrderedFloat(dist))) in selected {
+                if !current.contains(&cand) {
+                    self.hnsw_link(
+                        node, &cand, dist, layer, m_max, manifest, orig_table, idx_table, vec_cache,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Add (or revive) the live edges `a -> b` and `b -> a` at `layer`, then
+    /// refresh both stored degrees, shrinking a node that exceeds `m_max`.
+    #[allow(clippy::too_many_arguments)]
+    fn hnsw_link(
+        &mut self,
+        a: &CompoundKey,
+        b: &CompoundKey,
+        dist: f64,
+        layer: i64,
+        m_max: usize,
+        manifest: &HnswIndexManifest,
+        orig_table: &RelationHandle,
+        idx_table: &RelationHandle,
+        vec_cache: &mut VectorCache,
+    ) -> Result<()> {
+        let edge_val = [
+            DataValue::from(dist),
+            DataValue::Null,
+            DataValue::from(false),
+        ];
+        let edge_val_bytes = idx_table.encode_val_only_for_store(&edge_val, Default::default())?;
+        for (from, to) in [(a, b), (b, a)] {
+            let key = hnsw_row_key(layer, from, to);
+            let key_bytes = idx_table.encode_key_for_store(&key, Default::default())?;
+            self.idx_put(idx_table, &key_bytes, &edge_val_bytes)?;
+        }
+        for node in [a, b] {
+            let live = self
+                .hnsw_get_neighbours(node, layer, idx_table, false)?
+                .count();
+            let degree = if live > m_max {
+                self.hnsw_shrink_neighbour(
+                    node, m_max, layer, manifest, idx_table, orig_table, vec_cache,
+                )?
+            } else {
+                live
+            };
+            let self_key = hnsw_row_key(layer, node, node);
+            let self_key_bytes = idx_table.encode_key_for_store(&self_key, Default::default())?;
+            let self_val_bytes = self
+                .idx_get(idx_table, &self_key_bytes)?
+                .ok_or_else(|| miette!("corrupt HNSW index: self-row is missing"))?;
+            let mut self_val = try_decode_val_only(&self_key_bytes, &self_val_bytes)?;
+            self_val[0] = DataValue::from(degree as f64);
+            let self_val_bytes =
+                idx_table.encode_val_only_for_store(&self_val, Default::default())?;
+            self.idx_put(idx_table, &self_key_bytes, &self_val_bytes)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn hnsw_knn(
         &self,
         q: Vector,

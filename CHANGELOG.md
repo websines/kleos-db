@@ -11,6 +11,26 @@ to kleos.
 
 ### Fixed
 
+- Deleting vectors no longer makes surviving vectors unreachable in HNSW search.
+  Removal only unlinked the node (upstream CozoDB noted it "still has some probability
+  of disconnecting the graph"), so neighbours that were connected through it were cut
+  off and search silently stopped returning them. After deleting 60% of a 200-vector
+  index, 22 to 27 of the 76 survivors could no longer be found even by querying their
+  own vector; deleting the hub of a three-node index hid a survivor about 2 times in 3.
+  Removal now reconnects the orphaned neighbours on every layer, re-running neighbour
+  selection over their remaining links plus each other (as hnswlib's repair-on-delete
+  does). This applies to `:rm`, `:put` replacing a vector, and bulk deletes. Indexes
+  already damaged by earlier deletions are repaired by `::reindex`. Regression test:
+  `tests/hnsw_delete_connectivity.rs`.
+- Parsing no longer takes exponential time in nesting depth. Every comma-separated
+  grammar rule had the form `(x ~ ",")* ~ x?`, which parses the last element twice, so
+  each level of nested lists, objects or function calls doubled the work: a valid
+  list nested 18 deep took 10 s, and a 200-byte script of unclosed `[` (found by the
+  new fuzzer) hung before any query budget applied. The 18 rules now read
+  `(x ~ ("," ~ x)* ~ ","?)?`, which accepts the same language (trailing commas
+  included) and produces the same parse tree. Depth 40 parses in milliseconds.
+  Regression test: `tests/parser_nesting.rs`.
+
 - Bulk loads no longer leave search-index entries for rows they delete or replace
   (upstream CozoDB #232). `import_relations`, columnar import and
   `import_from_backup` skipped HNSW/FTS/LSH maintenance entirely. A row deleted
