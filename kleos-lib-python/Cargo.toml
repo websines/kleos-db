@@ -46,6 +46,13 @@ rdf-io = ["kleos/rdf-io"]
 ## Host-controlled Parquet/Arrow IPC import. Unlike `rdf-io`, this adds no
 ## CozoScript reader and does not widen script authority.
 columnar-io = ["kleos/columnar-io"]
+## Built-in embedders (EmbeddingGemma, Model2Vec) for `enable_embedder` /
+## `::embedder enable` (kleos fork). candle 0.11 needs rustc >= 1.99, so this
+## is not in the maturin feature list yet: build with
+## `cargo +1.99.0` / `maturin build -F infer` (or `-F infer-metal` on macOS).
+infer = ["kleos/infer"]
+## `infer` plus Apple-GPU (Metal) kernels; macOS only.
+infer-metal = ["infer", "kleos/infer-metal"]
 ## Uses jemalloc as the global allocator, can make a difference in performance
 jemalloc = ["kleos/jemalloc"]
 ## Enables io-uring option for the RocksDB storage
