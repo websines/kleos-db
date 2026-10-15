@@ -956,6 +956,7 @@ pub(crate) fn get_op(name: &str) -> Option<&'static Op> {
         "rand_vec" => &OP_RAND_VEC,
         // kleos fork: registered text embedders (UPGRADE_PLAN D3, src/embed.rs)
         "embed" => &crate::embed::OP_EMBED,
+        "embed_or_null" => &crate::embed::OP_EMBED_OR_NULL,
         _ => return None,
     })
 }

@@ -100,6 +100,78 @@ pub enum SysOp {
     /// change feeds, provenance links, cascading retract/erase, lineage.
     /// See `parse/memory.rs` and `runtime/memory.rs`.
     Memory(crate::parse::memory::MemoryOp),
+    /// kleos fork: `::embedder list | enable | disable | backfill`
+    /// (docs/specs/embedder-toggle.md). Process-wide, like the registry.
+    Embedder(EmbedderOp),
+}
+
+/// `::embedder ...` (kleos fork).
+#[derive(Debug)]
+pub(crate) enum EmbedderOp {
+    /// One row per enabled or disabled embedder.
+    List,
+    /// Name and spec (an empty spec re-enables a disabled embedder as it was).
+    Enable(String, crate::embed::EmbedderSpec),
+    /// Name.
+    Disable(String),
+    /// Fill the null embedded columns of a relation.
+    Backfill(Symbol),
+}
+
+fn embedder_name(p: crate::parse::Pair<'_>) -> Result<String> {
+    Ok(match p.as_rule() {
+        Rule::ident => p.as_str().to_string(),
+        _ => parse_string(p)?.to_string(),
+    })
+}
+
+fn parse_embedder_op(
+    inner: crate::parse::Pair<'_>,
+    param_pool: &BTreeMap<String, DataValue>,
+) -> Result<EmbedderOp> {
+    let inner = inner.into_inner().next().unwrap();
+    Ok(match inner.as_rule() {
+        Rule::embedder_list => EmbedderOp::List,
+        Rule::embedder_disable => {
+            EmbedderOp::Disable(embedder_name(inner.into_inner().next().unwrap())?)
+        }
+        Rule::embedder_backfill => {
+            let rel = inner.into_inner().next().unwrap();
+            EmbedderOp::Backfill(Symbol::new(rel.as_str(), rel.extract_span()))
+        }
+        Rule::embedder_enable => {
+            let mut parts = inner.into_inner();
+            let name = embedder_name(parts.next().unwrap())?;
+            let mut spec = crate::embed::EmbedderSpec::default();
+            for opt in parts {
+                let mut o = opt.into_inner();
+                let key = o.next().unwrap().as_str();
+                let val = build_expr(o.next().unwrap(), param_pool)?.eval_to_const()?;
+                let as_str = |v: &DataValue| -> Result<String> {
+                    match v {
+                        DataValue::Str(s) => Ok(s.to_string()),
+                        v => bail!("`::embedder enable` option '{key}' must be a string, got {v:?}"),
+                    }
+                };
+                match key {
+                    "model" => spec.model = Some(as_str(&val)?),
+                    "precision" => spec.precision = Some(as_str(&val)?),
+                    "device" => spec.device = Some(as_str(&val)?),
+                    "dim" => {
+                        spec.dim = Some(match val.get_int() {
+                            Some(n) if n > 0 => n as usize,
+                            _ => bail!("`::embedder enable` option 'dim' must be a positive integer, got {val:?}"),
+                        })
+                    }
+                    other => bail!(
+                        "unknown option '{other}' for `::embedder enable`: expected model, precision, device or dim"
+                    ),
+                }
+            }
+            EmbedderOp::Enable(name, spec)
+        }
+        r => unreachable!("{:?}", r),
+    })
 }
 
 /// A declared stored-query parameter. Types and defaults are optional, but
@@ -223,6 +295,7 @@ pub(crate) fn parse_sys(
         | Rule::lineage_op => SysOp::Memory(crate::parse::memory::parse_memory_op(
             inner, param_pool, cur_vld,
         )?),
+        Rule::embedder_op => SysOp::Embedder(parse_embedder_op(inner, param_pool)?),
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,

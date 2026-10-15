@@ -52,6 +52,11 @@ impl StaticEmbedder {
         })
     }
 
+    /// Whether the embedding table is in memory.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.get().is_some()
+    }
+
     fn load(&self) -> Result<&Loaded> {
         if let Some(l) = self.loaded.get() {
             return Ok(l);

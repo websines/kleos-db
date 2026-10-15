@@ -1106,6 +1106,72 @@ impl CozoDbPy {
         }
         true
     }
+    /// Turn a built-in embedder on under `name` (kleos fork; process-wide,
+    /// like `::embedder enable`). With no keyword arguments a previously
+    /// disabled embedder comes back as it was; otherwise `model` defaults to
+    /// EmbeddingGemma (`'embeddinggemma'`, int8, auto device, 768-d), or e.g.
+    /// `'potion-base-8M'`. Built-in models need a build with the `infer`
+    /// feature.
+    #[pyo3(signature = (name, model=None, precision=None, device=None, dim=None))]
+    pub fn enable_embedder(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        model: Option<String>,
+        precision: Option<String>,
+        device: Option<String>,
+        dim: Option<usize>,
+    ) -> PyResult<()> {
+        self.db_ref()?;
+        let spec = ::kleos::embed::EmbedderSpec {
+            model,
+            precision,
+            device,
+            dim,
+        };
+        py.allow_threads(|| ::kleos::embed::enable_embedder(name, spec))
+            .map_err(report2py)
+    }
+    /// Turn the embedder `name` off: unregister it (and gemma's `_query`
+    /// twin), unload its model and drop its cached vectors. Returns `False`
+    /// when it was already off. Process-wide.
+    pub fn disable_embedder(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
+        self.db_ref()?;
+        py.allow_threads(|| ::kleos::embed::disable_embedder(name))
+            .map_err(report2py)
+    }
+    /// Every enabled and disabled embedder as a dict with `name`, `kind`,
+    /// `model`, `dim`, `enabled`, `loaded`, `precision`, `device` (the module
+    /// function `registered_embedders()` keeps returning `(name, dim)` of the
+    /// enabled ones).
+    pub fn embedders(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.db_ref()?;
+        let out = PyList::empty(py);
+        for e in ::kleos::embed::embedders() {
+            let d = PyDict::new(py);
+            d.set_item("name", e.name)?;
+            d.set_item("kind", e.kind)?;
+            d.set_item("model", e.model)?;
+            d.set_item("dim", e.dim)?;
+            d.set_item("enabled", e.enabled)?;
+            d.set_item("loaded", e.loaded)?;
+            d.set_item("precision", e.precision)?;
+            d.set_item("device", e.device)?;
+            out.append(d)?;
+        }
+        Ok(out.into())
+    }
+    /// Fill the null embedded columns of `relation` (columns whose default
+    /// calls `embed()` / `embed_or_null()`), batched through the cache; same
+    /// as `::embedder backfill <relation>`. Returns the usual result dict with
+    /// rows `[column, filled, still_null]`.
+    pub fn backfill_embeddings(&self, py: Python<'_>, relation: &str) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let rows = py
+            .allow_threads(|| db.backfill_embeddings(relation))
+            .map_err(report2py)?;
+        Ok(named_rows_to_py(rows, py))
+    }
     pub fn multi_transact(&self, write: bool) -> PyResult<CozoDbMulTx> {
         let db = self.db_ref()?;
         Ok(CozoDbMulTx {
@@ -1225,6 +1291,36 @@ fn py_registered_embedders() -> Vec<(String, usize)> {
     ::kleos::embed::registered_embedders()
 }
 
+/// Module-level twin of `CozoDbPy.enable_embedder` (the registry is
+/// process-wide, so no handle is needed).
+#[pyfunction]
+#[pyo3(name = "enable_embedder", signature = (name, model=None, precision=None, device=None, dim=None))]
+fn py_enable_embedder(
+    py: Python<'_>,
+    name: &str,
+    model: Option<String>,
+    precision: Option<String>,
+    device: Option<String>,
+    dim: Option<usize>,
+) -> PyResult<()> {
+    let spec = ::kleos::embed::EmbedderSpec {
+        model,
+        precision,
+        device,
+        dim,
+    };
+    py.allow_threads(|| ::kleos::embed::enable_embedder(name, spec))
+        .map_err(report2py)
+}
+
+/// Module-level twin of `CozoDbPy.disable_embedder`.
+#[pyfunction]
+#[pyo3(name = "disable_embedder")]
+fn py_disable_embedder(py: Python<'_>, name: &str) -> PyResult<bool> {
+    py.allow_threads(|| ::kleos::embed::disable_embedder(name))
+        .map_err(report2py)
+}
+
 #[pymodule]
 fn kleos(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<CozoDbPy>()?;
@@ -1234,5 +1330,7 @@ fn kleos(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_register_embedder, m)?)?;
     m.add_function(wrap_pyfunction!(py_unregister_embedder, m)?)?;
     m.add_function(wrap_pyfunction!(py_registered_embedders, m)?)?;
+    m.add_function(wrap_pyfunction!(py_enable_embedder, m)?)?;
+    m.add_function(wrap_pyfunction!(py_disable_embedder, m)?)?;
     Ok(())
 }

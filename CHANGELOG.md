@@ -124,6 +124,41 @@ to kleos.
   returns one `dim`-wide vector per text; the embedder then works in `embed()` and
   computed columns like a Rust one. The registry is process-wide, so these are module
   functions, not `CozoDbPy` methods. Tests: `kleos-lib-python/tests/test_wave1.py`.
+- Runtime on/off switch for embedders. `::embedder list` shows every enabled or
+  disabled embedder (name, kind gemma/model2vec/custom, model, dim, enabled, loaded,
+  precision, device). `::embedder enable gemma {model: 'embeddinggemma', precision:
+  'int8', device: 'auto', dim: 768}` (every option optional; the defaults are
+  EmbeddingGemma int8 on the auto device, or `{model: 'potion-base-8M'}`) builds a
+  built-in model, loaded lazily, plus gemma's `gemma_query` twin. `::embedder disable
+  gemma` unregisters both, unloads the weights and drops their cached vectors.
+  `::embedder enable gemma` with no options brings back the previous configuration,
+  including Rust- or Python-registered embedders. Without the `infer` feature,
+  enabling a built-in model fails with an error that names the feature. While an
+  embedder is off, `embed()` errors with "embedder 'gemma' is disabled; turn it back
+  on with `::embedder enable gemma`", and strict computed columns reject the write.
+  The new `embed_or_null()` returns null instead, so a nullable column `vec: <F32;
+  768>? default embed_or_null('gemma', text)` keeps accepting writes while the model
+  is off. `::embedder backfill docs` then fills those nulls in batches through the
+  cache with an ordinary `:update` that maintains the HNSW index, and refuses to run
+  while the model is still off. The registry is process-wide, so the switch affects
+  every open database. The same switch is available in Rust
+  (`enable_embedder(name, EmbedderSpec)`, `disable_embedder`, `embedders()`,
+  `backfill_embeddings`), in Python (`db.enable_embedder(name, model=..., precision=...,
+  device=..., dim=...)`, `db.disable_embedder`, `db.embedders()`,
+  `db.backfill_embeddings`, plus module-level `kleos.enable_embedder` /
+  `kleos.disable_embedder`) and in kleos-bin (`--embedder gemma=embeddinggemma:int8`,
+  repeatable; new `infer` / `infer-metal` features on kleos-bin and kleos-py). The
+  `Embedder` trait gains the default methods `is_loaded`, `device` and `unload`.
+  Disabling now actually frees the model. `kleos-infer` runs its Metal work and
+  `unload()` inside an Objective-C autorelease pool. Without the pool, debug
+  builds never released the buffers (+315 MB per enable/disable cycle). Measured
+  with gemma int8 on Metal through `::embedder enable/disable` (process
+  footprint): 7.5 MB before, 439 MB after enable and the first embed, 15 MB after
+  disable, and the same again on the next cycle, when run with
+  `MallocLargeCache=0`. With the default macOS allocator, freed load-time buffers
+  stay in libmalloc's large cache (836 MB loaded, 478 MB after disable). The
+  kernel reclaims that memory under pressure. Spec: `docs/specs/embedder-toggle.md`; tests:
+  `kleos-core/tests/embed_toggle.rs`.
 
 ### Fixed
 

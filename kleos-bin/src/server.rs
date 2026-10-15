@@ -95,6 +95,15 @@ pub(crate) struct ServerArgs {
     /// an in-script `:mem_limit` can only tighten it.
     #[clap(long, default_value_t = 4 * 1024 * 1024 * 1024)]
     default_query_mem_limit: u64,
+
+    /// Turn a built-in embedder on at startup (repeatable):
+    /// `--embedder name=model[:precision[:device[:dim]]]`, e.g.
+    /// `--embedder gemma=embeddinggemma:int8` or
+    /// `--embedder potion=potion-base-8M`. Needs a build with the `infer`
+    /// (or `infer-metal`) feature. `::embedder enable/disable` switch
+    /// embedders at runtime too, also over HTTP.
+    #[clap(long = "embedder")]
+    embedders: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -433,6 +442,12 @@ pub(crate) async fn server_main(args: ServerArgs) {
     std::fs::create_dir_all(&args.backup_dir).expect("Cannot create HTTP backup directory");
     let backup_dir =
         std::fs::canonicalize(&args.backup_dir).expect("Cannot resolve HTTP backup directory");
+    for arg in &args.embedders {
+        let (name, spec) = kleos::EmbedderSpec::parse_cli(arg)
+            .and_then(|(n, s)| kleos::enable_embedder(&n, s.clone()).map(|_| (n, s)))
+            .unwrap_or_else(|e| panic!("--embedder {arg}: {e:?}"));
+        eprintln!("embedder '{name}' enabled ({spec:?})");
+    }
     if args.default_query_mem_limit > 0 {
         db.set_default_query_mem_limit(Some(args.default_query_mem_limit as usize));
     }

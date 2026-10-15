@@ -75,11 +75,26 @@ pub(crate) struct ReplArgs {
     /// Extra config in JSON format
     #[clap(short, long, default_value_t = String::from("{}"))]
     config: String,
+
+    /// Turn a built-in embedder on at startup (repeatable):
+    /// `--embedder name=model[:precision[:device[:dim]]]`, e.g.
+    /// `--embedder gemma=embeddinggemma:int8` or
+    /// `--embedder potion=potion-base-8M`. Needs a build with the `infer`
+    /// (or `infer-metal`) feature. `::embedder enable/disable` switch
+    /// embedders at runtime too.
+    #[clap(long = "embedder")]
+    embedders: Vec<String>,
 }
 
 pub(crate) fn repl_main(args: ReplArgs) -> Result<(), Box<dyn Error>> {
     let db = DbInstance::new(&args.engine, args.path, &args.config).unwrap();
 
+    for arg in &args.embedders {
+        let (name, spec) = kleos::EmbedderSpec::parse_cli(arg)
+            .and_then(|(n, s)| kleos::enable_embedder(&n, s.clone()).map(|_| (n, s)))
+            .unwrap_or_else(|e| panic!("--embedder {arg}: {e:?}"));
+        eprintln!("embedder '{name}' enabled ({spec:?})");
+    }
     let db_copy = db.clone();
     ctrlc::set_handler(move || {
         let running = db_copy
