@@ -127,8 +127,8 @@ Full upgrade guidance is in the [`CHANGELOG.md`](https://github.com/websines/kle
 
 ## Importable name
 
-The published crate is `kleos`, but the importable Rust crate name is `cozo`,
-so existing CozoDB code works unchanged:
+The published crate and the importable Rust crate are both `kleos`. Code written
+against CozoDB or mnestic needs its `use cozo::…` imports renamed to `use kleos::…`:
 
 ```toml
 [dependencies]
