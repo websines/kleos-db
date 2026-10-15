@@ -132,7 +132,10 @@ pub(crate) fn canonical_input(h: &RelationHandle) -> (InputRelationHandle, Vec<S
 fn vt_of(v: &DataValue) -> Result<(i64, bool)> {
     match v {
         DataValue::Validity(v) => Ok((v.timestamp.0 .0, v.is_assert.0)),
-        v => bail!("expected a Validity value in the valid-time column, got {:?}", v),
+        v => bail!(
+            "expected a Validity value in the valid-time column, got {:?}",
+            v
+        ),
     }
 }
 
@@ -332,10 +335,7 @@ pub(crate) fn supersede_rule(
 
 #[derive(Debug, Error, Diagnostic)]
 #[error("conflicting facts for one supersession key of {relation} at the same valid time: {key:?}")]
-#[diagnostic(
-    code(eval::supersede_same_instant),
-    help("{help}")
-)]
+#[diagnostic(code(eval::supersede_same_instant), help("{help}"))]
 struct SupersedeSameInstant {
     relation: String,
     key: Vec<DataValue>,
@@ -872,7 +872,9 @@ fn provenance_create(
         l.name,
         d.name,
         s.name,
-        want.iter().map(|c| format!("{}: {}", c.name, c.typing)).join(", ")
+        want.iter()
+            .map(|c| format!("{}: {}", c.name, c.typing))
+            .join(", ")
     );
     let cat = catalog_for_write(tx, PROVENANCE_CATALOG, provenance_meta())?;
     let key = vec![DataValue::from(l.id.0 as i64)];
@@ -895,11 +897,7 @@ fn provenance_drop(tx: &mut SessionTx<'_>, link: &Symbol) -> Result<NamedRows> {
     let l = user_relation(tx, &link.name, "::provenance drop")?;
     let cat = catalog_for_write(tx, PROVENANCE_CATALOG, provenance_meta())?;
     let key = vec![DataValue::from(l.id.0 as i64)];
-    ensure!(
-        cat.exists(tx, &key)?,
-        "{} is not a provenance link",
-        l.name
-    );
+    ensure!(cat.exists(tx, &key)?, "{} is not a provenance link", l.name);
     tx.store_tx
         .del(&cat.encode_key_for_store(&key, SourceSpan::default())?)?;
     Ok(status_ok())
@@ -979,7 +977,11 @@ fn sources_of(
 fn alive(tx: &SessionTx<'_>, h: &RelationHandle, key: &Tuple, vt: ValidityTs) -> Result<bool> {
     Ok(match axes(h) {
         Axes::Plain => h.exists(tx, key)?,
-        Axes::Vt => h.skip_scan_prefix(tx, key, vt).next().transpose()?.is_some(),
+        Axes::Vt => h
+            .skip_scan_prefix(tx, key, vt)
+            .next()
+            .transpose()?
+            .is_some(),
         Axes::TtOnly => h
             .skip_scan_prefix(tx, key, MAX_VALIDITY_TS)
             .next()
@@ -1090,7 +1092,8 @@ fn retract_key<'s, S: Storage<'s>>(
 /// with `::evict`; generated once per store under a locking read so two
 /// racing first erasures cannot mint two salts).
 pub(crate) fn evict_key_namespace(tx: &mut SessionTx<'_>) -> Result<uuid::Uuid> {
-    let salt_key = vec![DataValue::Null, DataValue::from("EVICT_SALT")].encode_as_key(RelationId::SYSTEM);
+    let salt_key =
+        vec![DataValue::Null, DataValue::from("EVICT_SALT")].encode_as_key(RelationId::SYSTEM);
     let salt = match tx.store_tx.get(&salt_key, true)? {
         Some(s) => s,
         None => {
@@ -1191,10 +1194,8 @@ fn remove_source<'s, S: Storage<'s>>(
 
     // lock the closure of relations the cascade can reach
     let mut ids = BTreeSet::from([root.id]);
-    let mut names: BTreeSet<SmartString<LazyCompact>> = BTreeSet::from([
-        root.name.clone(),
-        SmartString::from(PROVENANCE_CATALOG),
-    ]);
+    let mut names: BTreeSet<SmartString<LazyCompact>> =
+        BTreeSet::from([root.name.clone(), SmartString::from(PROVENANCE_CATALOG)]);
     if hard {
         names.insert(SmartString::from(EVICT_AUDIT));
     }

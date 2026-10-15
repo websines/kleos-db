@@ -2568,7 +2568,10 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// The reserved eviction-audit relation (kleos fork, bitemporality
     /// step 5), created lazily on first `::evict`. Keys: (relation, key
     /// marker, tt); value: rows_deleted.
-    pub(crate) fn tt_evict_audit_relation(&'s self, tx: &mut SessionTx<'_>) -> Result<RelationHandle> {
+    pub(crate) fn tt_evict_audit_relation(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+    ) -> Result<RelationHandle> {
         use crate::data::relation::{ColType, ColumnDef, NullableColType, StoredRelationMetadata};
         let col = |name: &str, coltype: ColType| ColumnDef {
             name: SmartString::from(name),
@@ -2709,13 +2712,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             SysOp::ListStoredQueries => stored_queries::list(tx),
             // kleos fork, agent memory (UPGRADE_PLAN E1/E2)
-            SysOp::Memory(op) => crate::runtime::memory::run_memory_op(
-                self,
-                tx,
-                op,
-                read_only,
-                skip_locking,
-            ),
+            SysOp::Memory(op) => {
+                crate::runtime::memory::run_memory_op(self, tx, op, read_only, skip_locking)
+            }
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,

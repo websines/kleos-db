@@ -85,7 +85,10 @@ fn open() -> (tempfile::TempDir, DbInstance) {
 }
 
 fn schema(db: &DbInstance) {
-    run(db, ":create episode {id: String, vt: Validity => text: String}");
+    run(
+        db,
+        ":create episode {id: String, vt: Validity => text: String}",
+    );
     run(
         db,
         ":create fact {subject: String, predicate: String, object: String, vt: Validity, \
@@ -185,12 +188,20 @@ fn agent_memory_timeline() {
 
     // --- out-of-order arrival ----------------------------------------------
     // learned late: Alice was at Initech between Acme and Globex …
-    episode(&db, "ep6", 20, "Alice mentions she spent a while at Initech, and before Acme at a startup");
+    episode(
+        &db,
+        "ep6",
+        20,
+        "Alice mentions she spent a while at Initech, and before Acme at a startup",
+    );
     fact(&db, "alice", "works_at", "Initech", 7, &["ep6"]);
     // … and at a startup before Acme. Neither may end the newer job.
     fact(&db, "alice", "works_at", "Startup", 0, &["ep6"]);
 
-    assert_eq!(objects_at(&db, "alice", "works_at", d(0) + 3_600_000_000), ["Startup"]);
+    assert_eq!(
+        objects_at(&db, "alice", "works_at", d(0) + 3_600_000_000),
+        ["Startup"]
+    );
     assert_eq!(objects_at(&db, "alice", "works_at", d(3)), ["Acme"]);
     assert_eq!(objects_at(&db, "alice", "works_at", d(8)), ["Initech"]);
     assert_eq!(objects_at(&db, "alice", "works_at", d(11)), ["Globex"]);
@@ -199,7 +210,14 @@ fn agent_memory_timeline() {
         objects_known(&db, "alice", "works_at", d(8), tt_before_late),
         ["Acme"]
     );
-    assert!(objects_known(&db, "alice", "works_at", d(0) + 3_600_000_000, tt_before_late).is_empty());
+    assert!(objects_known(
+        &db,
+        "alice",
+        "works_at",
+        d(0) + 3_600_000_000,
+        tt_before_late
+    )
+    .is_empty());
     // what was learned between two transaction times (about day 8)
     let learned = run(
         &db,
@@ -217,7 +235,10 @@ fn agent_memory_timeline() {
     let tt_typo = tt_mark();
     fact(&db, "bob", "works_at", "Initech", 12, &["ep4"]);
     assert_eq!(objects_at(&db, "bob", "works_at", d(13)), ["Initech"]);
-    assert_eq!(objects_known(&db, "bob", "works_at", d(13), tt_typo), ["Initec"]);
+    assert_eq!(
+        objects_known(&db, "bob", "works_at", d(13), tt_typo),
+        ["Initec"]
+    );
 
     // --- idempotent re-assertion -------------------------------------------
     let before = history_len(&db, "alice", "works_at", "Globex");
@@ -237,7 +258,14 @@ fn agent_memory_timeline() {
     );
     assert_eq!(
         ch.headers,
-        ["subject", "predicate", "object", "change", "at", "confidence"]
+        [
+            "subject",
+            "predicate",
+            "object",
+            "change",
+            "at",
+            "confidence"
+        ]
     );
     let got: Vec<(String, String, i64)> = ch
         .rows
@@ -277,15 +305,25 @@ fn agent_memory_timeline() {
     // a corrected typo never was current: it does not show up as a change
     let bob = run(
         &db,
-        &format!("::changes fact {{from: {}, to: {}, prefix: ['bob']}}", d(11), d(13)),
+        &format!(
+            "::changes fact {{from: {}, to: {}, prefix: ['bob']}}",
+            d(11),
+            d(13)
+        ),
     );
     assert_eq!(
-        table(&bob).into_iter().map(|r| r[2].clone()).collect::<Vec<_>>(),
+        table(&bob)
+            .into_iter()
+            .map(|r| r[2].clone())
+            .collect::<Vec<_>>(),
         ["Initech"]
     );
 
     // --- E2: provenance cascade on source retraction ------------------------
-    run(&db, ":create summary {sid: String, vt: Validity => text: String}");
+    run(
+        &db,
+        ":create summary {sid: String, vt: Validity => text: String}",
+    );
     run(
         &db,
         ":create summary_src {sid: String, subject: String, predicate: String, object: String}",
@@ -337,7 +375,13 @@ fn agent_memory_timeline() {
         table(&lin),
         [
             vec!["0", "summary", "[s1]", "null", "false"],
-            vec!["1", "fact", "[alice,lives_in,Berlin]", "summary_src", "false"],
+            vec![
+                "1",
+                "fact",
+                "[alice,lives_in,Berlin]",
+                "summary_src",
+                "false"
+            ],
             vec!["2", "episode", "[ep2]", "fact_src", "false"],
         ]
     );
@@ -368,7 +412,10 @@ fn agent_memory_timeline() {
         "::fts create note:text {extractor: text, tokenizer: Simple, filters: [Lowercase]}",
     );
     run(&db, ":create note_src {nid: String, ep: String}");
-    run(&db, "::provenance create note_src {derived: note, source: episode}");
+    run(
+        &db,
+        "::provenance create note_src {derived: note, source: episode}",
+    );
     episode(&db, "ep7", 30, "Alice phone number is 555-0100");
     episode(&db, "ep8", 31, "Alice likes jazz");
     run(
@@ -411,15 +458,26 @@ fn agent_memory_timeline() {
         ]
     );
     // every row of every erased key is physically gone, at every time
-    assert!(run(&db, "?[v] := *episode{id: 'ep7', vt: v}").rows.is_empty());
-    assert!(run(&db, "?[v] := *note{nid: 'n1', vt: v}").rows.is_empty());
-    assert!(run(&db, "?[v] := *summary{sid: 's2', vt: v}").rows.is_empty());
-    assert!(run(&db, "?[o] := *fact{subject: 'alice', predicate: 'phone', object: o}")
+    assert!(run(&db, "?[v] := *episode{id: 'ep7', vt: v}")
         .rows
         .is_empty());
+    assert!(run(&db, "?[v] := *note{nid: 'n1', vt: v}").rows.is_empty());
+    assert!(run(&db, "?[v] := *summary{sid: 's2', vt: v}")
+        .rows
+        .is_empty());
+    assert!(run(
+        &db,
+        "?[o] := *fact{subject: 'alice', predicate: 'phone', object: o}"
+    )
+    .rows
+    .is_empty());
     assert_eq!(history_len(&db, "alice", "phone", "555-0100"), 0);
-    assert!(run(&db, "?[n] := *note_src{nid: n, ep: 'ep7'}").rows.is_empty());
-    assert!(run(&db, "?[o] := *fact_src{object: o, episode: 'ep7'}").rows.is_empty());
+    assert!(run(&db, "?[n] := *note_src{nid: n, ep: 'ep7'}")
+        .rows
+        .is_empty());
+    assert!(run(&db, "?[o] := *fact_src{object: o, episode: 'ep7'}")
+        .rows
+        .is_empty());
     // … and so are their search-index entries
     assert_eq!(col(&run(&db, knn)), ["n2", "n3"]);
     assert_eq!(col(&run(&db, fts)), ["n2"]);
@@ -430,13 +488,13 @@ fn agent_memory_timeline() {
     );
     // audit markers: one per erased key, salted hashes, no plaintext
     let audit = run(&db, "?[r, k] := *kleos_evict_audit{relation: r, key: k}");
-    assert_eq!(
-        col(&audit),
-        ["episode", "fact", "note", "summary"]
-    );
+    assert_eq!(col(&audit), ["episode", "fact", "note", "summary"]);
     for row in &audit.rows {
         let k = s(&row[1]);
-        assert!(!k.contains("555") && !k.contains("ep7") && !k.contains("n1"), "{k}");
+        assert!(
+            !k.contains("555") && !k.contains("ep7") && !k.contains("n1"),
+            "{k}"
+        );
     }
 }
 
@@ -485,14 +543,20 @@ fn same_transaction_writes_see_each_other() {
         ),
     )
     .unwrap_err();
-    assert!(format!("{err:?}").contains("supersede_same_instant"), "{err:?}");
+    assert!(
+        format!("{err:?}").contains("supersede_same_instant"),
+        "{err:?}"
+    );
 }
 
 #[test]
 fn valid_time_only_relations() {
     let db = DbInstance::new("mem", "", "").unwrap();
     // object in the key: supersession over siblings
-    run(&db, ":create pref {user: String, item: String, vt: Validity => why: String default ''}");
+    run(
+        &db,
+        ":create pref {user: String, item: String, vt: Validity => why: String default ''}",
+    );
     run(&db, "::supersede create pref {user}");
     let put = |item: &str, day: i64| {
         try_run(
@@ -506,19 +570,32 @@ fn valid_time_only_relations() {
     put("tea", 1).unwrap();
     put("coffee", 4).unwrap();
     put("coffee", 6).unwrap(); // redundant: no new row
-    let at = |t: i64| col(&run(&db, &format!("?[i] := *pref{{user: 'u', item: i @ {t}}}")));
+    let at = |t: i64| {
+        col(&run(
+            &db,
+            &format!("?[i] := *pref{{user: 'u', item: i @ {t}}}"),
+        ))
+    };
     assert_eq!(at(d(2)), ["tea"]);
     assert_eq!(at(d(5)), ["coffee"]);
     assert_eq!(
-        run(&db, "?[i, v] := *pref{user: 'u', item: i, vt: v}").rows.len(),
+        run(&db, "?[i, v] := *pref{user: 'u', item: i, vt: v}")
+            .rows
+            .len(),
         3 // tea@1, tea retracted@4, coffee@4
     );
     // a correction at the same instant cannot be expressed without TxTime
     let err = put("juice", 4).unwrap_err();
-    assert!(format!("{err:?}").contains("supersede_same_instant"), "{err:?}");
+    assert!(
+        format!("{err:?}").contains("supersede_same_instant"),
+        "{err:?}"
+    );
 
     // object as value: the key alone supersedes; the rule adds dedup
-    run(&db, ":create city {user: String, vt: Validity => name: String}");
+    run(
+        &db,
+        ":create city {user: String, vt: Validity => name: String}",
+    );
     run(&db, "::supersede create city {user}");
     for (day, name) in [(1, "Paris"), (2, "Paris"), (3, "Lyon"), (4, "Lyon")] {
         run(
@@ -529,7 +606,12 @@ fn valid_time_only_relations() {
             ),
         );
     }
-    assert_eq!(run(&db, "?[v, n] := *city{user: 'u', vt: v, name: n}").rows.len(), 2);
+    assert_eq!(
+        run(&db, "?[v, n] := *city{user: 'u', vt: v, name: n}")
+            .rows
+            .len(),
+        2
+    );
 
     // declaration errors
     assert!(try_run(&db, "::supersede create pref {item}").is_err());
@@ -538,6 +620,26 @@ fn valid_time_only_relations() {
     assert_eq!(
         table(&run(&db, "::supersede list")),
         [vec!["city", "[user]"], vec!["pref", "[user]"]]
+    );
+
+    // declarations follow the relation id across a rename
+    run(&db, "::rename city -> town");
+    assert_eq!(
+        table(&run(&db, "::supersede list")),
+        [vec!["pref", "[user]"], vec!["town", "[user]"]]
+    );
+    run(
+        &db,
+        &format!(
+            "?[user, vt, name] <- [['u', [{}, true], 'Lyon']] :put town {{user, vt => name}}",
+            d(5)
+        ),
+    );
+    assert_eq!(
+        run(&db, "?[v, n] := *town{user: 'u', vt: v, name: n}")
+            .rows
+            .len(),
+        2
     );
 
     // bulk import would bypass supersession: rejected
@@ -564,14 +666,28 @@ fn valid_time_only_relations() {
 fn provenance_declaration_checks() {
     let db = DbInstance::new("mem", "", "").unwrap();
     run(&db, ":create doc {id: Int => body: String}");
-    run(&db, ":create claim {c: String, vt: Validity => w: Float default 1.0}");
+    run(
+        &db,
+        ":create claim {c: String, vt: Validity => w: Float default 1.0}",
+    );
     run(&db, ":create claim_doc {c: String, id: Int}");
     run(&db, ":create bad_link {id: Int, c: String}");
     // wrong column order / types
-    assert!(try_run(&db, "::provenance create bad_link {derived: claim, source: doc}").is_err());
+    assert!(try_run(
+        &db,
+        "::provenance create bad_link {derived: claim, source: doc}"
+    )
+    .is_err());
     // derived relation without a time axis cannot be retracted
-    assert!(try_run(&db, "::provenance create claim_doc {derived: doc, source: claim}").is_err());
-    run(&db, "::provenance create claim_doc {derived: claim, source: doc}");
+    assert!(try_run(
+        &db,
+        "::provenance create claim_doc {derived: doc, source: claim}"
+    )
+    .is_err());
+    run(
+        &db,
+        "::provenance create claim_doc {derived: claim, source: doc}",
+    );
     assert_eq!(
         table(&run(&db, "::provenance list")),
         [["claim_doc", "claim", "doc"]]
@@ -584,7 +700,10 @@ fn provenance_declaration_checks() {
     let r = run(&db, "::erase doc [[1]]");
     assert_eq!(
         table(&r),
-        [vec!["0", "doc", "[1]", "erased"], vec!["1", "claim", "[k]", "erased"]]
+        [
+            vec!["0", "doc", "[1]", "erased"],
+            vec!["1", "claim", "[k]", "erased"]
+        ]
     );
     run(&db, "::provenance drop claim_doc");
     assert!(run(&db, "::provenance list").rows.is_empty());
@@ -617,9 +736,15 @@ fn insert_imperative_and_explicit_times() {
     .is_err());
 
     // a tt-only (system-versioned) derived relation is retracted with :rm
-    run(&db, ":create badge {who: String, tt: TxTime => label: String}");
+    run(
+        &db,
+        ":create badge {who: String, tt: TxTime => label: String}",
+    );
     run(&db, ":create badge_src {who: String, id: String}");
-    run(&db, "::provenance create badge_src {derived: badge, source: episode}");
+    run(
+        &db,
+        "::provenance create badge_src {derived: badge, source: episode}",
+    );
     episode(&db, "ep1", 1, "Frank earned a badge");
     run(
         &db,
@@ -635,7 +760,9 @@ fn insert_imperative_and_explicit_times() {
             vec!["1", "badge", "[frank]", "retracted"],
         ]
     );
-    assert!(run(&db, "?[l] := *badge{who: 'frank', label: l}").rows.is_empty());
+    assert!(run(&db, "?[l] := *badge{who: 'frank', label: l}")
+        .rows
+        .is_empty());
     assert_eq!(
         col(&run(&db, &format!("?[i] := *episode{{id: i @ {}}}", d(2)))),
         ["ep1"]
