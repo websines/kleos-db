@@ -1,0 +1,30 @@
+[package]
+name = "kleos-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MPL-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# No `requests` (fixed rules must not reach the network) and no SQLite or
+# other file-backed engine (`::backup` and friends must not write to disk):
+# fuzzed scripts run against the in-memory engine only.
+kleos = { path = "..", default-features = false, features = ["graph-algo"] }
+
+# Own workspace, so the fuzz build never joins the main one.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "run_script"
+path = "fuzz_targets/run_script.rs"
+test = false
+doc = false
+bench = false

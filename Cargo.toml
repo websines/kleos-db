@@ -6,9 +6,10 @@ members = [
     "kleos-bin",
     "kleos-core-examples",
 ]
-# Language bindings are deferred in the kleos fork — the fork targets a Rust
-# agentic-memory substrate (consumed by mindgraph-rs). The binding crates are
-# kept in-tree but excluded from the workspace build/maintenance for now.
+# Language bindings are built outside the workspace. kleos-lib-python is
+# maintained and built on its own (maturin); the C, Java, Node.js, Swift and
+# WASM bindings are unmaintained and kept in-tree for a later revival.
+# kleos-core/fuzz is a separate cargo-fuzz workspace.
 exclude = [
     "kleos-lib-c",
     "kleos-lib-java",
