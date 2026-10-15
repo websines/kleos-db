@@ -1588,6 +1588,61 @@ mod tests {
     use rand::Rng;
     use std::collections::BTreeMap;
 
+    /// Manifests written before quantization (no `quantize`/`rescore`
+    /// fields) still load, as unquantized indices.
+    #[test]
+    fn manifest_without_quantize_fields_loads_as_unquantized() {
+        use super::HnswIndexManifest;
+        use crate::data::relation::VecElementType;
+        use crate::parse::sys::HnswDistance;
+        use crate::runtime::vec_quant::VecQuant;
+        use smartstring::{LazyCompact, SmartString};
+
+        #[derive(serde_derive::Serialize)]
+        struct OldManifest {
+            base_relation: SmartString<LazyCompact>,
+            index_name: SmartString<LazyCompact>,
+            vec_dim: usize,
+            dtype: VecElementType,
+            vec_fields: Vec<usize>,
+            distance: HnswDistance,
+            ef_construction: usize,
+            m_neighbours: usize,
+            m_max: usize,
+            m_max0: usize,
+            level_multiplier: f64,
+            index_filter: Option<String>,
+            extend_candidates: bool,
+            keep_pruned_connections: bool,
+        }
+        let old = OldManifest {
+            base_relation: "pts".into(),
+            index_name: "idx".into(),
+            vec_dim: 4,
+            dtype: VecElementType::F32,
+            vec_fields: vec![1],
+            distance: HnswDistance::L2,
+            ef_construction: 16,
+            m_neighbours: 6,
+            m_max: 6,
+            m_max0: 12,
+            level_multiplier: 0.5,
+            index_filter: None,
+            extend_candidates: false,
+            keep_pruned_connections: false,
+        };
+        let mut bytes = vec![];
+        serde::Serialize::serialize(
+            &old,
+            &mut rmp_serde::Serializer::new(&mut bytes).with_struct_map(),
+        )
+        .unwrap();
+        let m: HnswIndexManifest = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(m.quantize, VecQuant::None);
+        assert_eq!(m.rescore, 0);
+        assert_eq!(m.vec_dim, 4);
+    }
+
     #[test]
     fn test_random_level() {
         let m = 20;

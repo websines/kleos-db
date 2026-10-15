@@ -46,3 +46,46 @@ Obligations when changing this code (MPL-2.0 §3):
   existing ones.
 - New files should carry the standard MPL-2.0 header with your own copyright
   line.
+
+## Third-party code and designs
+
+### turbovec (MIT)
+
+`kleos-core/src/runtime/vec_quant.rs` (compressed vector codes for quantized
+HNSW traversal) follows the design of turbovec, an implementation of
+TurboQuant (Zandieh et al., arXiv:2504.19874): the globally permuted,
+sign-flipped block Walsh-Hadamard rotation applied in two rounds, the
+Lloyd-Max codebook fitted to the distribution of a rotated unit vector's
+coordinates, and the length-renormalised inner-product estimator. The code
+was written for kleos (its own frozen seed, PRNG, padding rule and bit
+layout); no turbovec source file was copied. turbovec's licence:
+
+```text
+MIT License
+
+Copyright (c) 2026 Ryan Codrai
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+RotorQuant (<https://github.com/scrya-com/rotorquant>, MIT) block rotations
+(Clifford Cl(3,0) rotors, 4-D quaternion "IsoQuant" and 2-D "PlanarQuant"
+blocks) were evaluated against the Hadamard rotation but are not shipped; no
+RotorQuant code is included. The `turbo-quant` crate (MIT OR Apache-2.0) was
+reviewed and not used.
