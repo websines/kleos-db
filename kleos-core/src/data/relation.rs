@@ -23,7 +23,20 @@ use thiserror::Error;
 
 use crate::data::expr::Expr;
 use crate::data::functions::system_time_to_micros;
-use crate::data::value::{DataValue, JsonData, UuidWrapper, Validity, ValidityTs, Vector};
+use crate::data::value::{
+    DataValue, HalfKind, JsonData, UuidWrapper, Validity, ValidityTs, Vector,
+};
+
+/// Round an F32 array in place to the precision of a half-width element type
+/// (no-op for F32/F64).
+pub(crate) fn round_to_half(a: &mut ndarray::Array1<f32>, eltype: VecElementType) {
+    if let Some(kind) = HalfKind::of(eltype) {
+        match a.as_slice_mut() {
+            Some(s) => kind.round_slice(s),
+            None => a.mapv_inplace(|x| kind.round(x)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct NullableColType {
@@ -67,6 +80,8 @@ impl Display for NullableColType {
                 match eltype {
                     VecElementType::F32 => f.write_str("F32")?,
                     VecElementType::F64 => f.write_str("F64")?,
+                    VecElementType::F16 => f.write_str("F16")?,
+                    VecElementType::BF16 => f.write_str("BF16")?,
                 }
                 write!(f, ";{len}")?;
                 f.write_str(">")?;
@@ -117,6 +132,35 @@ pub enum ColType {
 pub enum VecElementType {
     F32,
     F64,
+    /// IEEE half precision (kleos fork). Stored 2 bytes per element; held in
+    /// memory as [`Vector::F32`] with values rounded to half precision.
+    F16,
+    /// bfloat16 (kleos fork). Stored 2 bytes per element; held in memory as
+    /// [`Vector::F32`] with values rounded to bfloat16.
+    BF16,
+}
+
+impl VecElementType {
+    /// The in-memory element type of vectors of this column type: half
+    /// formats are held as F32.
+    pub(crate) fn in_memory(self) -> VecElementType {
+        match self {
+            VecElementType::F64 => VecElementType::F64,
+            VecElementType::F32 | VecElementType::F16 | VecElementType::BF16 => {
+                VecElementType::F32
+            }
+        }
+    }
+    /// Parse a schema / option element type name.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "F32" | "Float" => VecElementType::F32,
+            "F64" | "Double" => VecElementType::F64,
+            "F16" | "Half" => VecElementType::F16,
+            "BF16" => VecElementType::BF16,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -269,7 +313,7 @@ impl NullableColType {
                         bail!(BadListLength(self.clone(), l.len()))
                     }
                     match eltype {
-                        VecElementType::F32 => {
+                        VecElementType::F32 | VecElementType::F16 | VecElementType::BF16 => {
                             let mut res_arr = ndarray::Array1::zeros(*len);
                             for (mut row, el) in
                                 res_arr.axis_iter_mut(ndarray::Axis(0)).zip(l.iter())
@@ -277,6 +321,7 @@ impl NullableColType {
                                 let f = el.get_float().ok_or_else(make_err)? as f32;
                                 row.fill(f);
                             }
+                            round_to_half(&mut res_arr, *eltype);
                             DataValue::Vec(Vector::F32(res_arr))
                         }
                         VecElementType::F64 => {
@@ -292,15 +337,43 @@ impl NullableColType {
                     }
                 }
                 DataValue::Vec(arr) => {
-                    if *eltype != arr.el_type() || *len != arr.len() {
+                    if *len != arr.len() {
                         bail!(make_err())
-                    } else {
-                        data
+                    }
+                    match (eltype, arr) {
+                        (VecElementType::F16 | VecElementType::BF16, Vector::F32(a)) => {
+                            let mut a = a.clone();
+                            round_to_half(&mut a, *eltype);
+                            DataValue::Vec(Vector::F32(a))
+                        }
+                        (VecElementType::F16 | VecElementType::BF16, Vector::F64(a)) => {
+                            let mut a = a.mapv(|x| x as f32);
+                            round_to_half(&mut a, *eltype);
+                            DataValue::Vec(Vector::F32(a))
+                        }
+                        (_, arr) if *eltype == arr.el_type() => data,
+                        _ => bail!(make_err()),
                     }
                 }
                 DataValue::Str(s) => {
                     let bytes = STANDARD.decode(s).map_err(|_| make_err())?;
                     match eltype {
+                        VecElementType::F16 | VecElementType::BF16 => {
+                            // Half-width little-endian elements, or F32 ones.
+                            let kind = HalfKind::of(*eltype).unwrap();
+                            let mut v = if bytes.len() == *len * 2 {
+                                kind.decode(&bytes)
+                            } else if bytes.len() == *len * 4 {
+                                bytes
+                                    .chunks_exact(4)
+                                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                                    .collect()
+                            } else {
+                                bail!(make_err())
+                            };
+                            kind.round_slice(&mut v);
+                            DataValue::Vec(Vector::F32(ndarray::Array1::from(v)))
+                        }
                         VecElementType::F32 => {
                             let f32_count = bytes.len() / mem::size_of::<f32>();
                             if f32_count != *len {

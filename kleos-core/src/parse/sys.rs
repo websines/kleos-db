@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::data::program::InputProgram;
 use crate::data::relation::{NullableColType, VecElementType};
+use crate::runtime::vec_quant::VecQuant;
 use crate::data::symb::Symbol;
 use crate::data::value::{DataValue, ValidityTs};
 use crate::fts::TokenizerConfig;
@@ -143,6 +144,10 @@ pub struct HnswIndexConfig {
     pub index_filter: Option<String>,
     pub extend_candidates: bool,
     pub keep_pruned_connections: bool,
+    /// Compressed traversal codes (kleos fork, A2).
+    pub quantize: VecQuant,
+    /// Rescoring multiplier for quantized search (0 = codec default).
+    pub rescore: usize,
 }
 
 #[derive(
@@ -759,6 +764,8 @@ pub(crate) fn parse_sys(
                     let mut index_filter = None;
                     let mut extend_candidates = false;
                     let mut keep_pruned_connections = false;
+                    let mut quantize = VecQuant::None;
+                    let mut rescore = 0;
 
                     for opt_pair in inner {
                         let mut opt_inner = opt_pair.into_inner();
@@ -795,13 +802,10 @@ pub(crate) fn parse_sys(
                                 m_neighbours = v as usize;
                             }
                             "dtype" => {
-                                dtype = match opt_val.as_str() {
-                                    "F32" | "Float" => VecElementType::F32,
-                                    "F64" | "Double" => VecElementType::F64,
-                                    _ => {
-                                        return Err(miette!("Invalid dtype: {}", opt_val.as_str()))
-                                    }
-                                }
+                                dtype = VecElementType::from_name(opt_val.as_str().trim())
+                                    .ok_or_else(|| {
+                                        miette!("Invalid dtype: {}", opt_val.as_str())
+                                    })?
                             }
                             "fields" => {
                                 let fields = build_expr(opt_val, &Default::default())?;
@@ -829,6 +833,24 @@ pub(crate) fn parse_sys(
                             "keep_pruned_connections" => {
                                 keep_pruned_connections = opt_val.as_str().trim() == "true";
                             }
+                            "quantize" => {
+                                let raw = opt_val.as_str().trim();
+                                let name = raw.trim_matches(|c| c == '\'' || c == '"');
+                                quantize = VecQuant::parse(name).ok_or_else(|| {
+                                    miette!(
+                                        "Invalid quantize: {} (expected none, binary, turbo2, turbo4 or turbo8)",
+                                        raw
+                                    )
+                                })?;
+                            }
+                            "rescore" => {
+                                let v = build_expr(opt_val, param_pool)?
+                                    .eval_to_const()?
+                                    .get_int()
+                                    .ok_or_else(|| miette!("Invalid rescore: {}", opt_val_str))?;
+                                ensure!(v > 0, "Invalid rescore: {}", v);
+                                rescore = v as usize;
+                            }
                             _ => return Err(miette!("Invalid option: {}", opt_name.as_str())),
                         }
                     }
@@ -850,6 +872,8 @@ pub(crate) fn parse_sys(
                         index_filter,
                         extend_candidates,
                         keep_pruned_connections,
+                        quantize,
+                        rescore,
                     })
                 }
                 Rule::index_drop => {

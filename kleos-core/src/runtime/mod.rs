@@ -16,6 +16,7 @@ pub(crate) mod governed_transaction;
 pub(crate) mod graph_projection;
 pub(crate) mod hnsw;
 pub(crate) mod hnsw_build;
+pub(crate) mod hnsw_quant;
 pub(crate) mod hybrid;
 pub(crate) mod imperative;
 pub(crate) mod minhash_lsh;

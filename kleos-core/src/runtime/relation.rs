@@ -25,7 +25,7 @@ use crate::data::memcmp::MemCmpEncoder;
 use crate::data::relation::{ColType, ColumnDef, NullableColType, StoredRelationMetadata};
 use crate::data::symb::Symbol;
 use crate::data::tuple::{decode_tuple_from_key, Tuple, TupleT, ENCODED_KEY_MIN_LEN};
-use crate::data::value::{DataValue, ValidityTs};
+use crate::data::value::{DataValue, HalfKind, StoredValue, ValidityTs};
 use crate::fts::indexing::encode_fts_rows_for_tuple;
 use crate::fts::FtsIndexManifest;
 use crate::parse::expr::build_expr;
@@ -332,9 +332,7 @@ impl RelationHandle {
         let start = self.metadata.keys.len();
         let len = self.metadata.non_keys.len();
         let mut ret = self.encode_key_prefix(len);
-        tuple[start..]
-            .serialize(&mut Serializer::new(&mut ret))
-            .unwrap();
+        self.serialize_non_keys(&tuple[start..], &mut ret);
         Ok(ret)
     }
     pub(crate) fn encode_val_only_for_store(
@@ -343,8 +341,34 @@ impl RelationHandle {
         _span: SourceSpan,
     ) -> Result<Vec<u8>> {
         let mut ret = self.encode_key_prefix(tuple.len());
-        tuple.serialize(&mut Serializer::new(&mut ret)).unwrap();
+        self.serialize_non_keys(tuple, &mut ret);
         Ok(ret)
+    }
+    /// Serialise the non-key values of a row. Values of `<F16; N>` /
+    /// `<BF16; N>` columns (also as list elements) are written half width
+    /// (kleos fork); everything else is byte-identical to plain msgpack.
+    fn serialize_non_keys(&self, vals: &[DataValue], ret: &mut Vec<u8>) {
+        fn half_of(col: &ColumnDef) -> Option<HalfKind> {
+            match &col.typing.coltype {
+                ColType::Vec { eltype, .. } => HalfKind::of(*eltype),
+                ColType::List { eltype, .. } => match &eltype.coltype {
+                    ColType::Vec { eltype, .. } => HalfKind::of(*eltype),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let non_keys = &self.metadata.non_keys;
+        if vals.len() == non_keys.len() && non_keys.iter().any(|c| half_of(c).is_some()) {
+            let wrapped: Vec<StoredValue<'_>> = vals
+                .iter()
+                .zip(non_keys)
+                .map(|(v, c)| StoredValue(v, half_of(c)))
+                .collect();
+            wrapped.serialize(&mut Serializer::new(ret)).unwrap();
+        } else {
+            vals.serialize(&mut Serializer::new(ret)).unwrap();
+        }
     }
     pub(crate) fn ensure_compatible(
         &self,
@@ -1706,6 +1730,8 @@ impl<'a> SessionTx<'a> {
             index_filter: config.index_filter.clone(),
             extend_candidates: config.extend_candidates,
             keep_pruned_connections: config.keep_pruned_connections,
+            quantize: config.quantize,
+            rescore: config.rescore,
         };
 
         let filter = if let Some(f_code) = &manifest.index_filter {

@@ -2357,6 +2357,7 @@ dependencies = [
  "env_logger",
  "fast2s",
  "graph",
+ "half",
  "itertools 0.12.1",
  "jieba-rs",
  "js-sys",
