@@ -9,6 +9,31 @@ to kleos.
 
 ## Unreleased
 
+### Added
+
+- Supersession for agent memory (UPGRADE_PLAN E1). `::supersede create fact {subject,
+  predicate}` declares that a relation's leading key columns admit one current row at
+  any valid time. Every `:put`/`:insert` then ends the previous current row at the new
+  row's valid time by appending a retraction in the same transaction. Nothing is
+  deleted, so `@`, `@ (tt: …)`, `:as_of` and `::history` still answer for earlier
+  times. Late-arriving older facts fill their gap without ending newer ones,
+  re-asserting the current fact writes nothing, and on bitemporal relations a new
+  value at the same valid time is recorded as a correction. `::changes fact {from,
+  to, as_of, prefix}` lists what was `added`, `ended` or `changed` between two valid
+  times. `import_relations` and columnar import reject relations with a supersession
+  key, since they would bypass it. Also `::supersede list` and `::supersede drop`.
+- Provenance with cascading retraction and GDPR erasure (UPGRADE_PLAN E2).
+  `::provenance create fact_src {derived: fact, source: episode}` declares a link
+  relation keyed by the derived key followed by the source key. `::retract episode
+  [['ep2']]` (optionally `@ T`) ends a source's validity and, transitively, that of
+  every derived row left without a live source; rows with another live source stay.
+  `::erase episode [['ep7']]` physically deletes the source, its links and every
+  derived row left with no source, including their HNSW, FTS and LSH entries, and
+  writes salted audit markers to `kleos_evict_audit`. `::lineage fact [[…]]`
+  explains a row back to its sources. Spec:
+  `docs/specs/memory-supersession-provenance.md`; tests:
+  `kleos-core/tests/memory_supersession.rs`.
+
 ### Fixed
 
 - `int_range` and `rand_vec` can no longer exhaust memory (found by fuzzing). A zero
