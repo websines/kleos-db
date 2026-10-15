@@ -136,6 +136,9 @@ pub fn register_family(name: &str, templates: FamilyTemplates) -> Result<Family>
     if lower.is_empty() || matches!(lower.as_str(), "d1" | "nano") {
         bail!("family name '{name}' is empty or reserved");
     }
+    for t in Template::ALL {
+        validate_spec(t, &(templates.spec)(t))?;
+    }
     let mut f = FAMILIES.write().map_err(|_| miette!("family registry poisoned"))?;
     let key: &'static str = match f.keys().find(|k| **k == lower) {
         Some(k) => k,
@@ -143,6 +146,36 @@ pub fn register_family(name: &str, templates: FamilyTemplates) -> Result<Family>
     };
     f.insert(key, templates);
     Ok(Family::Custom(key))
+}
+
+/// Policy for every template (docs/specs/decide.md, "No bare yes/no"):
+/// at least 2 options, each `key: description` with a real description, and
+/// never a bare yes/no/true/false answer. Small decision models flip
+/// polarity on bare yes/no options.
+pub fn validate_spec(t: Template, spec: &TemplateSpec) -> Result<()> {
+    if spec.options.len() < 2 || spec.options.len() != spec.label_of_option.len() {
+        bail!(
+            "template {}: needs at least 2 options and one label per option",
+            t.name()
+        );
+    }
+    if spec.label_of_option.iter().any(|l| *l >= t.labels().len()) {
+        bail!("template {}: an option maps to a label that does not exist", t.name());
+    }
+    const BARE: [&str; 8] = [
+        "yes", "no", "true", "false", "yes, the statement holds", "no, the statement does not hold", "y", "n",
+    ];
+    for o in spec.options {
+        let desc = o.split_once(':').map(|(_, d)| d.trim()).unwrap_or("");
+        let words = desc.split_whitespace().count();
+        if words < 3 || BARE.contains(&desc.to_ascii_lowercase().as_str()) {
+            bail!(
+                "template {}: option '{o}' must be `key: description` with a descriptive criterion (no bare yes/no answers)",
+                t.name()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn family_templates(name: &str) -> Option<FamilyTemplates> {
@@ -264,7 +297,11 @@ impl Template {
     pub fn version(self, family: Family) -> u32 {
         match family {
             Family::Custom(n) => family_templates(n).map(|t| t.version).unwrap_or(0),
-            _ => 1,
+            // v2: same_entity and important became descriptive choices
+            _ => match self {
+                Template::SameEntity | Template::Important => 2,
+                _ => 1,
+            },
         }
     }
     /// `name@vN`.
@@ -334,18 +371,20 @@ pub mod templates {
     fn same_entity_q(_a: &str, _b: &str) -> String {
         "Are mention A and mention B the same entity?".to_string()
     }
-    /// Same-entity options (noul rendering: `false: ..`, `true: ..`).
-    pub const ENTITY_OPTIONS: [&str; 2] = [
-        "false: they are different entities that may share a name",
-        "true: both mentions refer to one and the same entity",
+    /// Same-entity options: a choice with a description for every answer
+    /// (no bare yes/no; v2).
+    pub const ENTITY_OPTIONS: [&str; 3] = [
+        "same: both mentions refer to one and the same entity",
+        "different: they are different entities that may share a name",
+        "unclear: there is not enough information to tell",
     ];
     fn important_q(_a: &str, _b: &str) -> String {
-        "Is this an important, lasting fact worth remembering long-term?".to_string()
+        "How worth remembering long-term is this note?".to_string()
     }
-    /// Importance options.
+    /// Importance options (experimental, unvalidated; v2).
     pub const IMPORTANT_OPTIONS: [&str; 2] = [
-        "false: no, it is trivial, temporary or small talk",
-        "true: yes, it is an important, lasting fact",
+        "lasting: an important, lasting fact worth remembering (identity, preference, relationship, plan or commitment)",
+        "transient: trivial, temporary or small talk that will not matter later",
     ];
     fn premise_hypothesis(a: &str, b: &str) -> String {
         format!("Premise: {a}\nHypothesis: {b}")
@@ -369,7 +408,8 @@ pub mod templates {
         const CNLI_REL: [usize; 3] = [3, 0, 2];
         const NLI_CONTRA: [usize; 3] = [0, 0, 1];
         const NLI_ENTAIL: [usize; 3] = [1, 0, 0];
-        const NOUL: [usize; 2] = [0, 1];
+        const ENTITY: [usize; 3] = [1, 0, 0];
+        const IMPORTANT: [usize; 2] = [1, 0];
         let cnli = |map: &'static [usize]| TemplateSpec {
             state: first,
             question: cnli_question,
@@ -397,13 +437,13 @@ pub mod templates {
                 state: mentions,
                 question: same_entity_q,
                 options: &ENTITY_OPTIONS,
-                label_of_option: &NOUL,
+                label_of_option: &ENTITY,
             },
             (Template::Important, _) => TemplateSpec {
                 state: first,
                 question: important_q,
                 options: &IMPORTANT_OPTIONS,
-                label_of_option: &NOUL,
+                label_of_option: &IMPORTANT,
             },
         }
     }

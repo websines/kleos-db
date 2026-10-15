@@ -323,9 +323,12 @@ fn eval_backend(name: &str, d: &dyn Decider, f: Family, items: &(Vec<Item>, Vec<
         rep[t.name()] = r;
         cals.push((t, c.unwrap()));
     }
-    let (r, _) = eval_binary(d, f, Template::SameEntity, &[], entity, false);
-    eprintln!("[{name}] same_entity: {r}");
-    rep["same_entity"] = r;
+    // same_entity@v2 (3-way choice) was not recorded for d1
+    if real {
+        let (r, _) = eval_binary(d, f, Template::SameEntity, &[], entity, false);
+        eprintln!("[{name}] same_entity: {r}");
+        rep["same_entity"] = r;
+    }
     let (r, c) = eval_relation(d, f, adapt, eval, true);
     eprintln!("[{name}] relation: {r}");
     rep["relation"] = r;

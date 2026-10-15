@@ -139,13 +139,22 @@ fn golden_nano_templates() {
     assert_eq!(
         e.options,
         vec![
-            "false: they are different entities that may share a name",
-            "true: both mentions refer to one and the same entity",
+            "same: both mentions refer to one and the same entity",
+            "different: they are different entities that may share a name",
+            "unclear: there is not enough information to tell",
         ]
     );
+    assert_eq!(Template::SameEntity.versioned(Family::Nano), "same_entity@v2");
     let i = Template::Important.render(Family::D1, "The user is allergic to penicillin.", "ignored");
     assert_eq!(i.state, "The user is allergic to penicillin.");
-    assert_eq!(i.question, "Is this an important, lasting fact worth remembering long-term?");
+    assert_eq!(i.question, "How worth remembering long-term is this note?");
+    assert!(i.options[0].starts_with("lasting: "));
+    // the no-bare-yes/no policy holds for every built-in template
+    for t in Template::ALL {
+        for f in [Family::D1, Family::Nano] {
+            decide::validate_spec(t, &t.spec(f)).unwrap();
+        }
+    }
     // relation: ContractNLI framing on both families
     let rel = Template::Relation.render(Family::Nano, "old", "new");
     assert_eq!(rel, Template::Relation.render(Family::D1, "old", "new"));
@@ -361,8 +370,9 @@ fn list_enable_disable_and_errors() {
     let pv = p.rows[0][0].get_float().unwrap();
     assert!((pv - 1.0 / 3.0).abs() < 1e-6);
     let l = run(&db, "?[l, b] := l = decide_label('tog', 'supersedes', 'a', 'b'), b = decide_band('tog', 'supersedes', 'a', 'b')").unwrap();
-    assert_eq!(l.rows[0][0], DataValue::from("no"));
-    assert_eq!(l.rows[0][1], DataValue::from("none"));
+    // shipped nano calibration: threshold 0.246, never auto (tau 1.01)
+    assert_eq!(l.rows[0][0], DataValue::from("yes"));
+    assert_eq!(l.rows[0][1], DataValue::from("tentative"));
     let r = run(&db, "?[l] := l = decide_relation('tog', 'a', 'b')").unwrap();
     assert!(matches!(&r.rows[0][0], DataValue::Str(_)));
     let i = run(&db, "?[p] := p = decide_important('tog', 'a fact')").unwrap();
@@ -593,7 +603,18 @@ fn third_backend_registers_its_own_family() {
         fn q(_a: &str, _b: &str) -> String {
             "Is B a change of A?".to_string()
         }
-        TemplateSpec { state: st, question: q, options: &["no", "yes"], label_of_option: &[0, 1] }
+        TemplateSpec {
+            state: st,
+            question: q,
+            options: &["kept: A is still true after B", "changed: B replaces what A said"],
+            label_of_option: &[0, 1],
+        }
+    }
+    fn bare(_t: Template) -> TemplateSpec {
+        fn st(a: &str, _b: &str) -> String {
+            a.to_string()
+        }
+        TemplateSpec { state: st, question: st, options: &["false: no", "true: yes"], label_of_option: &[0, 1] }
     }
     fn cal(_t: Template) -> Calibration {
         Calibration { threshold: 0.6, tau_auto: 0.95, source: "custom".into(), ..Default::default() }
@@ -602,6 +623,8 @@ fn third_backend_registers_its_own_family() {
     assert_eq!(fam.name(), "jev");
     assert_eq!(Family::parse("JEV").unwrap(), fam);
     assert!(register_family("nano", FamilyTemplates { spec, version: 1, calibration: cal }).is_err());
+    let e = format!("{:?}", register_family("bare", FamilyTemplates { spec: bare, version: 1, calibration: cal }).unwrap_err());
+    assert!(e.contains("no bare yes/no answers"), "{e}");
     let r = Template::Supersedes.render(fam, "x", "y");
     assert_eq!((r.state.as_str(), r.question.as_str()), ("A: x\nB: y", "Is B a change of A?"));
     assert_eq!(Template::Supersedes.versioned(fam), "supersedes@v3");
@@ -613,4 +636,32 @@ fn third_backend_registers_its_own_family() {
     let rows = run(&db, "::decider list").unwrap();
     assert!(rows.rows.iter().any(|r| r[0] == DataValue::from("jev1") && r[2] == DataValue::from("jev")));
     decide::unregister_decider("jev1");
+}
+
+/// The real decider-nano through `::decider enable` (feature `infer`; skips
+/// when the model is not in the Hugging Face cache).
+#[cfg(feature = "infer")]
+#[test]
+fn real_decider_nano_end_to_end() {
+    if kleos_infer::resolve_hf_file(kleos_infer::DECIDER_NANO_REPO, "model.safetensors").is_err() {
+        eprintln!("skipping: tasksource/tasksource-decider-nano is not in the HF cache");
+        return;
+    }
+    let db = mem();
+    run(&db, "::decider enable realnano {model: 'decider-nano', precision: 'f32'}").unwrap();
+    let up = db.decide("realnano", "supersedes", "Tom lives in Berlin.", "Tom moved to Lisbon in March and has settled in there.").unwrap();
+    let compat = db.decide("realnano", "supersedes", "Tom lives in Berlin.", "Tom is learning to play the cello.").unwrap();
+    assert!(up.p > compat.p, "{up:?} {compat:?}");
+    assert_eq!(compat.label, "no");
+    // zero-shot supersedes never auto-applies with the shipped defaults
+    assert_ne!(up.band, Band::Auto);
+    let dup = db.decide("realnano", "duplicate", "Lena is a vegetarian.", "Lena doesn't eat meat.").unwrap();
+    assert_eq!(dup.label, "yes");
+    let rows = run(&db, "::decider list").unwrap();
+    let row = rows.rows.iter().find(|r| r[0] == DataValue::from("realnano")).unwrap();
+    assert_eq!(row[1], DataValue::from("decider-nano"));
+    assert_eq!(row[5], DataValue::Bool(true));
+    let e = err(&db, "::decider enable d1 {model: 'd1-omni'}");
+    assert!(e.contains("d1-omni backend is not built into this kleos yet"), "{e}");
+    assert_eq!(run(&db, "::decider disable realnano").unwrap().rows[0][0], DataValue::from("OK"));
 }
