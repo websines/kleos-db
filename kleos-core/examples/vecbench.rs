@@ -74,6 +74,7 @@ struct Args {
     label: String,
     out: Option<PathBuf>,
     reuse_db: bool,
+    variants: Vec<String>,
 }
 
 fn usage() -> ! {
@@ -82,7 +83,12 @@ fn usage() -> ! {
          \x20               [--ef 32,64,..] [--m M] [--ef-construction E] [--backend mem|sqlite]\n\
          \x20               [--filter-selectivity 1.0,0.1,..] [--metric cosine|l2]\n\
          \x20               [--threads T] [--index-opts 'extra: opts'] [--label TEXT]\n\
-         \x20               [--out FILE.md] [--reuse-db]"
+         \x20               [--out FILE.md] [--reuse-db] [--variants 'K=V K2=V;K=W']\n\
+         \n\
+         --variants repeats the whole query sweep once per `;`-separated variant,\n\
+         setting that variant's space-separated KEY=VALUE environment variables\n\
+         first, against the same database (for engine tuning knobs read from the\n\
+         environment)."
     );
     std::process::exit(2)
 }
@@ -113,6 +119,7 @@ fn parse_args() -> Args {
         label: String::new(),
         out: None,
         reuse_db: false,
+        variants: vec![],
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -140,6 +147,12 @@ fn parse_args() -> Args {
             "--label" => a.label = val(),
             "--out" => a.out = Some(val().into()),
             "--reuse-db" => a.reuse_db = true,
+            "--variants" => {
+                a.variants = val()
+                    .split(';')
+                    .map(|v| v.trim().to_string())
+                    .collect()
+            }
             _ => usage(),
         }
     }
@@ -478,9 +491,21 @@ fn main() {
         build_time.as_secs_f64(),
     ));
     table.push_str(
-        "| selectivity | matches | ef | recall@k | QPS | p50 ms | p99 ms | CPU ms/q | under-fill |\n\
-         |---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| variant | selectivity | matches | ef | recall@k | QPS | p50 ms | p99 ms | CPU ms/q | under-fill |\n\
+         |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
+    let variants = if a.variants.is_empty() {
+        vec![String::new()]
+    } else {
+        a.variants.clone()
+    };
+    for variant in &variants {
+    for kv in variant.split_whitespace() {
+        if let Some((k, v)) = kv.split_once('=') {
+            std::env::set_var(k, v);
+        }
+    }
+    let vname = if variant.is_empty() { "-" } else { variant.as_str() };
     for &s in &a.selectivities {
         let threshold = ((s * BUCKETS as f64).round() as usize).clamp(1, BUCKETS);
         let matches = (0..n).filter(|i| i % BUCKETS < threshold).count();
@@ -515,7 +540,7 @@ fn main() {
             let cpu = process_cpu_time().saturating_sub(cpu0);
             lat.sort();
             let line = format!(
-                "| {s} | {matches} | {ef} | {:.4} | {:.1} | {:.3} | {:.3} | {:.3} | {under} |\n",
+                "| {vname} | {s} | {matches} | {ef} | {:.4} | {:.1} | {:.3} | {:.3} | {:.3} | {under} |\n",
                 hits as f64 / expected.max(1) as f64,
                 queries.len() as f64 / total.as_secs_f64(),
                 percentile(&lat, 0.5).as_secs_f64() * 1e3,
@@ -525,6 +550,7 @@ fn main() {
             eprint!("{line}");
             table.push_str(&line);
         }
+    }
     }
     println!("{table}");
     if let Some(out) = &a.out {

@@ -190,6 +190,26 @@ fn into_output(
     ret
 }
 
+// TEMP tuning knobs (removed before merge)
+struct Tuning {
+    two_hop_rate: f64,
+    two_hop_mode: u8,
+    visit_cost: f64,
+}
+fn tuning() -> Tuning {
+    let get = |k: &str, d: f64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(d)
+    };
+    Tuning {
+        two_hop_rate: get("KLEOS_A1_TWO_HOP", TWO_HOP_PASS_RATE),
+        two_hop_mode: get("KLEOS_A1_TWO_HOP_MODE", 1.0) as u8,
+        visit_cost: get("KLEOS_A1_VISIT_COST", VISIT_COST),
+    }
+}
+
 impl SessionTx<'_> {
     /// Bottom-layer search with the filter applied inside the search. `seeds`
     /// are the entry points found by the upper-layer descent; `top_level` is
@@ -221,6 +241,7 @@ impl SessionTx<'_> {
             st.candidates.push(key, Reverse(OrderedFloat(dist)));
         }
 
+        let tun = tuning();
         let mut size_estimate: Option<f64> = None;
         while let Some((cand, Reverse(OrderedFloat(cand_dist)))) = st.candidates.pop() {
             if let Some(worst) = st.worst() {
@@ -248,13 +269,18 @@ impl SessionTx<'_> {
                             s
                         }
                     };
-                    if remaining * VISIT_COST > size {
+                    if remaining * tun.visit_cost > size {
+                        if std::env::var_os("KLEOS_A1_TRACE").is_some() {
+                            eprintln!("A1TRACE brute visited={} evaluated={} passed={} size={size:.0}", st.visited.len(), st.evaluated, st.passed);
+                        }
                         return self.hnsw_knn_brute_force(q, config, pred, stack, vec_cache);
                     }
                 }
             }
 
-            let two_hop = st.evaluated >= MIN_SAMPLE && st.pass_rate() < TWO_HOP_PASS_RATE;
+            let two_hop = tun.two_hop_mode > 0
+                && st.evaluated >= MIN_SAMPLE
+                && st.pass_rate() < tun.two_hop_rate;
             let unvisited: Vec<CompoundKey> = self
                 .hnsw_get_neighbours(&cand, 0, &config.idx_handle, false)?
                 .filter_map(|(k, _)| st.visited.insert(k.clone()).then_some(k))
@@ -263,7 +289,7 @@ impl SessionTx<'_> {
             for (key, dist, passed) in
                 self.hnsw_filtered_visit(unvisited, q, config, pred, stack, vec_cache, &mut st)?
             {
-                if two_hop && !passed {
+                if two_hop && !passed && (tun.two_hop_mode == 1 || dist <= cand_dist) {
                     for (k2, _) in self.hnsw_get_neighbours(&key, 0, &config.idx_handle, false)? {
                         if st.visited.insert(k2.clone()) {
                             second_hop.push(k2);
@@ -280,6 +306,9 @@ impl SessionTx<'_> {
                     st.candidates.push(key, Reverse(OrderedFloat(dist)));
                 }
             }
+        }
+        if std::env::var_os("KLEOS_A1_TRACE").is_some() {
+            eprintln!("A1TRACE graph visited={} evaluated={} passed={} results={}", st.visited.len(), st.evaluated, st.passed, st.results.len());
         }
         Ok(into_output(st.results, st.result_tuples, config.k))
     }
