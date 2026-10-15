@@ -3,8 +3,9 @@
 //! Prints the process footprint per load/unload round. On macOS the system
 //! allocator keeps freed large blocks (the load-time f32 buffers, and on CPU
 //! the weights) in its large cache; run with `MallocLargeCache=0` to see the
-//! memory the model itself holds (measured, Metal int8: 432 MB loaded, 10 MB
-//! after unload, flat across rounds).
+//! memory the model itself holds (measured, Metal int8: 432 MB loaded, 11 MB
+//! after unload, flat across rounds; before the autorelease-pool fix in
+//! `gemma.rs`, debug builds kept ~315 MB per round).
 //! `KLEOS_DEVICE=cpu|metal cargo +1.99.0 test -p kleos-infer --features metal \
 //!   --test unload_memory -- --ignored --nocapture`
 

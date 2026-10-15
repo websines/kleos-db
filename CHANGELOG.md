@@ -149,7 +149,15 @@ to kleos.
   `kleos.disable_embedder`) and in kleos-bin (`--embedder gemma=embeddinggemma:int8`,
   repeatable; new `infer` / `infer-metal` features on kleos-bin and kleos-py). The
   `Embedder` trait gains the default methods `is_loaded`, `device` and `unload`.
-  RSS_PLACEHOLDER Spec: `docs/specs/embedder-toggle.md`; tests:
+  Disabling now actually frees the model. `kleos-infer` runs its Metal work and
+  `unload()` inside an Objective-C autorelease pool. Without the pool, debug
+  builds never released the buffers (+315 MB per enable/disable cycle). Measured
+  with gemma int8 on Metal through `::embedder enable/disable` (process
+  footprint): 7.5 MB before, 439 MB after enable and the first embed, 15 MB after
+  disable, and the same again on the next cycle, when run with
+  `MallocLargeCache=0`. With the default macOS allocator, freed load-time buffers
+  stay in libmalloc's large cache (836 MB loaded, 478 MB after disable). The
+  kernel reclaims that memory under pressure. Spec: `docs/specs/embedder-toggle.md`; tests:
   `kleos-core/tests/embed_toggle.rs`.
 
 ### Fixed

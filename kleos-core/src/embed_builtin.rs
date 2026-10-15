@@ -203,10 +203,12 @@ fn resolve_model(model: Option<&str>) -> Result<Builtin> {
         _ if lower.contains("embeddinggemma") && m.contains('/') => Builtin::Gemma(m.to_string()),
         _ if m.contains('/') => Builtin::Model2Vec(m.to_string()),
         _ if lower.starts_with("potion-") => Builtin::Model2Vec(format!("minishlab/{m}")),
-        _ => bail!(
-            "unknown built-in embedder model '{m}': expected 'embeddinggemma', \
-             'potion-base-8M' or a Model2Vec repo such as 'minishlab/potion-base-8M'"
-        ),
+        _ => {
+            bail!(
+                "unknown built-in embedder model '{m}': expected 'embeddinggemma', \
+                 'potion-base-8M' or a Model2Vec repo such as 'minishlab/potion-base-8M'"
+            );
+        }
     })
 }
 

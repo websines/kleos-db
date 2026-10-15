@@ -147,22 +147,26 @@ HTTP, the `::embedder` ops are ordinary scripts.
 ## Caveats
 
 * Freeing memory: after disable, the model's `Arc`s are dropped as soon as
-  in-flight `embed()` calls return. Disable then asks the system allocator to
-  return freed pages (`malloc_zone_pressure_relief` on macOS, `malloc_trim` on
-  glibc). On macOS that is not enough. libmalloc keeps freed large blocks dirty
-  in its large cache, where the kernel reclaims them only under memory
-  pressure. These blocks are the load-time f32 buffers, and on CPU the weights
-  too. kleos-infer's probe (`kleos-infer/tests/unload_memory.rs`, gemma int8 on
-  Metal) shows the difference:
+  in-flight `embed()` calls return. Before this change, the Metal objects that
+  candle autoreleases were never released on Rust threads, which have no
+  autorelease pool. In debug builds every unloaded model therefore stayed
+  resident (+315 MB per cycle). `kleos-infer` now wraps forward passes and
+  `unload()` in `objc2::rc::autoreleasepool`. Disable also asks the system
+  allocator to return freed pages (`malloc_zone_pressure_relief` on macOS,
+  `malloc_trim` on glibc). On macOS that is best effort: libmalloc keeps freed
+  large blocks (the load-time f32 buffers) in its large cache, which the
+  kernel reclaims under memory pressure. Measured on gemma int8 / Metal
+  through `::embedder` (process footprint, `footprint -p`):
 
-  | Allocator setting | Loaded footprint | After unload | Over 3 cycles |
-  |---|---|---|---|
-  | Default | 840 MB | 474 MB | grows about 280 MB per cycle |
-  | `MallocLargeCache=0` | 432 MB | 10 MB | flat |
+  | Allocator setting | Before | Enabled and embedded | Disabled | Second cycle, disabled |
+  |---|---|---|---|---|
+  | `MallocLargeCache=0` | 7.5 MB | 439 MB | 15 MB | 15 MB (RSS flat) |
+  | Default | 7.7 MB | 836 MB | 478 MB | grows with the large cache |
 
-  The model code does free everything. On macOS, run long-lived processes that
-  toggle embedders with `MallocLargeCache=0` in the environment. It has to be
-  set before the process starts, so it cannot be set from inside kleos.
+  The code frees everything; the default allocator setting keeps the extra
+  memory. On macOS, run long-lived processes that toggle embedders with
+  `MallocLargeCache=0` in the environment. It has to be set before the process
+  starts. The probe is `kleos-infer/tests/unload_memory.rs`.
 * A custom embedder's memory belongs to the host. Disable parks its handle so
   that it can be re-enabled, and calls `unload()` so the implementation can
   release what it can.
