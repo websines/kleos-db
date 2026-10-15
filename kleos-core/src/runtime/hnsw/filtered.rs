@@ -57,17 +57,28 @@ const MIN_SCAN_COST: f64 = 4096.0;
 /// about this many times as many (their unvisited neighbours).
 const GRAPH_FANOUT: f64 = 9.0;
 /// Cost of one graph visit (point fetch + decode + distance + predicate +
-/// share of the adjacency reads) relative to one row of a sequential scan.
-///
-/// Both constants were measured with `examples/vecbench.rs` (99k x 1536-d,
-/// M=16, mem backend): collecting 32 passing rows at a 1% pass rate visited
-/// about 29k nodes (9 x 32 / 0.01), and a visit cost about 9 times a scanned
-/// row (about 8.6 us against 0.9 us). So the scan wins below a pass rate of
-/// roughly `81 * max(ef, k) / rows`.
-const VISIT_COST: f64 = 9.0;
+/// share of the adjacency reads) relative to one row of the exact scan that
+/// fails the filter (sequential fetch + decode + predicate).
+const VISIT_COST: f64 = 10.5;
+/// Extra cost of a scanned row that passes the filter (distance computation
+/// and index-membership check), in the same units.
+const SCAN_MATCH_COST: f64 = 1.7;
+// Measured with `examples/vecbench.rs` (99k x 1536-d, M=16, mem backend),
+// forcing each path over pass rates 1-50% and `ef` 32-256: the graph costs
+// about 27 us per `max(ef, k) / p` (= 9 visits of about 3.0 us), the scan
+// about 28 ms + 48 ms * p (0.28 us per row, plus 0.48 us per passing row).
+// The scan therefore wins once `max(ef, k) / p` exceeds roughly
+// `rows * (1 + 1.7 p) / 95`; on that index, at 10% from ef = 128 and at 1%
+// for every ef.
 /// A level must hold this many nodes before its count is used to estimate the
 /// index size.
 const SIZE_SAMPLE_NODES: usize = 16;
+
+/// Cost, in scanned-row units, of the exact scan over `size` rows of which a
+/// fraction `p` passes the filter.
+fn scan_cost(size: f64, p: f64) -> f64 {
+    size * (1.0 + p * SCAN_MATCH_COST)
+}
 
 /// The compiled search filter.
 pub(super) struct SearchPredicate<'a> {
@@ -114,6 +125,19 @@ impl FilteredState {
     /// Laplace-smoothed observed pass rate.
     fn pass_rate(&self) -> f64 {
         (self.passed as f64 + 1.0) / (self.evaluated as f64 + 2.0)
+    }
+    /// Projected graph visits still ahead at pass rate `p`. A search
+    /// collecting `target` passing rows visits about `GRAPH_FANOUT * target /
+    /// p` nodes in total; what is left is that minus the visits made so far,
+    /// but never less than the visits needed to fill the result slots still
+    /// empty (so a search whose passing rows lie farther away than the model
+    /// assumes, e.g. a filter correlated with the query, keeps re-evaluating
+    /// the switch instead of being assumed finished).
+    fn remaining_visits(&self, p: f64) -> f64 {
+        let total = GRAPH_FANOUT * self.target as f64 / p;
+        let spent = self.visited.len() as f64;
+        let missing = self.target.saturating_sub(self.results.len()) as f64;
+        (total - spent).max(GRAPH_FANOUT * missing / p)
     }
     fn add_result(&mut self, key: CompoundKey, dist: f64, tuple: Tuple) {
         self.result_tuples.insert(key.clone(), tuple);
@@ -251,15 +275,14 @@ impl SessionTx<'_> {
                     break;
                 }
             }
-            // Selective filter: switch to an exact scan once the projected
-            // graph work, or the work already spent, costs more than scanning
-            // the relation.
+            // Selective filter: switch to an exact scan when the graph work
+            // still ahead costs more than scanning the relation. Work already
+            // done is sunk: it never argues for a switch (charging it made a
+            // nearly finished search throw its results away and scan anyway).
             if st.evaluated >= MIN_SAMPLE {
-                let projected = GRAPH_FANOUT * st.target as f64 / st.pass_rate();
-                let spent = st.visited.len() as f64;
-                let remaining = (projected - spent).max(0.0);
-                let cost = remaining.max(spent) * VISIT_COST;
-                if cost >= MIN_SCAN_COST {
+                let p = st.pass_rate();
+                let remaining = st.remaining_visits(p) * VISIT_COST;
+                if remaining >= MIN_SCAN_COST {
                     let size = match size_estimate {
                         Some(s) => s,
                         None => {
@@ -268,7 +291,7 @@ impl SessionTx<'_> {
                             s
                         }
                     };
-                    if cost > size {
+                    if remaining > scan_cost(size, p) {
                         return self.hnsw_knn_brute_force(q, config, pred, stack, vec_cache);
                     }
                 }
@@ -473,5 +496,53 @@ impl SessionTx<'_> {
             }
         }
         Ok(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(target: usize, visited: usize, results: usize) -> FilteredState {
+        let key = |i: usize| -> CompoundKey { (vec![DataValue::from(i as i64)], 1, -1) };
+        let mut st = FilteredState {
+            target,
+            visited: (0..visited).map(key).collect(),
+            candidates: PriorityQueue::new(),
+            results: PriorityQueue::new(),
+            result_tuples: FxHashMap::default(),
+            evaluated: 0,
+            passed: 0,
+        };
+        for i in 0..results {
+            st.add_result(key(i), i as f64, vec![]);
+        }
+        st
+    }
+
+    /// Visits already made never push a search towards the scan: a search
+    /// that has done most of its projected work has little left to do.
+    #[test]
+    fn spent_visits_are_sunk() {
+        let fresh = state(128, 0, 0).remaining_visits(0.1);
+        assert!((fresh - GRAPH_FANOUT * 1280.0).abs() < 1e-6);
+        let nearly_done = state(128, 11_000, 128).remaining_visits(0.1);
+        assert!(nearly_done < fresh / 10.0, "{nearly_done}");
+        // Past the projection with slots still empty: the missing rows keep
+        // the estimate up, so the switch is still considered.
+        let lagging = state(128, 20_000, 28).remaining_visits(0.1);
+        assert!((lagging - GRAPH_FANOUT * 1000.0).abs() < 1e-6);
+    }
+
+    /// The scan wins at 1% and loses at 50% for a 32-row target on a 99k
+    /// index; at 10% the crossover lies between ef 64 and ef 128.
+    #[test]
+    fn crossover_follows_the_cost_model() {
+        let graph = |target: usize, p: f64| state(target, 0, 0).remaining_visits(p) * VISIT_COST;
+        let size = 99_000.0;
+        assert!(graph(32, 0.01) > scan_cost(size, 0.01));
+        assert!(graph(32, 0.5) < scan_cost(size, 0.5));
+        assert!(graph(64, 0.1) < scan_cost(size, 0.1));
+        assert!(graph(128, 0.1) > scan_cost(size, 0.1));
     }
 }
