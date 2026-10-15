@@ -28,14 +28,18 @@ pub(super) fn calibration(t: Template, f: Family) -> Calibration {
     const ADAPT: &str = "adapt-60 v1";
     const NONE: &str = "default (no adapt data)";
     match (t, f) {
-        (Template::Supersedes, Family::D1) => cal(&[], 0.351, 1.01, ADAPT),
-        (Template::Contradicts, Family::D1) => cal(&[], 0.351, 1.01, ADAPT),
-        (Template::Duplicate, Family::D1) => cal(&[], 0.5, 1.01, ADAPT),
-        (Template::Relation, Family::D1) => cal(&[0.0, 0.0, -0.5], 0.0, 1.01, ADAPT),
-        (Template::Supersedes, Family::Nano) => cal(&[], 0.5, 1.01, ADAPT),
-        (Template::Contradicts, Family::Nano) => cal(&[], 0.5, 1.01, ADAPT),
-        (Template::Duplicate, Family::Nano) => cal(&[], 0.5, 1.01, ADAPT),
-        (Template::Relation, Family::Nano) => cal(&[], 0.0, 1.01, ADAPT),
+        // d1-omni: recorded MPS f16 answers (scripts/infer-bench/decide/d1_record.py)
+        (Template::Supersedes, Family::D1) => cal(&[], 0.370, 0.722, ADAPT),
+        (Template::Contradicts, Family::D1) => cal(&[], 0.232, 0.407, ADAPT),
+        (Template::Duplicate, Family::D1) => cal(&[], 0.500, 0.664, ADAPT),
+        (Template::Relation, Family::D1) => cal(&[0.0, 0.0, -0.5], 0.000, 0.936, ADAPT),
+        // decider-nano f32 through kleos-infer. Zero-shot supersedes and
+        // contradicts never reach a 2% false-auto rate on adapt, so they never
+        // auto-apply (tau 1.01); fit a probe (`::decider fit`) to get an auto band.
+        (Template::Supersedes, Family::Nano) => cal(&[], 0.246, 1.01, ADAPT),
+        (Template::Contradicts, Family::Nano) => cal(&[], 0.500, 1.01, ADAPT),
+        (Template::Duplicate, Family::Nano) => cal(&[], 0.500, 0.539, ADAPT),
+        (Template::Relation, Family::Nano) => cal(&[0.0, 0.0, -0.5], 0.000, 0.778, ADAPT),
         (Template::SameEntity | Template::Important, _) => cal(&[], 0.5, 0.9, NONE),
         (_, Family::Custom(_)) => Calibration::default(),
     }

@@ -1172,6 +1172,112 @@ impl CozoDbPy {
             .map_err(report2py)?;
         Ok(named_rows_to_py(rows, py))
     }
+    /// Turn a built-in decision model on under `name` (kleos fork;
+    /// process-wide, like `::decider enable`). `model` is `'decider-nano'`
+    /// (default) or `'d1-omni'`; needs a build with the `infer` feature. With
+    /// no keyword arguments a disabled decider comes back as it was.
+    #[pyo3(signature = (name, model=None, precision=None, device=None))]
+    pub fn enable_decider(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        model: Option<String>,
+        precision: Option<String>,
+        device: Option<String>,
+    ) -> PyResult<()> {
+        self.db_ref()?;
+        let spec = ::kleos::decide::DeciderSpec {
+            model,
+            precision,
+            device,
+        };
+        py.allow_threads(|| ::kleos::decide::enable_decider(name, spec))
+            .map_err(report2py)
+    }
+    /// Turn the decider `name` off and unload it. Returns `False` when it was
+    /// already off. Process-wide.
+    pub fn disable_decider(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
+        self.db_ref()?;
+        py.allow_threads(|| ::kleos::decide::disable_decider(name))
+            .map_err(report2py)
+    }
+    /// Every enabled and disabled decider as a dict.
+    pub fn deciders(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.db_ref()?;
+        let out = PyList::empty(py);
+        for e in ::kleos::decide::deciders() {
+            let d = PyDict::new(py);
+            d.set_item("name", e.name)?;
+            d.set_item("kind", e.kind)?;
+            d.set_item("family", e.family)?;
+            d.set_item("model", e.model)?;
+            d.set_item("enabled", e.enabled)?;
+            d.set_item("loaded", e.loaded)?;
+            d.set_item("precision", e.precision)?;
+            d.set_item("device", e.device)?;
+            out.append(d)?;
+        }
+        Ok(out.into())
+    }
+    /// Decide with a fixed template (`supersedes`, `same_entity`,
+    /// `duplicate`, `contradicts`, `relation`, `important`). Returns a dict
+    /// `{label, p, probs, band, confident, model, template, template_version,
+    /// via, decided_by}`. `b` is omitted for `important`.
+    #[pyo3(signature = (template, a, b=None, model="nano"))]
+    pub fn decide(
+        &self,
+        py: Python<'_>,
+        template: &str,
+        a: &str,
+        b: Option<&str>,
+        model: &str,
+    ) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let b = b.unwrap_or("");
+        let d = py
+            .allow_threads(|| db.decide(model, template, a, b))
+            .map_err(report2py)?;
+        let out = PyDict::new(py);
+        out.set_item("decided_by", d.decided_by())?;
+        out.set_item("label", d.label)?;
+        out.set_item("p", d.p)?;
+        out.set_item("probs", d.probs)?;
+        out.set_item("band", d.band.name())?;
+        out.set_item("confident", d.confident)?;
+        out.set_item("model", d.model)?;
+        out.set_item("template", d.template)?;
+        out.set_item("template_version", d.template_version)?;
+        out.set_item("via", d.via)?;
+        Ok(out.into())
+    }
+    /// Fit a logistic probe (or with `probe=False` a calibration) for decider
+    /// `name` and `template` on the labelled stored relation `relation` (last
+    /// column = label); same as `::decider fit`. Persisted in this database.
+    #[pyo3(signature = (name, template, relation, probe=true, alpha=0.02))]
+    pub fn fit_decider(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        template: &str,
+        relation: &str,
+        probe: bool,
+        alpha: f64,
+    ) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let r = py
+            .allow_threads(|| db.fit_decider(name, template, relation, probe, alpha))
+            .map_err(report2py)?;
+        let out = PyDict::new(py);
+        out.set_item("model", r.model)?;
+        out.set_item("template", r.template)?;
+        out.set_item("kind", r.kind)?;
+        out.set_item("n", r.n)?;
+        out.set_item("cv_score", r.cv_score)?;
+        out.set_item("threshold", r.threshold)?;
+        out.set_item("tau_auto", r.tau_auto)?;
+        out.set_item("coverage", r.coverage)?;
+        Ok(out.into())
+    }
     pub fn multi_transact(&self, write: bool) -> PyResult<CozoDbMulTx> {
         let db = self.db_ref()?;
         Ok(CozoDbMulTx {
