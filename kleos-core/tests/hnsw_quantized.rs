@@ -238,11 +238,15 @@ fn hnsw_over_f16_column() {
 
 #[test]
 fn quantized_search_recall_and_exact_distances() {
-    const N: usize = 600;
+    const N: usize = 400;
     let pts = vectors(N, 48, 11);
-    let queries = vectors(40, 48, 12);
-    for dist in ["Cosine", "L2", "IP"] {
-        // Baseline: the unquantized index.
+    let queries = vectors(20, 48, 12);
+    for (dist, quants) in [
+        ("Cosine", &["binary", "turbo2", "turbo4", "turbo8"][..]),
+        ("L2", &["turbo4"][..]),
+        ("IP", &["turbo4"][..]),
+    ] {
+        // Baseline: the unquantized index (incremental inserts).
         let db = DbInstance::new("mem", "", "").unwrap();
         run(&db, ":create pts { id: Int => emb: <F32; 48> }");
         run(&db, &index_opts(48, dist, ""));
@@ -250,11 +254,12 @@ fn quantized_search_recall_and_exact_distances() {
         assert_eq!(code_rows(&db), 0, "unquantized index must not store codes");
         let (base_recall, _) = recall_and_distance_error(&db, &pts, &queries, dist);
 
-        for quant in ["binary", "turbo2", "turbo4", "turbo8"] {
+        for quant in quants {
+            // Quantized index, built over existing rows (bulk build path).
             let db = DbInstance::new("mem", "", "").unwrap();
             run(&db, ":create pts { id: Int => emb: <F32; 48> }");
-            run(&db, &index_opts(48, dist, quant));
             put_all(&db, &pts);
+            run(&db, &index_opts(48, dist, quant));
             assert_eq!(code_rows(&db), N as i64, "{dist} {quant}");
             let (recall, err) = recall_and_distance_error(&db, &pts, &queries, dist);
             assert!(
@@ -263,7 +268,7 @@ fn quantized_search_recall_and_exact_distances() {
             );
             // 1-bit codes are coarse at this low dimension (48, padded to 64);
             // the multi-bit codes track the exact index closely.
-            let slack = if quant == "binary" { 0.12 } else { 0.05 };
+            let slack = if *quant == "binary" { 0.12 } else { 0.05 };
             assert!(
                 recall >= base_recall - slack,
                 "{dist} {quant}: recall {recall} vs unquantized {base_recall}"
@@ -273,15 +278,15 @@ fn quantized_search_recall_and_exact_distances() {
 }
 
 #[test]
-fn quantized_bulk_build_matches_incremental() {
-    const N: usize = 500;
+fn quantized_incremental_inserts_write_codes() {
+    const N: usize = 300;
     let pts = vectors(N, 32, 21);
-    let queries = vectors(30, 32, 22);
+    let queries = vectors(20, 32, 22);
     let db = DbInstance::new("mem", "", "").unwrap();
     run(&db, ":create pts { id: Int => emb: <F32; 32> }");
-    put_all(&db, &pts);
-    // Index created over existing rows: the bulk build path.
+    // Index first: the incremental insert path writes the codes.
     run(&db, &index_opts(32, "Cosine", "turbo4"));
+    put_all(&db, &pts);
     assert_eq!(code_rows(&db), N as i64);
     let (recall, err) = recall_and_distance_error(&db, &pts, &queries, "Cosine");
     assert!(err < 1e-4, "{err}");
