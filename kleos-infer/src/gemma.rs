@@ -356,12 +356,12 @@ impl GemmaModel {
 /// debug builds (measured: +315 MB per load/unload cycle; release builds
 /// happened to avoid the autorelease path).
 #[cfg(feature = "metal")]
-fn with_pool<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_pool<R>(f: impl FnOnce() -> R) -> R {
     objc2::rc::autoreleasepool(|_| f())
 }
 
 #[cfg(not(feature = "metal"))]
-fn with_pool<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_pool<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 

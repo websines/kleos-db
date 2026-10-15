@@ -30,8 +30,13 @@
 //!   `minishlab/potion-base-8M`), a table lookup and a mean, ~0.05 ms/text.
 //! * [`GemmaEmbedder`]: `google/embeddinggemma-300m` (Gemma 3 bidirectional
 //!   encoder, mean pooling, two dense projections, Matryoshka output).
+//!
+//! Decision models ([`Decider`]):
+//! * [`DeciderNano`]: `tasksource/tasksource-decider-nano` (150M ModernBERT
+//!   joint cross-encoder; one logit per option, tree-attention shared state).
 
 mod decide;
+mod decider_nano;
 mod device;
 mod error;
 mod gemma;
@@ -40,6 +45,7 @@ mod linear;
 mod static_embed;
 
 pub use decide::{softmax, DecideAnswer, DecideRequest, Decider};
+pub use decider_nano::{DeciderNano, DECIDER_NANO_REPO};
 pub use device::DevicePref;
 pub use error::{Error, Result};
 pub use gemma::{GemmaEmbedder, GemmaModel, GEMMA_DOCUMENT_PROMPT, GEMMA_QUERY_PROMPT};
