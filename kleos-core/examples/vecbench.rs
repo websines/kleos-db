@@ -313,6 +313,36 @@ fn dir_size(p: &Path) -> u64 {
     total
 }
 
+/// CPU time consumed by this process. Wall-clock latency is the headline
+/// number, but on a shared, overloaded machine it mostly measures scheduling;
+/// CPU time is far steadier for before/after comparisons. (Process-wide rather
+/// than per-thread, because the engine runs rule evaluation on a rayon pool.)
+fn process_cpu_time() -> Duration {
+    #[repr(C)]
+    struct Timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    extern "C" {
+        fn clock_gettime(clk: i32, tp: *mut Timespec) -> i32;
+    }
+    #[cfg(target_os = "macos")]
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 12;
+    #[cfg(not(target_os = "macos"))]
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: plain libc call writing into a properly laid out timespec
+    // (64-bit targets).
+    let rc = unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+    if rc != 0 {
+        return Duration::ZERO;
+    }
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
     if sorted.is_empty() {
         return Duration::ZERO;
@@ -448,8 +478,8 @@ fn main() {
         build_time.as_secs_f64(),
     ));
     table.push_str(
-        "| selectivity | matches | ef | recall@k | QPS | p50 ms | p99 ms | under-fill |\n\
-         |---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| selectivity | matches | ef | recall@k | QPS | p50 ms | p99 ms | CPU ms/q | under-fill |\n\
+         |---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     );
     for &s in &a.selectivities {
         let threshold = ((s * BUCKETS as f64).round() as usize).clamp(1, BUCKETS);
@@ -461,6 +491,7 @@ fn main() {
             let mut expected = 0usize;
             let mut under = 0usize;
             let t = Instant::now();
+            let cpu0 = process_cpu_time();
             for (qi, truth) in queries.iter().zip(&gt) {
                 let tq = Instant::now();
                 let got = run_query(*qi, ef, threshold);
@@ -481,13 +512,15 @@ fn main() {
                     .count();
             }
             let total = t.elapsed();
+            let cpu = process_cpu_time().saturating_sub(cpu0);
             lat.sort();
             let line = format!(
-                "| {s} | {matches} | {ef} | {:.4} | {:.1} | {:.3} | {:.3} | {under} |\n",
+                "| {s} | {matches} | {ef} | {:.4} | {:.1} | {:.3} | {:.3} | {:.3} | {under} |\n",
                 hits as f64 / expected.max(1) as f64,
                 queries.len() as f64 / total.as_secs_f64(),
                 percentile(&lat, 0.5).as_secs_f64() * 1e3,
                 percentile(&lat, 0.99).as_secs_f64() * 1e3,
+                cpu.as_secs_f64() * 1e3 / queries.len() as f64,
             );
             eprint!("{line}");
             table.push_str(&line);
