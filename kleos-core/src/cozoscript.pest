@@ -22,19 +22,19 @@ vec_idx_op = {"hnsw" ~ (index_create_adv | index_drop)}
 fts_idx_op = {"fts" ~ (index_create_adv | index_drop)}
 lsh_idx_op = {"lsh" ~ (index_create_adv | index_drop)}
 graph_op = {"graph" ~ (graph_create | graph_drop | graph_list)}
-graph_create = {"create" ~ ident ~ "{" ~ (graph_opt_field ~ ",")* ~ graph_opt_field? ~ "}"}
+graph_create = {"create" ~ ident ~ "{" ~ (graph_opt_field ~ ("," ~ graph_opt_field)* ~ ","?)? ~ "}"}
 graph_drop = {"drop" ~ ident}
 graph_list = {"list"}
 query_op = {"query" ~ (query_create | query_remove | query_list | query_show | query_run)}
 query_create = {"create" ~ ident ~ query_params_decl? ~ query_script_inner}
-query_params_decl = {"(" ~ (query_param ~ ",")* ~ query_param? ~ ")"}
+query_params_decl = {"(" ~ (query_param ~ ("," ~ query_param)* ~ ","?)? ~ ")"}
 query_param = {param ~ (":" ~ col_type)? ~ ("default" ~ expr)?}
 query_remove = {"remove" ~ ident}
 query_list = {"list"}
 query_show = {"show" ~ ident}
 query_run = {"run" ~ ident}
-index_create = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (ident ~ ",")* ~ ident? ~ "}"}
-index_create_adv = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (index_opt_field ~ ",")* ~ index_opt_field? ~ "}"}
+index_create = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (ident ~ ("," ~ ident)* ~ ","?)? ~ "}"}
+index_create_adv = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (index_opt_field ~ ("," ~ index_opt_field)* ~ ","?)? ~ "}"}
 index_drop = {"drop" ~ compound_ident ~ ":" ~ ident }
 compact_op = {"compact"}
 warnings_op = {"warnings" ~ warnings_clear?}
@@ -88,17 +88,17 @@ compound_or_index_ident = @{ident ~ ("." ~ ident)* ~ (":" ~ ident)*}
 rule = {rule_head ~ ":=" ~ rule_body ~ ";"?}
 const_rule = {rule_head ~ "<-" ~ expr ~ ";"?}
 fixed_rule = {rule_head ~ "<~" ~ compound_ident ~ fixed_args_list ~ ";"?}
-fixed_args_list = {"(" ~ (fixed_arg ~ ",")* ~ fixed_arg? ~ ")"}
+fixed_args_list = {"(" ~ (fixed_arg ~ ("," ~ fixed_arg)* ~ ","?)? ~ ")"}
 
-rule_head = {(prog_entry | ident) ~ "[" ~ (head_arg ~ ",")* ~ head_arg? ~ "]"}
+rule_head = {(prog_entry | ident) ~ "[" ~ (head_arg ~ ("," ~ head_arg)* ~ ","?)? ~ "]"}
 head_arg = {aggr_arg | var}
 aggr_arg = {ident ~ "(" ~ var ~ ("," ~ expr)* ~ ")"}
 fixed_arg = _{fixed_rel | fixed_opt_pair}
 fixed_opt_pair = {ident ~ ":" ~ expr}
 fixed_rel = {fixed_rule_rel | fixed_relation_rel | fixed_named_relation_rel }
-fixed_rule_rel = {ident ~ "[" ~ (var ~ ",")* ~ var? ~ "]"}
-fixed_relation_rel = {relation_ident ~ "[" ~ (var ~ ",")* ~ var? ~ validity_clause? ~ "]"}
-fixed_named_relation_rel = {relation_ident ~ "{" ~ (fixed_named_relation_arg_pair ~ ",")* ~ fixed_named_relation_arg_pair? ~ validity_clause? ~ "}"}
+fixed_rule_rel = {ident ~ "[" ~ (var ~ ("," ~ var)* ~ ","?)? ~ "]"}
+fixed_relation_rel = {relation_ident ~ "[" ~ (var ~ ("," ~ var)* ~ ","?)? ~ validity_clause? ~ "]"}
+fixed_named_relation_rel = {relation_ident ~ "{" ~ (fixed_named_relation_arg_pair ~ ("," ~ fixed_named_relation_arg_pair)* ~ ","?)? ~ validity_clause? ~ "}"}
 fixed_named_relation_arg_pair = {ident ~ (":" ~ ident)?}
 
 validity_clause = {"@" ~ (temporal_axes | expr)}
@@ -106,11 +106,11 @@ temporal_axes = {"(" ~ axis_pair ~ ("," ~ axis_pair)? ~ ")"}
 axis_pair = {axis_label ~ ":" ~ expr}
 axis_label = {"vt" | "tt"}
 
-rule_body = {(disjunction ~ ",")* ~ disjunction?}
+rule_body = {(disjunction ~ ("," ~ disjunction)* ~ ","?)?}
 rule_apply = {underscore_ident ~ "[" ~ apply_args ~ "]"}
 relation_named_apply = {relation_ident ~ "{" ~ named_apply_args ~ validity_clause? ~ "}"}
 relation_apply = {relation_ident ~ "[" ~ apply_args ~ validity_clause? ~ "]"}
-search_apply = {search_index_ident ~ "{" ~ named_apply_args ~ "|" ~ (index_opt_field ~ ",")* ~ index_opt_field? ~ "}"}
+search_apply = {search_index_ident ~ "{" ~ named_apply_args ~ "|" ~ (index_opt_field ~ ("," ~ index_opt_field)* ~ ","?)? ~ "}"}
 
 disjunction = {(atom ~ or_op )* ~ atom}
 or_op = @{"or" ~ !XID_CONTINUE}
@@ -121,8 +121,8 @@ in_op = @{"in" ~!XID_CONTINUE}
 negation = {not_op ~ atom}
 not_op = @{"not" ~ !XID_CONTINUE}
 apply = {ident ~ "(" ~ apply_args ~ ")"}
-apply_args = {(expr ~ ",")* ~ expr?}
-named_apply_args = {(named_apply_pair ~ ",")* ~ named_apply_pair?}
+apply_args = {(expr ~ ("," ~ expr)* ~ ","?)?}
+named_apply_args = {(named_apply_pair ~ ("," ~ named_apply_pair)* ~ ","?)?}
 named_apply_pair = {underscore_ident ~ (":" ~ expr)?}
 grouped = _{"(" ~ rule_body ~ ")"}
 
@@ -151,9 +151,9 @@ minus = { "-" }
 negate = { "!" }
 
 term = _{ literal | param | grouping | apply | var | list | object }
-object = { "{" ~ (object_pair ~ ",")* ~ object_pair? ~ "}" }
+object = { "{" ~ (object_pair ~ ("," ~ object_pair)* ~ ","?)? ~ "}" }
 object_pair = {expr ~ ":" ~ expr}
-list = { "[" ~ (expr ~ ",")* ~ expr? ~ "]" }
+list = { "[" ~ (expr ~ ("," ~ expr)* ~ ","?)? ~ "]" }
 grouping = { "(" ~ expr ~ ")" }
 
 option = _{(limit_option|offset_option|sort_option|relation_option|timeout_option|mem_limit_option|as_of_option|sleep_option|returning_option|
@@ -245,7 +245,7 @@ literal = _{ null | boolean | number | string}
 // schema
 
 table_schema = {"{" ~ table_cols ~ ("=>" ~ table_cols)? ~ "}"}
-table_cols = {(table_col ~ ",")* ~ table_col?}
+table_cols = {(table_col ~ ("," ~ table_col)* ~ ","?)?}
 table_col = {ident ~ (":" ~ col_type)? ~ (("default" ~ expr) | ("=" ~ out_arg))?}
 col_type = {(
     any_type | bool_type | int_type | float_type | string_type |
@@ -263,7 +263,7 @@ json_type = {"Json"}
 validity_type = {"Validity"}
 txtime_type = {"TxTime"}
 list_type = {"[" ~ col_type ~ (";" ~ expr)? ~ "]"}
-tuple_type = {"(" ~ (col_type ~ ",")* ~ col_type? ~ ")"}
+tuple_type = {"(" ~ (col_type ~ ("," ~ col_type)* ~ ","?)? ~ ")"}
 vec_type = {"<" ~ vec_el_type ~ ";" ~ pos_int ~ ">"}
 vec_el_type = {"F32" | "F64" | "Float" | "Double" }
 
@@ -305,4 +305,4 @@ fts_or = {"OR" | "," | ";"}
 fts_not = {"NOT"}
 
 expression_script = {SOI ~ expr ~ EOI}
-param_list = {SOI ~ "[" ~ "[" ~ (param ~ ",")* ~ param? ~ "]" ~ "]" ~ EOI}
+param_list = {SOI ~ "[" ~ "[" ~ (param ~ ("," ~ param)* ~ ","?)? ~ "]" ~ "]" ~ EOI}
