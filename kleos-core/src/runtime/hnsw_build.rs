@@ -40,7 +40,9 @@ use std::cmp::{max, Reverse};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
-use miette::{bail, Result};
+use crate::bail;
+
+use miette::{Result};
 use ordered_float::OrderedFloat;
 use priority_queue::PriorityQueue;
 use rustc_hash::FxHashSet;

@@ -108,7 +108,8 @@ use std::sync::{Arc, PoisonError};
 #[cfg(feature = "graph-algo")]
 use graph::prelude::{DirectedCsrGraph, Graph};
 #[cfg(feature = "graph-algo")]
-use miette::{bail, ensure, Diagnostic, Result};
+use crate::bail;
+use miette::{ensure, Diagnostic, Result};
 #[cfg(feature = "graph-algo")]
 use smartstring::{LazyCompact, SmartString};
 #[cfg(feature = "graph-algo")]
@@ -1375,7 +1376,8 @@ pub(crate) fn sysop_list_graphs(tx: &SessionTx<'_>) -> Result<crate::NamedRows> 
 /// a feature-poor build says *why* it cannot run the script.
 #[cfg(not(feature = "graph-algo"))]
 mod without_graph_algo {
-    use miette::{bail, Result};
+    use crate::bail;
+    use miette::{Result};
 
     use crate::runtime::transact::SessionTx;
 

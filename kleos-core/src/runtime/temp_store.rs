@@ -15,7 +15,8 @@ use std::ops::Bound::Excluded;
 
 use either::{Left, Right};
 use itertools::Itertools;
-use miette::{bail, ensure, Result};
+use crate::bail;
+use miette::{ensure, Result};
 
 use crate::data::aggr::Aggregation;
 use crate::data::memsize::{est_tuple_bytes, BTREE_ENTRY_OVERHEAD};

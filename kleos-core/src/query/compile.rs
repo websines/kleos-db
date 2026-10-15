@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use itertools::Itertools;
-use miette::{bail, ensure, Context, Diagnostic, Result};
+use crate::bail;
+use miette::{ensure, Context, Diagnostic, Result};
 use thiserror::Error;
 
 use crate::data::aggr::Aggregation;

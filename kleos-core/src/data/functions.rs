@@ -23,7 +23,8 @@ use chrono::{
 use itertools::Itertools;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
-use miette::{bail, ensure, miette, IntoDiagnostic, Result};
+use crate::bail;
+use miette::{ensure, miette, IntoDiagnostic, Result};
 use num_traits::FloatConst;
 use rand::prelude::*;
 use serde_json::{json, Value};

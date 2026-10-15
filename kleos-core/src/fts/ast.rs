@@ -7,7 +7,8 @@
  */
 
 use crate::fts::tokenizer::TextAnalyzer;
-use miette::{bail, Diagnostic, Result};
+use crate::bail;
+use miette::{Diagnostic, Result};
 use ordered_float::OrderedFloat;
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;

@@ -9,7 +9,9 @@
 //! Parser for the read-only Cypher subset: pest parse tree -> Cypher AST.
 //! Grammar in `cypher.pest`; AST in `ast.rs`. See `docs/specs/cypher-read.md`.
 
-use miette::{bail, miette, Result};
+use crate::bail;
+
+use miette::{miette, Result};
 use pest::Parser;
 
 use super::ast::*;

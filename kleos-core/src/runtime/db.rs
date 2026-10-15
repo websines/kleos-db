@@ -27,7 +27,8 @@ use either::{Left, Right};
 use itertools::Itertools;
 use miette::Report;
 #[allow(unused_imports)]
-use miette::{bail, ensure, miette, Diagnostic, IntoDiagnostic, Result, WrapErr};
+use crate::bail;
+use miette::{ensure, miette, Diagnostic, IntoDiagnostic, Result, WrapErr};
 use serde_json::json;
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
@@ -946,7 +947,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     pub(crate) fn commit_tx_with_test_hook(&'s self, tx: &mut SessionTx<'_>) -> Result<()> {
         #[cfg(any(test, feature = "test-hooks"))]
         if self.fail_next_commit.swap(false, Ordering::SeqCst) {
-            miette::bail!("injected commit failure (test-hooks)");
+            crate::bail!("injected commit failure (test-hooks)");
         }
         tx.commit_tx()
     }

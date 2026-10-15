@@ -11,7 +11,9 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
-use miette::{bail, Diagnostic, Result};
+use crate::bail;
+
+use miette::{Diagnostic, Result};
 use serde_derive::{Deserialize, Serialize};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;

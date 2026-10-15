@@ -12,7 +12,8 @@ use std::sync::atomic::Ordering;
 
 use itertools::Itertools;
 use log::error;
-use miette::{bail, ensure, Diagnostic, IntoDiagnostic, Result};
+use crate::bail;
+use miette::{ensure, Diagnostic, IntoDiagnostic, Result};
 use pest::Parser;
 use rmp_serde::Serializer;
 use serde::Serialize;

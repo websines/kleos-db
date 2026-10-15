@@ -13,7 +13,8 @@ use std::iter;
 use either::{Left, Right};
 use itertools::Itertools;
 use log::debug;
-use miette::{bail, Diagnostic, Result};
+use crate::bail;
+use miette::{Diagnostic, Result};
 use smartstring::SmartString;
 use thiserror::Error;
 

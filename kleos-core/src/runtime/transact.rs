@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::data::program::ReturnMutation;
-use miette::{bail, Diagnostic, Result};
+use crate::bail;
+use miette::{Diagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
 

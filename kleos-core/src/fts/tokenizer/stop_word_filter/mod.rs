@@ -18,7 +18,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use super::{BoxTokenStream, Token, TokenFilter, TokenStream};
-use miette::{bail, Result};
+use crate::bail;
+use miette::{Result};
 
 /// `TokenFilter` that removes stop words from a token stream
 #[derive(Clone)]

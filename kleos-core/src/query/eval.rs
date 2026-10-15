@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use itertools::Itertools;
 use log::{debug, trace};
-use miette::{bail, Result};
+use crate::bail;
+use miette::{Result};
 // `rayon` is an optional dependency (implied by `graph-algo`, absent in a
 // bare `minimal` build): parallel stratum evaluation degrades to sequential
 // without it. The wasm arm below is already sequential.

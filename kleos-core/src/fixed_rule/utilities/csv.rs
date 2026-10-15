@@ -9,7 +9,8 @@
 use std::collections::BTreeMap;
 
 use csv::StringRecord;
-use miette::{bail, ensure, IntoDiagnostic, Result};
+use crate::bail;
+use miette::{ensure, IntoDiagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 
 use crate::data::expr::Expr;

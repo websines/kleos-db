@@ -23,7 +23,9 @@
 
 use std::collections::BTreeMap;
 
-use miette::{bail, Result};
+use crate::bail;
+
+use miette::{Result};
 use smartstring::{LazyCompact, SmartString};
 
 use crate::data::expr::Expr;

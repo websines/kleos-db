@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use either::{Either, Left, Right};
 use itertools::Itertools;
-use miette::{bail, Diagnostic, Report, Result};
+use crate::bail;
+use miette::{Diagnostic, Report, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
 

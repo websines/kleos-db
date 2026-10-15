@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use ::sqlite::Connection;
 use crossbeam::sync::{ShardedLock, ShardedLockReadGuard, ShardedLockWriteGuard};
 use either::{Either, Left, Right};
-use miette::{bail, miette, IntoDiagnostic, Result};
+use crate::bail;
+use miette::{miette, IntoDiagnostic, Result};
 use sqlite::{ConnectionThreadSafe, State, Statement};
 
 use crate::data::tuple::{check_key_for_validity, Tuple};

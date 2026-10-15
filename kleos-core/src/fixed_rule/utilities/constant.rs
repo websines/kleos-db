@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use miette::{bail, ensure, Diagnostic, Result};
+use crate::bail;
+
+use miette::{ensure, Diagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
 

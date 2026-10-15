@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use miette::{bail, ensure, Diagnostic, Result};
+use crate::bail;
+use miette::{ensure, Diagnostic, Result};
 use pest::pratt_parser::{Op, PrattParser};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;

@@ -6,6 +6,20 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+/// Return early with a [`miette::Report`]; same arguments as `miette::bail!`.
+///
+/// miette's own `bail!` expands to `return Err(..);`, and that trailing semicolon is
+/// rejected in expression position (e.g. `Err(e) => bail!(e),`) by rustc's
+/// `semicolon_in_expressions_from_non_local_macros` future-compat lint. This expansion
+/// has no semicolon, so it is valid both as a statement and as an expression.
+/// Import it as `use crate::bail;`.
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return ::core::result::Result::Err(::miette::miette!($($arg)*))
+    };
+}
+pub(crate) use bail;
+
 #[inline(always)]
 pub(crate) fn swap_option_result<T, E>(d: Result<Option<T>, E>) -> Option<Result<T, E>> {
     match d {

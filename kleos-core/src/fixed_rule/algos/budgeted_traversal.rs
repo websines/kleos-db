@@ -64,7 +64,8 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{btree_map::Entry, BTreeMap, BinaryHeap};
 
 use graph::prelude::{DirectedCsrGraph, DirectedNeighborsWithValues};
-use miette::{bail, ensure, Diagnostic, Result};
+use crate::bail;
+use miette::{ensure, Diagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
 

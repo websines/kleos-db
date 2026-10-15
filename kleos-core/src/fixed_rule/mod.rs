@@ -18,7 +18,8 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use miette::IntoDiagnostic;
 #[allow(unused_imports)]
-use miette::{bail, ensure, Diagnostic, Report, Result};
+use crate::bail;
+use miette::{ensure, Diagnostic, Result};
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
 

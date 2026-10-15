@@ -54,11 +54,13 @@ pub use miette::Error;
 use miette::Report;
 #[allow(unused_imports)]
 use miette::{
-    bail, miette, GraphicalReportHandler, GraphicalTheme, IntoDiagnostic, JSONReportHandler,
-    Result, ThemeCharacters, ThemeStyles,
+    miette, GraphicalReportHandler, GraphicalTheme, IntoDiagnostic, JSONReportHandler, Result,
+    ThemeCharacters, ThemeStyles,
 };
 use parse::CozoScript;
 use serde_json::json;
+
+pub(crate) use crate::utils::bail;
 
 #[cfg(feature = "cypher")]
 pub use cypher::{CypherGraphSchema, EdgeMap, NodeMap};

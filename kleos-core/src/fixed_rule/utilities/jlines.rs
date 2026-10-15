@@ -15,7 +15,8 @@ use itertools::Itertools;
 #[cfg(feature = "requests")]
 use log::error;
 #[allow(unused_imports)]
-use miette::{bail, miette, Diagnostic, IntoDiagnostic, Result, WrapErr};
+use crate::bail;
+use miette::{miette, Diagnostic, IntoDiagnostic, Result, WrapErr};
 #[cfg(feature = "requests")]
 use minreq::Response;
 use smartstring::{LazyCompact, SmartString};

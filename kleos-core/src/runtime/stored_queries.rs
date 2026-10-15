@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use itertools::Itertools;
-use miette::{bail, ensure, IntoDiagnostic, Result, WrapErr};
+use crate::bail;
+use miette::{ensure, IntoDiagnostic, Result, WrapErr};
 use serde_json::json;
 use smartstring::SmartString;
 

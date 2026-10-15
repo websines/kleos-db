@@ -59,7 +59,9 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use miette::{bail, IntoDiagnostic, Result, WrapErr};
+use crate::bail;
+
+use miette::{IntoDiagnostic, Result, WrapErr};
 use oxrdf::{GraphName, NamedNode, NamedOrBlankNode, Term};
 use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParseError, TurtleParser};
 use smartstring::{LazyCompact, SmartString};

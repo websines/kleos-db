@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
-use miette::{bail, ensure, miette, Diagnostic, Result};
+use crate::bail;
+
+use miette::{ensure, miette, Diagnostic, Result};
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};

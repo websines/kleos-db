@@ -9,7 +9,8 @@
 use std::collections::BTreeSet;
 
 use itertools::Itertools;
-use miette::{bail, ensure, miette, Diagnostic, Result};
+use crate::bail;
+use miette::{ensure, miette, Diagnostic, Result};
 use thiserror::Error;
 
 use crate::data::expr::Expr;

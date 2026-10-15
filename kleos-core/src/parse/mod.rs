@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use either::{Either, Left};
-use miette::{bail, Diagnostic, IntoDiagnostic, Result};
+use crate::bail;
+use miette::{Diagnostic, IntoDiagnostic, Result};
 use pest::error::InputLocation;
 use pest::Parser;
 use smartstring::{LazyCompact, SmartString};

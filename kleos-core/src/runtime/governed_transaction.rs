@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{bounded, Receiver, Sender};
-use miette::{bail, Diagnostic, Report, Result};
+use crate::bail;
+use miette::{Diagnostic, Report, Result};
 use thiserror::Error;
 
 use crate::{DataValue, DbInstance, NamedRows, Poison, TransactionPayload};

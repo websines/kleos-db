@@ -228,7 +228,7 @@ fn process_line(
             "unset" => {
                 let key = payload.trim();
                 if params.remove(key).is_none() {
-                    bail!("Key not found: '{}'", key)
+                    bail!("Key not found: '{}'", key);
                 }
             }
             "clear" => {

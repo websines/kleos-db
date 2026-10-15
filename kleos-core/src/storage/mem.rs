@@ -17,7 +17,8 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use itertools::Itertools;
-use miette::{bail, Result};
+use crate::bail;
+use miette::{Result};
 
 use crate::data::tuple::{check_key_for_validity, Tuple};
 use crate::data::value::ValidityTs;

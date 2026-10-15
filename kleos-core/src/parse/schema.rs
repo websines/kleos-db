@@ -9,7 +9,8 @@
 use std::collections::BTreeSet;
 
 use itertools::Itertools;
-use miette::{bail, ensure, Diagnostic, IntoDiagnostic, Result};
+use crate::bail;
+use miette::{ensure, Diagnostic, IntoDiagnostic, Result};
 use smartstring::SmartString;
 use thiserror::Error;
 

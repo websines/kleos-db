@@ -6,7 +6,9 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use miette::{bail, Result};
+use crate::bail;
+
+use miette::{Result};
 
 use crate::data::tuple::Tuple;
 use crate::data::value::ValidityTs;

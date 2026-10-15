@@ -29,7 +29,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use miette::{bail, Result};
+use crate::bail;
+
+use miette::{Result};
 
 use super::ast::*;
 use super::schema::{CypherGraphSchema, EdgeMap, NodeMap};
