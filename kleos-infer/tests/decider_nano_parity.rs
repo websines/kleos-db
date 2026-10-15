@@ -71,13 +71,15 @@ fn decider_nano_matches_reference() {
     let (reqs, want) = requests(&fx);
     // f32 must match tightly; quantised and half precisions are reported
     // and held to looser bounds (same answer on clear-cut items).
-    // (candle has no bf16 matmul on the CPU: f16 weights there, bf16 on Metal)
-    let half = if device() == DevicePref::Cpu { Precision::F16 } else { Precision::BF16 };
-    for (prec, tol) in [
-        (Precision::F32, 2e-3f32),
-        (Precision::Q8, 0.25),
-        (half, 0.5),
-    ] {
+    // candle has no bf16 matmul on the CPU (f16 weights there, bf16 on
+    // Metal), and its Accelerate backend has no f16 matmul either.
+    let mut precisions = vec![(Precision::F32, 2e-3f32), (Precision::Q8, 0.25)];
+    if device() != DevicePref::Cpu {
+        precisions.push((Precision::BF16, 0.5));
+    } else if !cfg!(feature = "accelerate") {
+        precisions.push((Precision::F16, 0.5));
+    }
+    for (prec, tol) in precisions {
         let cfg = EngineConfig {
             device: device(),
             precision: prec,

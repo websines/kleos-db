@@ -46,7 +46,7 @@ use crate::device::device_name;
 use crate::error::tok_err;
 use crate::gemma::with_pool;
 use crate::linear::{Embedding, Linear, Loader, TensorFile};
-use crate::{hub, EngineConfig, Error, Result};
+use crate::{hub, EngineConfig, Error, Precision, Result};
 
 /// Hugging Face repo of the default decider-nano checkpoint.
 pub const DECIDER_NANO_REPO: &str = "tasksource/tasksource-decider-nano";
@@ -151,16 +151,42 @@ pub struct DeciderNano {
     run: Mutex<()>,
 }
 
-/// One tokenised request.
+/// One input row of the encoder: one tokenised request, or several packed
+/// back to back (on the CPU) with a block-diagonal mask between them.
+#[derive(Clone)]
 struct Row {
     ids: Vec<u32>,
     pos: Vec<u32>,
     /// 0 state, 1 question, 2 option.
     kind: Vec<u8>,
-    /// Option index within the request for option tokens.
+    /// Option index within the row for option tokens.
     opt: Vec<u32>,
-    n_opts: usize,
+    /// Request index within the row (tokens of different requests never
+    /// attend to each other).
+    seg: Vec<u32>,
+    /// Options per request in the row.
+    n_opts: Vec<usize>,
 }
+
+impl Row {
+    fn append(&mut self, other: &Row) {
+        let o = self.n_opts.iter().sum::<usize>() as u32;
+        let g = self.n_opts.len() as u32;
+        self.ids.extend_from_slice(&other.ids);
+        self.pos.extend_from_slice(&other.pos);
+        self.kind.extend_from_slice(&other.kind);
+        self.opt.extend(other.opt.iter().map(|x| x + o));
+        self.seg.extend(other.seg.iter().map(|x| x + g));
+        self.n_opts.extend_from_slice(&other.n_opts);
+    }
+}
+
+/// On the CPU, short requests are packed into one row of up to this many
+/// tokens: candle runs a batched matmul as one GEMM call (each with its own
+/// thread fan-out) per batch × head, which made padded batches of short rows
+/// slower than packed ones with its built-in GEMM (q8: 350 vs 195
+/// ms/decision on a loaded machine).
+const CPU_PACK_TOKENS: usize = 512;
 
 impl DeciderNano {
     /// The default checkpoint ([`DECIDER_NANO_REPO`]).
@@ -327,12 +353,14 @@ impl DeciderNano {
                 np + nq + longest
             )));
         }
+        let seg = vec![0u32; ids.len()];
         Ok(Row {
             ids,
             pos,
             kind,
             opt,
-            n_opts: r.options.len(),
+            seg,
+            n_opts: vec![r.options.len()],
         })
     }
 
@@ -344,23 +372,43 @@ impl DeciderNano {
             .collect::<Result<Vec<_>>>()?;
         let mut order: Vec<usize> = (0..rows.len()).collect();
         order.sort_by_key(|&i| rows[i].ids.len());
+        // (row, the requests it holds, in row order)
+        let mut lines: Vec<(Row, Vec<usize>)> = vec![];
+        // Pack on the CPU when candle's own GEMM runs the matmuls (quantised
+        // weights, or no Accelerate BLAS); padded rows otherwise (packing adds
+        // attention work across requests that the mask then discards).
+        let quant = matches!(self.engine.precision, Precision::Q8 | Precision::Q4);
+        let pack = w.device.is_cpu() && (quant || !cfg!(feature = "accelerate"));
+        for &k in &order {
+            match lines.last_mut() {
+                Some((row, idx))
+                    if pack && row.ids.len() + rows[k].ids.len() <= CPU_PACK_TOKENS =>
+                {
+                    row.append(&rows[k]);
+                    idx.push(k);
+                }
+                _ => lines.push((rows[k].clone(), vec![k])),
+            }
+        }
+        lines.sort_by_key(|(r, _)| r.ids.len());
         let mut out: Vec<Option<DecideAnswer>> = vec![None; rows.len()];
         let budget = self.engine.max_batch_tokens.max(1);
         let _run = self.run.lock().unwrap();
         let mut i = 0;
-        while i < order.len() {
+        while i < lines.len() {
             let mut j = i + 1;
-            while j < order.len() {
-                let l = rows[order[j]].ids.len();
+            while j < lines.len() {
+                let l = lines[j].0.ids.len();
                 let n = j - i + 1;
                 if n * l > budget || n * l * l > MAX_MASK_ELEMS {
                     break;
                 }
                 j += 1;
             }
-            let batch: Vec<&Row> = order[i..j].iter().map(|&k| &rows[k]).collect();
+            let batch: Vec<&Row> = lines[i..j].iter().map(|(r, _)| r).collect();
             let answers = self.forward(&w, &batch, with_features)?;
-            for (&k, a) in order[i..j].iter().zip(answers) {
+            let idx = lines[i..j].iter().flat_map(|(_, idx)| idx.iter().copied());
+            for (k, a) in idx.zip(answers) {
                 out[k] = Some(a);
             }
             i = j;
@@ -396,9 +444,10 @@ impl DeciderNano {
                     } else {
                         let (a, c) = (row.kind[qi], row.kind[kj]);
                         qi == kj
-                            || c == 0
-                            || (c == 1 && a >= 1)
-                            || (c == 2 && a == 2 && row.opt[qi] == row.opt[kj])
+                            || (row.seg[qi] == row.seg[kj]
+                                && (c == 0
+                                    || (c == 1 && a >= 1)
+                                    || (c == 2 && a == 2 && row.opt[qi] == row.opt[kj])))
                     };
                     if allow {
                         full[base + qi * l + kj] = 0.0;
@@ -435,7 +484,12 @@ impl DeciderNano {
         let ln = |x: &Tensor, wt: &Tensor| -> Result<Tensor> {
             Ok(candle_nn::ops::layer_norm(&x.contiguous()?, wt, &w.zero_bias, eps)?)
         };
-        let mut x = ln(&w.embed.lookup(&ids_t)?.to_dtype(dt)?, &w.embed_norm)?;
+        // hidden states kept 2-d `[b*l, hidden]`: one large GEMM per linear
+        // layer instead of one per row
+        let mut x = ln(
+            &w.embed.lookup(&ids_t)?.to_dtype(dt)?.reshape((b * l, hidden))?,
+            &w.embed_norm,
+        )?;
         let scale = 1.0 / (hd as f64).sqrt();
         for layer in &w.layers {
             let (mask, cos, sin) = if layer.sliding {
@@ -457,7 +511,7 @@ impl DeciderNano {
                 .to_dtype(DType::F32)?
                 .broadcast_add(mask)?;
             let att = candle_nn::ops::softmax_last_dim(&att)?.to_dtype(dt)?;
-            let a = att.matmul(&v)?.transpose(1, 2)?.reshape((b, l, hidden))?;
+            let a = att.matmul(&v)?.transpose(1, 2)?.reshape((b * l, hidden))?;
             x = (x + layer.wo.forward(&a)?)?;
             let xn = ln(&x, &layer.mlp_norm)?;
             let hi = layer.wi.forward(&xn)?;
@@ -467,13 +521,14 @@ impl DeciderNano {
             let m = (input.gelu_erf()? * gate)?;
             x = (x + layer.mlp_wo.forward(&m)?)?;
         }
-        let x = ln(&x, &w.final_norm)?.to_dtype(DType::F32)?.reshape((b * l, hidden))?;
+        let x = ln(&x, &w.final_norm)?.to_dtype(DType::F32)?;
         // mean over each option block: a pooling matrix [n_options, b*l]
-        let n_opts: usize = rows.iter().map(|r| r.n_opts).sum();
+        let n_opts: usize = rows.iter().map(|r| r.n_opts.iter().sum::<usize>()).sum();
         let mut pool = vec![0f32; n_opts * b * l];
         let mut base = 0;
         for (r, row) in rows.iter().enumerate() {
-            let mut counts = vec![0usize; row.n_opts];
+            let row_opts: usize = row.n_opts.iter().sum();
+            let mut counts = vec![0usize; row_opts];
             for t in 0..row.ids.len() {
                 if row.kind[t] == 2 {
                     counts[row.opt[t] as usize] += 1;
@@ -485,7 +540,7 @@ impl DeciderNano {
                     pool[(base + o) * b * l + r * l + t] = 1.0 / counts[o] as f32;
                 }
             }
-            base += row.n_opts;
+            base += row_opts;
         }
         let pool = Tensor::from_vec(pool, (n_opts, b * l), dev)?;
         let pooled = pool.matmul(&x)?;
@@ -500,16 +555,16 @@ impl DeciderNano {
         dev.synchronize()?;
         let mut out = Vec::with_capacity(b);
         let mut base = 0;
-        for row in rows {
+        for &n in rows.iter().flat_map(|r| r.n_opts.iter()) {
             out.push(DecideAnswer {
-                logits: z[base..base + row.n_opts].to_vec(),
+                logits: z[base..base + n].to_vec(),
                 features: if with_features {
-                    feats[base..base + row.n_opts].to_vec()
+                    feats[base..base + n].to_vec()
                 } else {
                     vec![]
                 },
             });
-            base += row.n_opts;
+            base += n;
         }
         Ok(out)
     }
