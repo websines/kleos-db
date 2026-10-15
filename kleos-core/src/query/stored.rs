@@ -148,6 +148,11 @@ impl<'a> SessionTx<'a> {
             ..
         } = meta;
 
+        let supersede = if matches!(op, RelationOp::Put | RelationOp::Insert) {
+            crate::runtime::memory::supersede_rule(self, &relation_store)?
+        } else {
+            None
+        };
         match op {
             RelationOp::Rm | RelationOp::Delete => self.remove_from_relation(
                 db,
@@ -210,6 +215,64 @@ impl<'a> SessionTx<'a> {
                 force_collect,
                 *span,
             )?,
+            // kleos fork, agent memory E1: a relation with a declared
+            // supersession key rewrites the batch before the ordinary put
+            // (see `runtime/memory.rs`).
+            RelationOp::Put | RelationOp::Insert if supersede.is_some() => {
+                let rule = supersede.expect("checked by the guard");
+                let rows = self.extract_canonical_rows(
+                    res_iter,
+                    headers,
+                    cur_vld,
+                    &relation_store,
+                    metadata,
+                    key_bindings,
+                    dep_bindings,
+                    callback_targets.contains(&relation_store.name)
+                        || force_collect == relation_store.name,
+                )?;
+                let is_insert = op == RelationOp::Insert;
+                let (mut written, generated) = crate::runtime::memory::apply_supersession(
+                    self,
+                    &relation_store,
+                    &rule,
+                    rows,
+                    is_insert,
+                )?;
+                let (canon, canon_headers) =
+                    crate::runtime::memory::canonical_input(&relation_store);
+                // :insert checks only the caller's rows; the generated
+                // retractions address keys that exist by construction
+                let batches = if is_insert {
+                    vec![(written, true), (generated, false)]
+                } else {
+                    written.extend(generated);
+                    vec![(written, false)]
+                };
+                for (rows, insert) in batches {
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    self.put_into_relation(
+                        db,
+                        rows.into_iter(),
+                        &canon_headers,
+                        cur_vld,
+                        callback_targets,
+                        callback_collector,
+                        propagate_triggers,
+                        &mut to_clear,
+                        &relation_store,
+                        &canon.metadata,
+                        &canon.key_bindings,
+                        &canon.dep_bindings,
+                        insert,
+                        false,
+                        force_collect,
+                        *span,
+                    )?;
+                }
+            }
             RelationOp::Create | RelationOp::Replace | RelationOp::Put | RelationOp::Insert => self
                 .put_into_relation(
                     db,
@@ -232,6 +295,58 @@ impl<'a> SessionTx<'a> {
         };
 
         Ok(to_clear)
+    }
+
+    /// Extract a `:put` input into the relation's canonical layout (every
+    /// column but TxTime, stored order), applying defaults and coercions
+    /// exactly as the put itself would (kleos fork, agent memory E1).
+    #[allow(clippy::too_many_arguments)]
+    fn extract_canonical_rows(
+        &self,
+        res_iter: impl Iterator<Item = Tuple>,
+        headers: &[Symbol],
+        cur_vld: ValidityTs,
+        relation_store: &RelationHandle,
+        metadata: &StoredRelationMetadata,
+        key_bindings: &[Symbol],
+        dep_bindings: &[Symbol],
+        is_callback_target: bool,
+    ) -> Result<Vec<Tuple>> {
+        let n_keys = if relation_store.has_txtime() {
+            Self::check_tt_write_shape(relation_store, metadata, is_callback_target, ":put")?;
+            relation_store.metadata.keys.len() - 1
+        } else {
+            relation_store.metadata.keys.len()
+        };
+        let mut extractors = make_extractors(
+            &relation_store.metadata.keys[..n_keys],
+            &metadata.keys,
+            key_bindings,
+            headers,
+        )?;
+        extractors.extend(if metadata.non_keys.is_empty() {
+            make_extractors(
+                &relation_store.metadata.non_keys,
+                &metadata.keys,
+                key_bindings,
+                headers,
+            )?
+        } else {
+            make_extractors(
+                &relation_store.metadata.non_keys,
+                &metadata.non_keys,
+                dep_bindings,
+                headers,
+            )?
+        });
+        res_iter
+            .map(|tuple| {
+                extractors
+                    .iter()
+                    .map(|ex| ex.extract_data(&tuple, cur_vld))
+                    .try_collect()
+            })
+            .try_collect()
     }
 
     fn put_into_relation<'s, S: Storage<'s>>(
@@ -321,6 +436,11 @@ impl<'a> SessionTx<'a> {
         let hnsw_filters = Self::make_hnsw_filters(relation_store)?;
         let fts_lsh_processors = self.make_fts_lsh_processors(relation_store)?;
         let lsh_perms = self.make_lsh_hash_perms(relation_store);
+        // kleos fork (D3): batch the embed() calls of computed columns.
+        let res_iter = crate::embed::EmbedPrefetch::new(
+            res_iter,
+            key_extractors.iter().filter_map(DataExtractor::computed_expr),
+        );
 
         for tuple in res_iter {
             let extracted: Vec<DataValue> = key_extractors
@@ -657,6 +777,14 @@ impl<'a> SessionTx<'a> {
         let hnsw_filters = Self::make_hnsw_filters(relation_store)?;
         let fts_lsh_processors = self.make_fts_lsh_processors(relation_store)?;
         let lsh_perms = self.make_lsh_hash_perms(relation_store);
+        // kleos fork (D3): batch the embed() calls of recomputed columns.
+        let res_iter = crate::embed::EmbedPrefetch::new(
+            res_iter,
+            val_extractors
+                .iter()
+                .flatten()
+                .filter_map(DataExtractor::computed_expr),
+        );
 
         for tuple in res_iter {
             let mut new_kv: Vec<DataValue> = key_extractors
@@ -2193,6 +2321,10 @@ struct TransactAssertionFailure {
 enum DataExtractor {
     DefaultExtractor(Expr, NullableColType),
     IndexExtractor(usize, NullableColType),
+    /// kleos fork (UPGRADE_PLAN D3): a column default that reads other
+    /// columns of the same row, e.g. `vec: <F32; 768> default embed('m', text)`.
+    /// The expression's bindings are filled with the input tuple positions.
+    ComputedExtractor(Expr, NullableColType),
 }
 
 impl DataExtractor {
@@ -2204,7 +2336,16 @@ impl DataExtractor {
             DataExtractor::IndexExtractor(i, typ) => typ
                 .coerce(tuple[*i].clone(), cur_vld)
                 .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
+            DataExtractor::ComputedExtractor(expr, typ) => typ
+                .coerce(expr.eval(tuple)?, cur_vld)
+                .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
         })
+    }
+    fn computed_expr(&self) -> Option<&Expr> {
+        match self {
+            DataExtractor::ComputedExtractor(e, _) => Some(e),
+            _ => None,
+        }
     }
 }
 
@@ -2231,11 +2372,51 @@ fn make_update_extractors(
     for col in stored.iter() {
         if input_keys.contains(&col.name) {
             extractors.push(Some(make_extractor(col, input, bindings, tuple_headers)?));
+        } else if let Some(sources) = computed_default_sources(col)? {
+            // kleos fork (D3): a computed column follows its source columns.
+            // Recompute it when the update supplies all of them; reject an
+            // update that supplies only some (the stored value would go stale).
+            let given = sources.iter().filter(|c| input_keys.contains(c)).count();
+            if given == sources.len() {
+                extractors.push(Some(make_extractor(col, input, bindings, tuple_headers)?));
+            } else if given > 0 {
+                bail!(ComputedSourceMissing(
+                    col.name.to_string(),
+                    sources
+                        .iter()
+                        .filter(|c| !input_keys.contains(c))
+                        .join(", ")
+                ));
+            } else {
+                extractors.push(None);
+            }
         } else {
             extractors.push(None);
         }
     }
     Ok(extractors)
+}
+
+#[derive(Debug, Error, Diagnostic)]
+#[error("computed column {0} needs column(s) {1}, which the input does not provide")]
+#[diagnostic(code(eval::computed_source_missing))]
+#[diagnostic(help("a column whose default reads other columns needs all of them in the same write"))]
+struct ComputedSourceMissing(String, String);
+
+/// The columns a computed default reads, or `None` for a plain (constant)
+/// default or no default.
+fn computed_default_sources(col: &ColumnDef) -> Result<Option<Vec<SmartString<LazyCompact>>>> {
+    match &col.default_gen {
+        None => Ok(None),
+        Some(expr) => {
+            let refs = expr.bindings()?;
+            if refs.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(refs.into_iter().map(|s| s.name).collect()))
+            }
+        }
+    }
 }
 
 fn make_extractor(
@@ -2254,8 +2435,36 @@ fn make_extractor(
         }
     }
     if let Some(expr) = &stored.default_gen {
-        Ok(DataExtractor::DefaultExtractor(
-            expr.clone(),
+        let refs = expr.bindings()?;
+        if refs.is_empty() {
+            return Ok(DataExtractor::DefaultExtractor(
+                expr.clone(),
+                stored.typing.clone(),
+            ));
+        }
+        // kleos fork (D3): computed default — bind each referenced column to
+        // its position in the input tuple.
+        let mut positions = BTreeMap::new();
+        for r in refs {
+            let pos = input
+                .iter()
+                .zip(bindings.iter())
+                .find(|(c, _)| c.name == r.name)
+                .and_then(|(_, b)| tuple_headers.iter().position(|h| h == b));
+            match pos {
+                Some(p) => {
+                    positions.insert(r, p);
+                }
+                None => bail!(ComputedSourceMissing(
+                    stored.name.to_string(),
+                    r.name.to_string()
+                )),
+            }
+        }
+        let mut expr = expr.clone();
+        expr.fill_binding_indices(&positions)?;
+        Ok(DataExtractor::ComputedExtractor(
+            expr,
             stored.typing.clone(),
         ))
     } else {

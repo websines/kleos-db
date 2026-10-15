@@ -201,7 +201,9 @@ fn zero_value(typing: Option<&NullableColType>) -> DataValue {
                 .collect(),
         ),
         ColType::Vec { eltype, len } => match eltype {
-            crate::data::relation::VecElementType::F32 => {
+            crate::data::relation::VecElementType::F32
+            | crate::data::relation::VecElementType::F16
+            | crate::data::relation::VecElementType::BF16 => {
                 DataValue::Vec(Vector::F32(ndarray::Array1::zeros(*len)))
             }
             crate::data::relation::VecElementType::F64 => {

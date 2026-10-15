@@ -46,10 +46,18 @@ fn vec_value(v: &[f32]) -> DataValue {
 
 /// `n` rows `{id => cat: id % 1000, emb}` with an HNSW index over `emb`.
 fn setup(n: usize, index_filter: Option<&str>) -> (DbInstance, Lcg) {
+    let filter = index_filter
+        .map(|f| format!(", filter: {f}"))
+        .unwrap_or_default();
+    setup_with(n, "F32", &filter)
+}
+
+/// `setup` with the vector element type and extra index options given.
+fn setup_with(n: usize, elem: &str, extra_opts: &str) -> (DbInstance, Lcg) {
     let db = DbInstance::new("mem", "", "").unwrap();
     run(
         &db,
-        &format!(":create pts {{ id: Int => cat: Int, emb: <F32; {DIM}> }}"),
+        &format!(":create pts {{ id: Int => cat: Int, emb: <{elem}; {DIM}> }}"),
         BTreeMap::new(),
     );
     let mut rng = Lcg(42);
@@ -67,14 +75,11 @@ fn setup(n: usize, index_filter: Option<&str>) -> (DbInstance, Lcg) {
         "?[id, cat, emb] <- $rows :put pts { id => cat, emb }",
         BTreeMap::from([("rows".to_string(), DataValue::List(rows))]),
     );
-    let filter = index_filter
-        .map(|f| format!(", filter: {f}"))
-        .unwrap_or_default();
     run(
         &db,
         &format!(
-            "::hnsw create pts:idx {{ dim: {DIM}, m: 16, dtype: F32, fields: [emb], \
-             distance: Cosine, ef_construction: 64{filter} }}"
+            "::hnsw create pts:idx {{ dim: {DIM}, m: 16, dtype: {elem}, fields: [emb], \
+             distance: Cosine, ef_construction: 64{extra_opts} }}"
         ),
         BTreeMap::new(),
     );
@@ -289,5 +294,48 @@ fn multi_vector_fields_with_filter() {
     for r in &res.rows {
         assert_eq!(r[1].get_int(), Some(50));
         assert_eq!(r[2].get_int(), Some(1));
+    }
+}
+
+/// Filtered search composes with half-precision columns and quantized
+/// (code-traversal) indexes: k rows at 1% and 0.1% selectivity, and the bound
+/// distances are exact (equal to `cos_dist` on the stored vector).
+#[test]
+fn filters_with_half_precision_and_quantized_indexes() {
+    for (elem, opts) in [("F16", ""), ("F32", ", quantize: turbo4")] {
+        let (db, mut rng) = setup_with(20_000, elem, opts);
+        for filter in ["cat < 10", "cat == 7"] {
+            for _ in 0..3 {
+                let q = rng.vector();
+                let got = search(&db, &q, 10, 32, &format!(", filter: {filter}"));
+                assert_eq!(got.len(), 10, "{elem}{opts} `{filter}` under-filled");
+                let truth = exact(&db, &q, 10, filter);
+                assert!(
+                    recall(&got, &truth) >= 0.8,
+                    "{elem}{opts} `{filter}`: {got:?} vs {truth:?}"
+                );
+                let ids: Vec<DataValue> = got.iter().map(|r| DataValue::from(r.0)).collect();
+                let exact_d = run(
+                    &db,
+                    "?[id, d] := id in $ids, *pts{id, emb}, d = cos_dist(emb, $q)",
+                    BTreeMap::from([
+                        ("ids".to_string(), DataValue::List(ids)),
+                        ("q".to_string(), vec_value(&q)),
+                    ]),
+                );
+                let exact_d: BTreeMap<i64, f64> = exact_d
+                    .rows
+                    .iter()
+                    .map(|r| (r[0].get_int().unwrap(), r[1].get_float().unwrap()))
+                    .collect();
+                for (id, _, d) in &got {
+                    assert!(
+                        (exact_d[id] - d).abs() < 1e-5,
+                        "{elem}{opts}: distance of {id} is {d}, exact {}",
+                        exact_d[id]
+                    );
+                }
+            }
+        }
     }
 }

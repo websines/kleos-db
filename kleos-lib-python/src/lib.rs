@@ -17,7 +17,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyList, PyString, PyTuple};
 use serde_json::json;
 
-use kleos::*;
+use ::kleos::*;
 
 fn py_to_rows(ob: &PyAny) -> PyResult<Vec<Vec<DataValue>>> {
     let rows = ob.extract::<Vec<Vec<&PyAny>>>()?;
@@ -163,6 +163,104 @@ fn py_to_cypher_schema(d: &PyDict) -> PyResult<CypherGraphSchema> {
         }
     }
     Ok(schema)
+}
+
+/// A normalization spec: `"minmax"` | `"zscore"` | `"none"` |
+/// `"neg_cosine_distance"` | `"cosine_similarity"` | `"bm25"` |
+/// `["range", lo, hi]` | `["tmm", lo]`.
+fn py_to_score_norm(v: &PyAny) -> PyResult<ScoreNorm> {
+    if let Ok(s) = v.extract::<String>() {
+        return match s.as_str() {
+            "minmax" => Ok(ScoreNorm::MinMax),
+            "zscore" => Ok(ScoreNorm::ZScore),
+            "none" => Ok(ScoreNorm::Raw),
+            "neg_cosine_distance" => Ok(ScoreNorm::NegCosineDistance),
+            "cosine_similarity" => Ok(ScoreNorm::CosineSimilarity),
+            "bm25" => Ok(ScoreNorm::Bm25),
+            other => Err(PyException::new_err(format!(
+                "hybrid_search: unknown normalization {other:?}"
+            ))),
+        };
+    }
+    let l: Vec<&PyAny> = v.extract()?;
+    let kind: String = l
+        .first()
+        .ok_or_else(|| PyException::new_err("hybrid_search: empty normalization list"))?
+        .extract()?;
+    match (kind.as_str(), l.len()) {
+        ("range", 3) => Ok(ScoreNorm::Range {
+            lo: l[1].extract()?,
+            hi: l[2].extract()?,
+        }),
+        ("tmm", 2) => Ok(ScoreNorm::Tmm { lo: l[1].extract()? }),
+        _ => Err(PyException::new_err(
+            "hybrid_search: a list normalization must be [\"range\", lo, hi] or [\"tmm\", lo]",
+        )),
+    }
+}
+
+/// `"rrf"` or `{"kind": "weighted", "weights": {leg: w}, "norm": spec,
+/// "leg_norms": {leg: spec}}`.
+fn py_to_fusion(v: &PyAny) -> PyResult<Fusion> {
+    if let Ok(s) = v.extract::<String>() {
+        return match s.as_str() {
+            "rrf" => Ok(Fusion::Rrf),
+            "weighted" => Ok(Fusion::Weighted(WeightedFusionParams::default())),
+            other => Err(PyException::new_err(format!(
+                "hybrid_search: unknown fusion {other:?} (expected \"rrf\" or \"weighted\")"
+            ))),
+        };
+    }
+    let d = v.downcast::<PyDict>()?;
+    let kind: String = match d.get_item("kind")? {
+        Some(k) => k.extract()?,
+        None => "weighted".into(),
+    };
+    if kind == "rrf" {
+        return Ok(Fusion::Rrf);
+    }
+    if kind != "weighted" {
+        return Err(PyException::new_err(format!(
+            "hybrid_search: unknown fusion kind {kind:?}"
+        )));
+    }
+    let mut p = WeightedFusionParams::default();
+    if let Some(w) = d.get_item("weights")? {
+        let w = w.downcast::<PyDict>()?;
+        for (k, x) in w.iter() {
+            p.weights.push((k.extract()?, x.extract()?));
+        }
+    }
+    if let Some(n) = d.get_item("norm")? {
+        p.norm = py_to_score_norm(n)?;
+    }
+    if let Some(ln) = d.get_item("leg_norms")? {
+        let ln = ln.downcast::<PyDict>()?;
+        for (k, x) in ln.iter() {
+            p.leg_norms.push((k.extract()?, py_to_score_norm(x)?));
+        }
+    }
+    Ok(Fusion::Weighted(p))
+}
+
+/// A Python callable `(query: str, docs: list[str]) -> list[float]` as a
+/// kleos `Reranker`.
+struct PyReranker(Py<PyAny>);
+
+impl Reranker for PyReranker {
+    fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>> {
+        Python::with_gil(|py| -> Result<Vec<f32>> {
+            let args = PyTuple::new(
+                py,
+                vec![
+                    PyString::new(py, query).to_object(py),
+                    PyList::new(py, docs).to_object(py),
+                ],
+            );
+            let res = self.0.as_ref(py).call1(args).into_diagnostic()?;
+            res.extract::<Vec<f32>>().into_diagnostic()
+        })
+    }
 }
 
 fn py_to_hybrid_search(d: &PyDict) -> PyResult<HybridSearch> {
@@ -317,6 +415,33 @@ fn py_to_hybrid_search(d: &PyDict) -> PyResult<HybridSearch> {
             legs.push(leg);
         }
         q.graph_legs = legs;
+    }
+    if let Some(v) = d.get_item("fusion")? {
+        if !v.is_none() {
+            q.fusion = py_to_fusion(v)?;
+        }
+    }
+    if let Some(v) = d.get_item("rerank")? {
+        if !v.is_none() {
+            let rd = v.downcast::<PyDict>()?;
+            let mut r = RerankParams::default();
+            if let Some(x) = rd.get_item("model")? {
+                r.model = x.extract()?;
+            }
+            if let Some(x) = rd.get_item("top_n")? {
+                r.top_n = x.extract()?;
+            }
+            if let Some(x) = rd.get_item("text_field")? {
+                r.text_field = x.extract()?;
+            }
+            if let Some(x) = rd.get_item("query")? {
+                r.query = x.extract()?;
+            }
+            if let Some(x) = rd.get_item("batch_size")? {
+                r.batch_size = x.extract()?;
+            }
+            q.rerank = Some(r);
+        }
     }
     if let Some(v) = d.get_item("mmr")? {
         if !v.is_none() {
@@ -678,6 +803,87 @@ impl CozoDbPy {
             })
         });
         db.register_fixed_rule(name, rule_impl).map_err(report2py)
+    }
+    /// Register a re-rank model (kleos fork): `callback(query: str,
+    /// docs: list[str]) -> list[float]`, one score per doc, higher = more
+    /// relevant. Usable as `Rerank(..., model: name, ...)` in CozoScript and
+    /// as `hybrid_search({..., "rerank": {"model": name, "top_n": 50}})`.
+    pub fn register_reranker(&self, name: String, callback: &PyAny) -> PyResult<()> {
+        let db = self.db_ref()?;
+        db.register_reranker(name, std::sync::Arc::new(PyReranker(callback.into())))
+            .map_err(report2py)
+    }
+    /// Unregister a re-rank model. Returns whether one was registered.
+    pub fn unregister_reranker(&self, name: &str) -> PyResult<bool> {
+        let db = self.db_ref()?;
+        Ok(db.unregister_reranker(name))
+    }
+    /// Live query subscription (kleos, UPGRADE_PLAN F1;
+    /// `docs/specs/live-subscriptions.md`). `callback(event: dict)` runs on a
+    /// background thread for every event: `{"kind": "initial" | "resync",
+    /// "headers", "rows"}`, `{"kind": "delta", "headers", "added", "removed"}`
+    /// or `{"kind": "error", "message"}`. Returns an id for `unsubscribe`.
+    #[pyo3(signature = (query, params, callback, queue=None))]
+    pub fn subscribe(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        params: &PyDict,
+        callback: &PyAny,
+        queue: Option<usize>,
+    ) -> PyResult<u64> {
+        let db = self.db_ref()?;
+        let params = convert_params(params)?;
+        let opts = SubscribeOptions {
+            queue_capacity: queue.unwrap_or(SubscribeOptions::default().queue_capacity),
+        };
+        let sub = py
+            .allow_threads(|| db.subscribe(query, params, opts))
+            .map_err(report2py)?;
+        let id = sub.id();
+        let cb: Py<PyAny> = callback.into();
+        std::thread::spawn(move || {
+            while let Some(ev) = sub.recv() {
+                Python::with_gil(|py| {
+                    let rows_ev = |kind: &str, rows: &NamedRows| -> PyObject {
+                        BTreeMap::from([
+                            ("kind", kind.into_py(py)),
+                            ("headers", rows.headers.clone().into_py(py)),
+                            ("rows", rows_to_py_rows(rows.rows.clone(), py)),
+                        ])
+                        .into_py(py)
+                    };
+                    let event: PyObject = match ev {
+                        SubscriptionEvent::Initial { rows } => rows_ev("initial", &rows),
+                        SubscriptionEvent::Resync { rows } => rows_ev("resync", &rows),
+                        SubscriptionEvent::Delta { added, removed } => BTreeMap::from([
+                            ("kind", "delta".into_py(py)),
+                            ("headers", added.headers.clone().into_py(py)),
+                            ("added", rows_to_py_rows(added.rows.clone(), py)),
+                            ("removed", rows_to_py_rows(removed.rows.clone(), py)),
+                        ])
+                        .into_py(py),
+                        SubscriptionEvent::Error { message } => BTreeMap::from([
+                            ("kind", "error".into_py(py)),
+                            ("message", message.into_py(py)),
+                        ])
+                        .into_py(py),
+                    };
+                    if let Err(err) = cb.as_ref(py).call1((event,)) {
+                        eprintln!("{}", err);
+                    }
+                })
+            }
+        });
+        Ok(id)
+    }
+    /// End a subscription made with `subscribe`. Returns whether it existed.
+    pub fn unsubscribe(&self, id: u64) -> bool {
+        let maybe_db = self.db.read().unwrap().clone();
+        match maybe_db {
+            Some(db) => db.unsubscribe(id),
+            None => false,
+        }
     }
     pub fn unregister_callback(&self, id: u32) -> bool {
         // Preserve the pre-fork behavior: a closed handle returns `false`,

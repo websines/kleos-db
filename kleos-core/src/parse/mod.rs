@@ -36,6 +36,7 @@ use crate::{Expr, FixedRule};
 pub(crate) mod expr;
 pub(crate) mod fts;
 pub(crate) mod imperative;
+pub(crate) mod memory;
 pub(crate) mod query;
 pub(crate) mod schema;
 pub(crate) mod sys;
@@ -223,6 +224,10 @@ impl ImperativeStmt {
                 }
                 SysOp::CreateStoredQuery { .. } | SysOp::RemoveStoredQuery(_) => {
                     collector.insert(SmartString::from("kleos_stored_queries"));
+                }
+                // kleos fork, agent memory: catalog writes and cascades
+                SysOp::Memory(op) => {
+                    collector.extend(op.write_targets());
                 }
                 _ => {}
             },

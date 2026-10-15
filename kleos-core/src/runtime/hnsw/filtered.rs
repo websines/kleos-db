@@ -407,7 +407,9 @@ impl SessionTx<'_> {
                     _ => continue,
                 };
                 for (sub_idx, v) in vectors {
-                    if v.el_type() != config.manifest.dtype || v.len() != config.manifest.vec_dim {
+                    if v.el_type() != config.manifest.dtype.in_memory()
+                        || v.len() != config.manifest.vec_dim
+                    {
                         continue;
                     }
                     let dist = vec_cache.dist(q, v);

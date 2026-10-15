@@ -171,6 +171,9 @@ pub struct Db<S> {
     pub(crate) queries_count: Arc<AtomicU64>,
     pub(crate) running_queries: Arc<Mutex<BTreeMap<u64, RunningQueryHandle>>>,
     pub(crate) fixed_rules: Arc<ShardedLock<BTreeMap<String, Arc<Box<dyn FixedRule>>>>>,
+    /// Host-registered re-rank models (kleos fork, hybrid C2), resolved by
+    /// the per-`Db` `Rerank` fixed rule. See [`Db::register_reranker`].
+    rerankers: crate::fixed_rule::utilities::rerank::RerankerRegistry,
     pub(crate) tokenizers: Arc<TokenizerCache>,
     #[cfg(not(target_arch = "wasm32"))]
     callback_count: Arc<AtomicU32>,
@@ -217,6 +220,10 @@ pub struct Db<S> {
     /// `SessionTx`, which captures a watermark off it before its storage
     /// transaction pins and reports its dirty relations back at commit.
     pub(crate) graph_projections: Arc<ProjectionCache>,
+    /// Live query subscriptions (kleos, UPGRADE_PLAN F1;
+    /// `runtime/live.rs`). Cloned into every `SessionTx`, whose commit
+    /// funnel reports successfully committed dirty relations to it.
+    pub(crate) live: Arc<crate::runtime::live::LiveHub>,
     /// Bounded ring of recent structured query warnings (kleos fork,
     /// `runtime/diagnostics.rs`): `(seq, warning)`, oldest dropped past
     /// [`WARNING_RING_CAP`]. Filled by `flush_warnings`, read by `::warnings`
@@ -412,6 +419,14 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// You must call [`initialize`](Self::initialize) immediately after creation.
     /// Due to lifetime restrictions we are not able to call that for you automatically.
     pub fn new(storage: S) -> Result<Self> {
+        let rerankers = crate::fixed_rule::utilities::rerank::RerankerRegistry::default();
+        let mut fixed_rules = DEFAULT_FIXED_RULES.clone();
+        fixed_rules.insert(
+            crate::fixed_rule::utilities::rerank::RERANK_RULE_NAME.to_string(),
+            Arc::new(Box::new(crate::fixed_rule::utilities::rerank::Rerank {
+                registry: rerankers.clone(),
+            })),
+        );
         let ret = Self {
             db: storage,
             temp_db: Default::default(),
@@ -422,7 +437,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             custom_bounded_meets: Default::default(),
             queries_count: Default::default(),
             running_queries: Default::default(),
-            fixed_rules: Arc::new(ShardedLock::new(DEFAULT_FIXED_RULES.clone())),
+            fixed_rules: Arc::new(ShardedLock::new(fixed_rules)),
+            rerankers,
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
@@ -439,6 +455,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             // to `AtomicBool::new(false)` to make the rewrite opt-in again.
             enable_factorize: Arc::new(AtomicBool::new(true)),
             graph_projections: Default::default(),
+            live: Default::default(),
             warnings: Default::default(),
             warning_seq: Default::default(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -806,7 +823,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// Returns the earliest (`min`) of whichever are set; `None` if neither is
     /// set, if the budget overflows `Instant`, or if the target has no monotonic
     /// clock (wasm).
-    fn effective_outer_deadline(&self, call_timeout: Option<f64>) -> Option<Instant> {
+    pub(crate) fn effective_outer_deadline(&self, call_timeout: Option<f64>) -> Option<Instant> {
         let start = budget_now()?;
         let mut deadline = call_timeout.and_then(|secs| deadline_from_secs(start, secs));
         let default_ms = self.default_query_timeout_ms.load(Ordering::Relaxed);
@@ -821,7 +838,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// The whole-script memory budget from the per-call option and the Db
     /// default (kleos fork, query memory budget): the minimum of whichever
     /// are set, `None` if neither is.
-    fn effective_outer_mem_limit(&self, call_limit: Option<usize>) -> Option<usize> {
+    pub(crate) fn effective_outer_mem_limit(&self, call_limit: Option<usize>) -> Option<usize> {
         let default = {
             let v = self.default_query_mem_limit.load(Ordering::Relaxed);
             if v == 0 {
@@ -1389,6 +1406,16 @@ impl<'s, S: Storage<'s>> Db<S> {
                     handle.access_level
                 ));
             }
+            // kleos fork, agent memory E1: supersession rewrites :put
+            // batches; a raw bulk import would bypass it silently.
+            if crate::runtime::memory::supersede_rule(&tx, &handle)?.is_some() {
+                bail!(
+                    "cannot bulk-import into relation '{}': it declares a supersession key \
+                     (::supersede), which bulk import does not apply; write with :put, or \
+                     ::supersede drop it first",
+                    relation
+                );
+            }
 
             let mut search = ImportSearchIndexes::new(&tx, &handle)?;
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1737,10 +1764,37 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     /// Unregister a custom fixed rule implementation.
     pub fn unregister_fixed_rule(&self, name: &str) -> Result<bool> {
-        if DEFAULT_FIXED_RULES.contains_key(name) {
+        if DEFAULT_FIXED_RULES.contains_key(name)
+            || name == crate::fixed_rule::utilities::rerank::RERANK_RULE_NAME
+        {
             bail!("Cannot unregister builtin fixed rule {}", name);
         }
         Ok(self.fixed_rules.write().unwrap().remove(name).is_some())
+    }
+
+    /// Register a re-rank model (kleos fork, hybrid C2) under `name`, making
+    /// it callable as `Rerank(..., model: name, ...)` from CozoScript and as
+    /// [`crate::RerankParams::model`] from [`Db::hybrid_search`]. Errors if
+    /// `name` is taken. In-memory and `Db`-scoped, like custom fixed rules.
+    pub fn register_reranker(
+        &self,
+        name: impl Into<String>,
+        reranker: Arc<dyn crate::Reranker>,
+    ) -> Result<()> {
+        match self.rerankers.write().unwrap().entry(name.into()) {
+            Entry::Vacant(ent) => {
+                ent.insert(reranker);
+                Ok(())
+            }
+            Entry::Occupied(ent) => {
+                bail!("A reranker with the name {} is already registered", ent.key())
+            }
+        }
+    }
+
+    /// Unregister a re-rank model. Returns whether one was registered.
+    pub fn unregister_reranker(&self, name: &str) -> bool {
+        self.rerankers.write().unwrap().remove(name).is_some()
     }
 
     /// Register a custom aggregate — a user-supplied ⊕ operator usable in
@@ -2040,6 +2094,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             watermark,
             dirty_relations: Default::default(),
             commit_inflight: false,
+            live: self.live.clone(),
+            read_log: None,
         };
         Ok(ret)
     }
@@ -2065,6 +2121,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             watermark,
             dirty_relations: Default::default(),
             commit_inflight: false,
+            live: self.live.clone(),
+            read_log: None,
         };
         Ok(ret)
     }
@@ -2558,7 +2616,10 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// The reserved eviction-audit relation (kleos fork, bitemporality
     /// step 5), created lazily on first `::evict`. Keys: (relation, key
     /// marker, tt); value: rows_deleted.
-    fn tt_evict_audit_relation(&'s self, tx: &mut SessionTx<'_>) -> Result<RelationHandle> {
+    pub(crate) fn tt_evict_audit_relation(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+    ) -> Result<RelationHandle> {
         use crate::data::relation::{ColType, ColumnDef, NullableColType, StoredRelationMetadata};
         let col = |name: &str, coltype: ColType| ColumnDef {
             name: SmartString::from(name),
@@ -2698,6 +2759,10 @@ impl<'s, S: Storage<'s>> Db<S> {
                 stored_queries::remove(tx, name)
             }
             SysOp::ListStoredQueries => stored_queries::list(tx),
+            // kleos fork, agent memory (UPGRADE_PLAN E1/E2)
+            SysOp::Memory(op) => {
+                crate::runtime::memory::run_memory_op(self, tx, op, read_only, skip_locking)
+            }
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3083,20 +3148,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 // salt for the audit key-hash, generated once per store
                 // (locking read: two racing first-evicts must not each mint
                 // a salt, or the loser's audit markers become unlinkable)
-                let salt_key = {
-                    let t = vec![DataValue::Null, DataValue::from("EVICT_SALT")];
-                    t.encode_as_key(RelationId::SYSTEM)
-                };
-                let salt = match tx.store_tx.get(&salt_key, true)? {
-                    Some(s) => s,
-                    None => {
-                        let mut buf = [0u8; 16];
-                        rand::Rng::fill(&mut rand::thread_rng(), &mut buf);
-                        tx.store_tx.put(&salt_key, &buf)?;
-                        buf.to_vec()
-                    }
-                };
-                let ns = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &salt);
+                let ns = crate::runtime::memory::evict_key_namespace(tx)?;
 
                 let audit = self.tt_evict_audit_relation(tx)?;
                 // Graph-projection dirty-set hook (spec §3.4 row 12, second
@@ -3894,6 +3946,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                     "level_multiplier": manifest.level_multiplier,
                     "extend_candidates": manifest.extend_candidates,
                     "keep_pruned_connections": manifest.keep_pruned_connections,
+                    "quantize": manifest.quantize.name(),
+                    "rescore": manifest.rescore,
                 }),
             ]);
         }

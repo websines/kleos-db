@@ -13,8 +13,10 @@ use crate::data::relation::VecElementType;
 use crate::data::tuple::Tuple;
 use crate::data::value::Vector;
 use crate::parse::sys::HnswDistance;
+use crate::runtime::hnsw_quant::{default_rescore, encode_vectors, QuantState};
 use crate::runtime::relation::{try_decode_val_only, RelationHandle};
 use crate::runtime::transact::SessionTx;
+use crate::runtime::vec_quant::{QuantCodec, VecQuant};
 use crate::storage::StoreTx;
 use crate::{DataValue, SourceSpan};
 use itertools::Itertools;
@@ -44,6 +46,14 @@ pub(crate) struct HnswIndexManifest {
     pub(crate) index_filter: Option<String>,
     pub(crate) extend_candidates: bool,
     pub(crate) keep_pruned_connections: bool,
+    /// Compressed traversal codes (kleos fork, A2). Absent in manifests
+    /// written before quantization existed, which therefore read as `None`.
+    #[serde(default)]
+    pub(crate) quantize: VecQuant,
+    /// Rescoring multiplier for quantized search: the `k * rescore` best
+    /// code-ranked candidates are rescored exactly (0 = codec default).
+    #[serde(default)]
+    pub(crate) rescore: usize,
 }
 
 impl HnswIndexManifest {
@@ -56,7 +66,7 @@ impl HnswIndexManifest {
     }
 }
 
-type CompoundKey = (Tuple, usize, i32);
+pub(crate) type CompoundKey = (Tuple, usize, i32);
 
 /// Key of an index row at `layer`: the edge `from -> to`, or the self-row of
 /// `from` when `to == from`.
@@ -108,6 +118,10 @@ mod distance_order_tests {
 struct VectorCache {
     cache: FxHashMap<CompoundKey, Vector>,
     distance: HnswDistance,
+    /// Quantized traversal (kleos fork, A2): when set, distances to keys with
+    /// a loaded code are estimated from the code; keys without a code row
+    /// fall back to their exact vectors.
+    quant: Option<QuantState>,
 }
 
 impl VectorCache {
@@ -159,6 +173,9 @@ impl VectorCache {
         }
     }
     fn v_dist(&self, v: &Vector, key: &CompoundKey) -> f64 {
+        if let Some(d) = self.quant.as_ref().and_then(|qs| qs.dist(key)) {
+            return d;
+        }
         let v2 = self.cache.get(key).unwrap();
         self.dist(v, v2)
     }
@@ -176,6 +193,11 @@ impl VectorCache {
         handle: &RelationHandle,
         tx: &SessionTx<'_>,
     ) -> Result<()> {
+        if let Some(qs) = &mut self.quant {
+            if qs.has(key) || qs.load(std::slice::from_ref(key), tx)?.is_empty() {
+                return Ok(());
+            }
+        }
         if !self.cache.contains_key(key) {
             match handle.get(tx, &key.0)? {
                 Some(tuple) => self.insert_from_tuple(key, &tuple)?,
@@ -195,6 +217,19 @@ impl VectorCache {
         handle: &RelationHandle,
         tx: &SessionTx<'_>,
     ) -> Result<()> {
+        if let Some(qs) = &mut self.quant {
+            let absent = qs.load(keys, tx)?;
+            return self.ensure_exact_keys(&absent, handle, tx);
+        }
+        self.ensure_exact_keys(keys, handle, tx)
+    }
+
+    fn ensure_exact_keys(
+        &mut self,
+        keys: &[CompoundKey],
+        handle: &RelationHandle,
+        tx: &SessionTx<'_>,
+    ) -> Result<()> {
         let missing: Vec<&CompoundKey> = keys
             .iter()
             .filter(|k| !self.cache.contains_key(*k))
@@ -203,7 +238,10 @@ impl VectorCache {
             return Ok(());
         }
         if missing.len() == 1 {
-            return self.ensure_key(missing[0], handle, tx);
+            return match handle.get(tx, &missing[0].0)? {
+                Some(tuple) => self.insert_from_tuple(missing[0], &tuple),
+                None => bail!("Cannot find compound key for HNSW: {:?}", missing[0]),
+            };
         }
         let key_slices: Vec<&[DataValue]> = missing.iter().map(|k| k.0.as_slice()).collect();
         let tuples = handle.get_batch(tx, &key_slices)?;
@@ -214,6 +252,37 @@ impl VectorCache {
             }
         }
         Ok(())
+    }
+
+    /// Quantized search only: replace the code-estimated distances of the
+    /// best candidates by exact ones (kleos fork, A2). Keeps `k * rescore`
+    /// candidates, or all of them when a post-filter may discard some.
+    fn rescore(
+        &mut self,
+        q: &Vector,
+        config: &HnswSearch,
+        found_nn: &mut PriorityQueue<CompoundKey, OrderedFloat<f64>>,
+        tx: &SessionTx<'_>,
+    ) -> Result<()> {
+        if self.quant.is_none() {
+            return Ok(());
+        }
+        let keep = if config.filter.is_some() {
+            usize::MAX
+        } else {
+            let mult = match config.manifest.rescore {
+                0 => default_rescore(config.manifest.quantize),
+                r => r,
+            };
+            config.k.saturating_mul(mult).max(config.k)
+        };
+        SessionTx::hnsw_rescore(found_nn, keep, |keys| {
+            self.ensure_exact_keys(keys, &config.base_handle, tx)?;
+            Ok(keys
+                .iter()
+                .map(|k| self.dist(q, self.cache.get(k).unwrap()))
+                .collect())
+        })
     }
 
     fn insert_from_tuple(&mut self, key: &CompoundKey, tuple: &[DataValue]) -> Result<()> {
@@ -306,6 +375,12 @@ impl<'a> SessionTx<'a> {
             }
             self.hnsw_remove_vec(tuple_key, idx, subidx, orig_table, idx_table)?;
         }
+        self.hnsw_put_code(
+            manifest.quantize,
+            &(tuple_key.to_vec(), idx, subidx),
+            q,
+            idx_table,
+        )?;
 
         let ep_res = idx_table
             .scan_bounded_prefix(
@@ -838,6 +913,7 @@ impl<'a> SessionTx<'a> {
         let mut vec_cache = VectorCache {
             cache: FxHashMap::default(),
             distance: manifest.distance,
+            quant: None,
         };
         self.hnsw_put_inner(
             manifest,
@@ -870,6 +946,9 @@ impl<'a> SessionTx<'a> {
         let key_len = orig_table.metadata.keys.len();
         let mut builder = FlatHnswBuilder::new(manifest);
         let mut stack = vec![];
+        // Vectors in node order, for the traversal codes of a quantized index.
+        let quantized = manifest.quantize != VecQuant::None;
+        let mut code_vecs: Vec<&Vector> = vec![];
         for tuple in tuples {
             if let Some(code) = filter {
                 if !eval_bytecode_pred(code, tuple, &mut stack, Default::default())? {
@@ -888,6 +967,9 @@ impl<'a> SessionTx<'a> {
                         },
                         v,
                     )?;
+                    if quantized {
+                        code_vecs.push(v);
+                    }
                 } else if let DataValue::List(l) = val {
                     for (sidx, v) in l.iter().enumerate() {
                         if let DataValue::Vec(v) = v {
@@ -900,6 +982,9 @@ impl<'a> SessionTx<'a> {
                                 },
                                 v,
                             )?;
+                            if quantized {
+                                code_vecs.push(v);
+                            }
                         }
                     }
                 }
@@ -911,6 +996,14 @@ impl<'a> SessionTx<'a> {
         let build_start = std::time::Instant::now();
         let graph = builder.build(manifest, build_threads());
         let insert_elapsed = build_start.elapsed();
+        let codes = match QuantCodec::for_quant(manifest.quantize, manifest.vec_dim) {
+            Some(codec) => encode_vectors(&codec, &code_vecs, build_threads()),
+            None => vec![],
+        };
+        for (meta, code) in graph.metas.iter().zip(codes) {
+            let key = (meta.key.clone(), meta.field_idx, meta.sub_idx);
+            self.hnsw_put_code_bytes(&key, code, idx_table)?;
+        }
 
         // Serialise: per node × level, one self row + one row per out-edge.
         let mut key_buf: Vec<DataValue> = Vec::with_capacity(2 * key_len + 5);
@@ -1108,7 +1201,14 @@ impl<'a> SessionTx<'a> {
         let mut vec_cache = manifest.as_ref().map(|m| VectorCache {
             cache: Default::default(),
             distance: m.distance,
+            quant: None,
         });
+        if manifest
+            .as_ref()
+            .map_or(true, |m| m.quantize != VecQuant::None)
+        {
+            self.hnsw_del_code(&compound_key, idx_table)?;
+        }
         // Go down the layers and remove all the links
         let mut encountered_singletons = false;
         for neg_layer in 0i64.. {
@@ -1340,16 +1440,23 @@ impl<'a> SessionTx<'a> {
         if q.len() != config.manifest.vec_dim {
             bail!("query vector dimension mismatch");
         }
-        let q = match (q, config.manifest.dtype) {
-            (v @ Vector::F32(_), VecElementType::F32) => v,
+        let q = match (q, config.manifest.dtype.in_memory()) {
             (v @ Vector::F64(_), VecElementType::F64) => v,
             (Vector::F32(v), VecElementType::F64) => Vector::F64(v.mapv(|x| x as f64)),
-            (Vector::F64(v), VecElementType::F32) => Vector::F32(v.mapv(|x| x as f32)),
+            (v @ Vector::F32(_), _) => v,
+            (Vector::F64(v), _) => Vector::F32(v.mapv(|x| x as f32)),
         };
 
         let mut vec_cache = VectorCache {
             cache: Default::default(),
             distance: config.manifest.distance,
+            quant: QuantState::for_search(
+                config.manifest.quantize,
+                config.manifest.vec_dim,
+                config.manifest.distance,
+                &q,
+                &config.idx_handle,
+            ),
         };
 
         let ep_res = config
@@ -1437,6 +1544,7 @@ impl<'a> SessionTx<'a> {
             if found_nn.is_empty() {
                 return Ok(vec![]);
             }
+            vec_cache.rescore(&q, config, &mut found_nn, self)?;
 
             while found_nn.len() > config.k {
                 found_nn.pop();
@@ -1473,6 +1581,61 @@ impl<'a> SessionTx<'a> {
 mod tests {
     use rand::Rng;
     use std::collections::BTreeMap;
+
+    /// Manifests written before quantization (no `quantize`/`rescore`
+    /// fields) still load, as unquantized indices.
+    #[test]
+    fn manifest_without_quantize_fields_loads_as_unquantized() {
+        use super::HnswIndexManifest;
+        use crate::data::relation::VecElementType;
+        use crate::parse::sys::HnswDistance;
+        use crate::runtime::vec_quant::VecQuant;
+        use smartstring::{LazyCompact, SmartString};
+
+        #[derive(serde_derive::Serialize)]
+        struct OldManifest {
+            base_relation: SmartString<LazyCompact>,
+            index_name: SmartString<LazyCompact>,
+            vec_dim: usize,
+            dtype: VecElementType,
+            vec_fields: Vec<usize>,
+            distance: HnswDistance,
+            ef_construction: usize,
+            m_neighbours: usize,
+            m_max: usize,
+            m_max0: usize,
+            level_multiplier: f64,
+            index_filter: Option<String>,
+            extend_candidates: bool,
+            keep_pruned_connections: bool,
+        }
+        let old = OldManifest {
+            base_relation: "pts".into(),
+            index_name: "idx".into(),
+            vec_dim: 4,
+            dtype: VecElementType::F32,
+            vec_fields: vec![1],
+            distance: HnswDistance::L2,
+            ef_construction: 16,
+            m_neighbours: 6,
+            m_max: 6,
+            m_max0: 12,
+            level_multiplier: 0.5,
+            index_filter: None,
+            extend_candidates: false,
+            keep_pruned_connections: false,
+        };
+        let mut bytes = vec![];
+        serde::Serialize::serialize(
+            &old,
+            &mut rmp_serde::Serializer::new(&mut bytes).with_struct_map(),
+        )
+        .unwrap();
+        let m: HnswIndexManifest = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(m.quantize, VecQuant::None);
+        assert_eq!(m.rescore, 0);
+        assert_eq!(m.vec_dim, 4);
+    }
 
     #[test]
     fn test_random_level() {

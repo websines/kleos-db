@@ -25,7 +25,7 @@ use crate::data::memcmp::MemCmpEncoder;
 use crate::data::relation::{ColType, ColumnDef, NullableColType, StoredRelationMetadata};
 use crate::data::symb::Symbol;
 use crate::data::tuple::{decode_tuple_from_key, Tuple, TupleT, ENCODED_KEY_MIN_LEN};
-use crate::data::value::{DataValue, ValidityTs};
+use crate::data::value::{DataValue, HalfKind, StoredValue, ValidityTs};
 use crate::fts::indexing::encode_fts_rows_for_tuple;
 use crate::fts::FtsIndexManifest;
 use crate::parse::expr::build_expr;
@@ -332,9 +332,7 @@ impl RelationHandle {
         let start = self.metadata.keys.len();
         let len = self.metadata.non_keys.len();
         let mut ret = self.encode_key_prefix(len);
-        tuple[start..]
-            .serialize(&mut Serializer::new(&mut ret))
-            .unwrap();
+        self.serialize_non_keys(&tuple[start..], &mut ret);
         Ok(ret)
     }
     pub(crate) fn encode_val_only_for_store(
@@ -343,8 +341,34 @@ impl RelationHandle {
         _span: SourceSpan,
     ) -> Result<Vec<u8>> {
         let mut ret = self.encode_key_prefix(tuple.len());
-        tuple.serialize(&mut Serializer::new(&mut ret)).unwrap();
+        self.serialize_non_keys(tuple, &mut ret);
         Ok(ret)
+    }
+    /// Serialise the non-key values of a row. Values of `<F16; N>` /
+    /// `<BF16; N>` columns (also as list elements) are written half width
+    /// (kleos fork); everything else is byte-identical to plain msgpack.
+    fn serialize_non_keys(&self, vals: &[DataValue], ret: &mut Vec<u8>) {
+        fn half_of(col: &ColumnDef) -> Option<HalfKind> {
+            match &col.typing.coltype {
+                ColType::Vec { eltype, .. } => HalfKind::of(*eltype),
+                ColType::List { eltype, .. } => match &eltype.coltype {
+                    ColType::Vec { eltype, .. } => HalfKind::of(*eltype),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let non_keys = &self.metadata.non_keys;
+        if vals.len() == non_keys.len() && non_keys.iter().any(|c| half_of(c).is_some()) {
+            let wrapped: Vec<StoredValue<'_>> = vals
+                .iter()
+                .zip(non_keys)
+                .map(|(v, c)| StoredValue(v, half_of(c)))
+                .collect();
+            wrapped.serialize(&mut Serializer::new(ret)).unwrap();
+        } else {
+            vals.serialize(&mut Serializer::new(ret)).unwrap();
+        }
     }
     pub(crate) fn ensure_compatible(
         &self,
@@ -900,19 +924,24 @@ struct CorruptValueBlob {
     reason: String,
 }
 
-fn decode_val_blob(val: &[u8], key: String) -> Result<Vec<DataValue>> {
-    let encoded = val
-        .get(ENCODED_KEY_MIN_LEN..)
-        .ok_or_else(|| CorruptValueBlob {
-            key: key.clone(),
+/// Decode a stored value blob. `key` renders the row's key for the error
+/// message and is only called on failure: formatting it eagerly (a Debug
+/// dump of the key tuple, or a hex dump of its bytes) used to cost more than
+/// the decode itself on every row read (kleos fork).
+fn decode_val_blob(val: &[u8], key: impl FnOnce() -> String) -> Result<Vec<DataValue>> {
+    let Some(encoded) = val.get(ENCODED_KEY_MIN_LEN..) else {
+        return Err(CorruptValueBlob {
+            key: key(),
             reason: format!(
                 "value is {} bytes; expected at least {ENCODED_KEY_MIN_LEN}",
                 val.len()
             ),
-        })?;
+        }
+        .into());
+    };
     rmp_serde::from_slice(encoded).map_err(|error| {
         CorruptValueBlob {
-            key,
+            key: key(),
             reason: error.to_string(),
         }
         .into()
@@ -943,7 +972,7 @@ pub fn extend_tuple_from_v(key: &mut Tuple, val: &[u8]) {
 
 pub(crate) fn try_extend_tuple_from_v(key: &mut Tuple, val: &[u8]) -> Result<()> {
     if !val.is_empty() {
-        let vals = decode_val_blob(val, format!("tuple {key:?}"))?;
+        let vals = decode_val_blob(val, || format!("tuple {key:?}"))?;
         key.extend(vals);
     }
     Ok(())
@@ -953,7 +982,7 @@ pub(crate) fn try_decode_val_only(key: &[u8], val: &[u8]) -> Result<Tuple> {
     if val.is_empty() {
         Ok(Vec::new())
     } else {
-        decode_val_blob(val, encoded_key_label(key))
+        decode_val_blob(val, || encoded_key_label(key))
     }
 }
 
@@ -1125,6 +1154,13 @@ impl<'a> SessionTx<'a> {
                 .ok_or_else(|| StoredRelationNotFoundError(name.to_string()))?
         };
         let metadata = RelationHandle::decode(&found)?;
+        if let Some(log) = &self.read_log {
+            if !metadata.is_temp {
+                log.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(metadata.name.clone(), metadata.id);
+            }
+        }
         Ok(metadata)
     }
     pub(crate) fn describe_relation(&mut self, name: &str, description: &str) -> Result<()> {
@@ -1706,6 +1742,8 @@ impl<'a> SessionTx<'a> {
             index_filter: config.index_filter.clone(),
             extend_candidates: config.extend_candidates,
             keep_pruned_connections: config.keep_pruned_connections,
+            quantize: config.quantize,
+            rescore: config.rescore,
         };
 
         let filter = if let Some(f_code) = &manifest.index_filter {

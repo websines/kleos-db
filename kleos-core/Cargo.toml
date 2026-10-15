@@ -95,6 +95,13 @@ storage-tikv = ["dep:tikv-client", "dep:tokio"]
 ## to CozoScript. No extra dependencies (reuses the existing pest stack). Off by
 ## default during alpha; see docs/specs/cypher-read.md.
 cypher = []
+## Built-in embedders from the `kleos-infer` crate (UPGRADE_PLAN D2/D3):
+## `kleos::embed::builtin` registers EmbeddingGemma / Model2Vec models read
+## from the local Hugging Face cache. Off by default: the default build has no
+## ML dependencies, and models are never bundled. candle 0.11 needs a newer toolchain than 1.90 (verified on 1.99).
+infer = ["dep:kleos-infer"]
+## `infer` plus Apple-GPU (Metal) kernels.
+infer-metal = ["infer", "kleos-infer/metal"]
 
 #! # Recommendation for features to enable
 #!
@@ -197,7 +204,9 @@ js-sys = { version = "0.3.60", optional = true }
 graph = { version = "0.3.1", optional = true }
 crossbeam = "0.8.4"
 ndarray = { version = "0.15.6", features = ["serde"] }
+half = "2.4.1"
 sha2 = "0.10.8"
+kleos-infer = { path = "../kleos-infer", version = "0.1.0", optional = true }
 rustc-hash = "1.1.0"
 twox-hash = "1.6.3"
 quadrature = "0.1.2"
@@ -220,6 +229,10 @@ env_logger = "0.11.3"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # kleos fork perf baselines (stable, self-contained synthetic data).
+[[example]]
+name = "embed_scifact"
+required-features = ["infer"]
+
 [[bench]]
 name = "point_lookup"
 harness = false

@@ -380,6 +380,14 @@ impl<'s, S: Storage<'s>> Db<S> {
             )
             .into());
         }
+        // kleos fork, agent memory E1: bulk import bypasses supersession
+        if crate::runtime::memory::supersede_rule(&tx, &handle)?.is_some() {
+            return Err(ColumnarError::Schema(format!(
+                "relation '{relation}' declares a supersession key (::supersede), which columnar \
+                 import does not apply; write with :put, or ::supersede drop it first"
+            ))
+            .into());
+        }
 
         let mut bindings = resolve_bindings(
             relation,
@@ -1095,6 +1103,8 @@ fn precheck_vector_element(
     target: VecElementType,
 ) -> std::result::Result<(), String> {
     match (target, value) {
+        // Half-width columns round by declaration (kleos fork).
+        (VecElementType::F16 | VecElementType::BF16, DataValue::Num(_)) => Ok(()),
         (VecElementType::F64, DataValue::Num(Num::Float(_))) => Ok(()),
         (VecElementType::F64, DataValue::Num(Num::Int(value))) => {
             if (*value as f64) as i128 == *value as i128 {

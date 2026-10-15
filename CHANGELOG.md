@@ -9,6 +9,117 @@ to kleos.
 
 ## Unreleased
 
+### Added
+
+- `examples/vecbench.rs`: a vector-search benchmark harness. It loads an `.npy`
+  matrix, builds an HNSW index, runs held-out queries over an `ef` sweep and a
+  filter-selectivity sweep, and reports build time, recall@k against cached exact
+  ground truth, QPS, p50/p99 latency, CPU time per query, under-filled queries and
+  on-disk size as a markdown table.
+
+- Supersession for agent memory (UPGRADE_PLAN E1). `::supersede create fact {subject,
+  predicate}` declares that a relation's leading key columns admit one current row at
+  any valid time. Every `:put`/`:insert` then ends the previous current row at the new
+  row's valid time by appending a retraction in the same transaction. Nothing is
+  deleted, so `@`, `@ (tt: …)`, `:as_of` and `::history` still answer for earlier
+  times. Late-arriving older facts fill their gap without ending newer ones,
+  re-asserting the current fact writes nothing, and on bitemporal relations a new
+  value at the same valid time is recorded as a correction. `::changes fact {from,
+  to, as_of, prefix}` lists what was `added`, `ended` or `changed` between two valid
+  times. `import_relations` and columnar import reject relations with a supersession
+  key, since they would bypass it. Also `::supersede list` and `::supersede drop`.
+- Provenance with cascading retraction and GDPR erasure (UPGRADE_PLAN E2).
+  `::provenance create fact_src {derived: fact, source: episode}` declares a link
+  relation keyed by the derived key followed by the source key. `::retract episode
+  [['ep2']]` (optionally `@ T`) ends a source's validity and, transitively, that of
+  every derived row left without a live source; rows with another live source stay.
+  `::erase episode [['ep7']]` physically deletes the source, its links and every
+  derived row left with no source, including their HNSW, FTS and LSH entries, and
+  writes salted audit markers to `kleos_evict_audit`. `::lineage fact [[…]]`
+  explains a row back to its sources. Spec:
+  `docs/specs/memory-supersession-provenance.md`; tests:
+  `kleos-core/tests/memory_supersession.rs`.
+- Weighted (convex) score fusion for hybrid search, beside RRF (Bruch et al.,
+  arXiv 2210.11934). New fixed rule `WeightedFusion(rel[list_id, item, score],
+  weights: [['semantic', 0.6], ['text', 0.4]], norm: 'minmax', norms: [...])`
+  normalizes each list and sums `weight × normalized score`. Normalizations:
+  `'minmax'`, `'zscore'`, `'none'`, and theory-based ones for known ranges:
+  `'neg_cosine_distance'` (the vector leg's `-distance`), `'cosine_similarity'`,
+  `'bm25'` (`s / max`), `['range', lo, hi]`, `['tmm', lo]`. `detailed: true` gives
+  the same 5 columns as RRF. In `HybridSearch`, set
+  `fusion: Fusion::Weighted(WeightedFusionParams::new([("semantic", 0.6), ("text", 0.4)]))`;
+  RRF stays the default and its generated script is unchanged. Weights naming an
+  unconfigured leg, or missing a configured one, are rejected.
+- Pluggable re-rank stage. Implement `Reranker` (`fn rerank(&self, query: &str,
+  docs: &[&str]) -> Result<Vec<f32>>`), register it with
+  `Db::register_reranker(name, Arc<dyn Reranker>)` /
+  `DbInstance::register_reranker`, and call it from CozoScript as
+  `Rerank(rel[item, text, prior_score], model: 'name', query: $q, top_n: 50)` or
+  from `HybridSearch` with `rerank: Some(RerankParams::new("name"))` (`top_n`,
+  `text_field`, `query`, `batch_size`). Re-ranking runs after fusion and before
+  MMR. kleos ships no model. Python: `db.register_reranker(name, fn)` plus
+  `fusion` / `rerank` keys in `hybrid_search`.
+- `examples/hybrid_eval.rs`: a BEIR SciFact harness (300 test queries,
+  bge-small-en-v1.5 vectors, kleos BM25, ms-marco-MiniLM-L-6-v2 cross-encoder
+  scores served through the `Reranker` hook). nDCG@10 / Recall@100: BM25
+  0.688 / 0.923, vector 0.713 / 0.945, RRF 0.718 / 0.968, weighted min-max
+  (α_vec = 0.6, tuned on 200 train queries) **0.734 / 0.975**. This MiniLM
+  re-ranker scores about 0.69 on top of every first stage, so it helps BM25
+  only. That matches its published SciFact score; a re-ranker is only worth
+  using if it beats the first stage on your data.
+- Live query subscriptions (UPGRADE_PLAN F1). `db.subscribe("?[k, v] := *kv{k, v},
+  k >= $min", params, SubscribeOptions::default())` returns a `Subscription` that
+  yields `Initial { rows }`, then `Delta { added, removed }` whenever a committed
+  transaction changes the result. The query is re-evaluated only when a commit writes a
+  relation it read: dependencies are recorded while it runs, so rules, fixed-rule
+  inputs, HNSW/FTS/LSH searches (their base relation) and stored queries all count.
+  Identical `(script, params)` subscriptions share one evaluation. Nothing is delivered
+  for aborted, failed or rolled-back transactions. Re-evaluation runs on one background
+  worker per `Db`, never on the writer's thread; commits that land while it is busy are
+  coalesced, and a subscriber whose bounded queue (`queue_capacity`, default 64) fills
+  up gets one `Resync { rows }` instead of the deltas it missed. Only single read-only
+  queries can be subscribed. `'NOW'` is read at each re-evaluation, so a result that
+  changes only because time passes is not pushed until some write triggers it.
+  Re-evaluation is a full query run, not incremental (that is F2): on `mem`, 1000
+  point-lookup subscriptions on other relations left single-writer throughput unchanged
+  (about 31k txns/s), while subscriptions on the written relation halved it (about 14k)
+  and delivery took 18 ms p50 at 1000 of them (0.4 ms at 10). Also `Db::unsubscribe(id)`,
+  `Db::live_stats()`, `DbInstance` dispatch, Python `db.subscribe(query, params,
+  callback)`, and server-sent events at `GET /subscribe?script=…&params=…` in
+  `kleos-bin`. Spec: `docs/specs/live-subscriptions.md`; tests:
+  `kleos-core/tests/live_subscriptions.rs`; benchmark: `examples/livebench.rs`.
+
+- Text embeddings inside the database (UPGRADE_PLAN D3). `embed('model', text)`
+  returns an F32 vector from an embedder registered with
+  `kleos::embed::register_embedder(name, Arc<dyn Embedder>)` (trait: `embed(&[&str])`,
+  `dim()`); `embed('model', text, 256)` takes a re-normalised Matryoshka prefix.
+  Every call goes through one embedding cache keyed on (model id, SHA-256 of the
+  text), bounded by a byte budget (default 64 MiB; `set_embedding_cache_capacity`,
+  `embedding_cache_stats`). The registry and cache are process-wide.
+- Computed columns: a column default may now read other columns of the row, so
+  `vec: <F32; 768> default embed('gemma', text)` keeps a vector column in sync with
+  its text. A `:put` that omits `vec` computes it; an `:update` that changes `text`
+  recomputes it; an `:update` that supplies only some of a computed column's sources
+  is rejected rather than leaving a stale value. The `embed()` calls of one write
+  are batched (256 rows per model call group) instead of one model call per row:
+  100 rows with a batch size of 16 make 7 model calls.
+- `kleos-infer`, a new workspace crate for single-forward-pass models (UPGRADE_PLAN
+  D2), built on candle: CPU everywhere, Apple GPU with the `metal` feature; f32,
+  f16, bf16, int8 (Q8_0) and int4 (Q4_0) weights; models load lazily from the local
+  Hugging Face cache and are never bundled or downloaded by the library. Ships
+  EmbeddingGemma-300m (output matches sentence-transformers f32 to cosine 1.0000 on
+  300 SciFact queries) and Model2Vec static embedders (potion-base-8M/32M). It is
+  opt-in: not a default workspace member, and kleos-core only uses it behind the new
+  off-by-default `infer` / `infer-metal` features (`kleos::embed::builtin`). candle 0.11
+  does not build on Rust 1.90 (unstable `stdarch_neon_f16`); it is verified on 1.99.
+  Measured on SciFact (M3, Metal, shared with other jobs): EmbeddingGemma int8
+  scores nDCG@10 0.785 on the full corpus through kleos (auto-embed on `:put`, HNSW,
+  `embed()` queries), the same as exact search; on a 1,500-document subset f32,
+  f16, bf16 and int8 all score 0.871-0.873 and int4 0.866, and the 256-d Matryoshka
+  prefix loses 0.006. int8 is the default: lowest load peak (1.1 GB vs 2.8 GB for
+  f32) at equal quality. potion-base-8M is the near-free fallback (0.506, about
+  4,000 documents/s on the CPU, 100 MB).
+
 ### Fixed
 
 - HNSW search with a `filter` now returns `k` rows whenever at least `k` indexed rows
@@ -22,16 +133,17 @@ to kleos.
   rows near the query pass, failing neighbours are expanded on the spot (ACORN-1
   two-hop expansion). When the remaining graph work would cost more than a full
   scan, the search switches to an exact scan of the rows that pass the filter and
-  are in the index. Unfiltered searches take the old code path unchanged.
+  are in the index. Unfiltered searches take the old code path unchanged. On a
+  quantized index (`quantize: ...`) a filtered search descends the upper layers on
+  codes but runs the bottom layer on exact vectors, since the predicate needs the
+  stored row anyway; returned distances stay exact.
   Regression test: `tests/hnsw_filtered_search.rs`.
 
-### Added
-
-- `examples/vecbench.rs`: a vector-search benchmark harness. It loads an `.npy`
-  matrix, builds an HNSW index, runs held-out queries over an `ef` sweep and a
-  filter-selectivity sweep, and reports build time, recall@k against cached exact
-  ground truth, QPS, p50/p99 latency, CPU time per query, under-filled queries and
-  on-disk size as a markdown table.
+- sqlite: a write could fail with `database is locked (code 5)` while another thread
+  was reading. A read that found a row left its cached statement holding a SHARED lock
+  on the file, and the statements were finalized only after the in-process lock was
+  released. `SqliteTx` now finalizes them first. Found by the live-subscription
+  benchmark, where the worker reads right after every commit.
 
 - `int_range` and `rand_vec` can no longer exhaust memory (found by fuzzing). A zero
   step (`int_range(30, 3, 0)`) looped forever, allocating until the process was killed;
@@ -113,6 +225,40 @@ to kleos.
 
 ### Added
 
+- Half-width vector column types `<F16; N>` and `<BF16; N>` (also inside lists,
+  e.g. `[<F16; 1536>]`). Values are rounded to the declared precision on write,
+  stored 2 bytes per element (half the size of `<F32; N>`; new storage tags 2/3 in
+  the vector encoding, so existing F32/F64 rows are byte-identical and still
+  readable), and read back as F32 vectors, so every vector function, `vec()`,
+  `rand_vec()` (`'F16'`/`'BF16'` type argument), JSON output and HNSW work on them
+  unchanged. HNSW indexes over such columns use `dtype: F16` / `dtype: BF16`. On the
+  100K x 1536 DBpedia/OpenAI set the f16 rounding loses no recall@10 (0.9994
+  before exact rescoring, 1.0 after). Half-width compaction applies to non-key
+  columns; key columns keep the F32 key encoding.
+- Quantized HNSW traversal: `::hnsw create ... { ..., quantize: turbo4 }` (also
+  `binary`, `turbo2`, `turbo8`; default `none`), with optional `rescore: <n>`. The
+  index keeps one compact TurboQuant-style code per vector (seeded two-round
+  permuted block-Hadamard rotation, Lloyd-Max scalar codebook, length
+  renormalisation; 1536-d `turbo4` = 776 bytes vs 6,144 for F32) in the index
+  relation at layer 2. Search estimates distances from codes instead of fetching
+  full base rows per hop, then rescores the best `k * rescore` candidates exactly
+  (default 4 for `turbo2`/`turbo4`, 8 for `binary`, 2 for `turbo8`; all `ef`
+  candidates when a search filter is present), so returned distances are exact.
+  Codes are maintained by `:put`/`:rm`/import, orphan repair, `::reindex` and the
+  parallel bulk build; graph construction always uses exact distances. Indexes
+  created without `quantize` are unchanged and store no codes; manifests written
+  before this change load as unquantized. `::indices` reports `quantize` and
+  `rescore`. Measured on 99.5K x 1536 DBpedia/OpenAI vectors (cosine, `m: 16`,
+  one query at a time): SQLite store, `ef: 64`, `turbo4` 21.1 vs 25.5 ms CPU and
+  53 vs 67 ms p50 per query at equal recall@10 (0.975 vs 0.973), for +113 MiB of
+  codes; in-memory store (30K), 4.2 vs 5.6 ms. In a brute-force codec comparison
+  `turbo4` reaches recall@10 0.969 from codes alone and 1.0 after rescoring 2x;
+  dense random, Clifford-rotor, quaternion and Givens rotations gave the same
+  recall on this data, but the block rotations fell to 0.81 when coordinate energy
+  is importance-ordered (matryoshka-style), so the Hadamard rotation is used; a
+  1-bit QJL residual was worse than the plain codes at equal size. Design follows
+  turbovec (MIT; see `NOTICE.md`). Tests:
+  `tests/hnsw_quantized.rs`; benchmark: `examples/hnsw_quant_bench.rs`.
 - A `cargo-fuzz` harness in `kleos-core/fuzz/`. The `run_script` target runs arbitrary
   CozoScript against an in-memory database built without network access or
   file-backed engines, under the engine's own query time and memory budgets.
@@ -126,6 +272,11 @@ to kleos.
   (`x * 2.0`) for arithmetic that may exceed the range.
 - **BREAKING (parse): Block comments nest like Rust's.** A comment that relied on `/*/`
   closing it after an unclosed nested `/*` (`/* a /*/`) is now a parse error.
+- Reading a stored row no longer formats its key for an error message on every
+  decode. The label (a `Debug` dump of the key tuple, or a hex dump of the key bytes
+  for value-only reads such as HNSW self rows) was built eagerly and discarded on
+  success; it is now built only when decoding fails. Exact HNSW search on the
+  in-memory store went from 15.0 to 5.6 ms of CPU per query (30K x 1536, `ef: 64`).
 - `ROADMAP.md` rewritten for kleos: agent-memory north star, a hardening phase first, and the
   inherited mnestic backlog as unscheduled candidates. mnestic's 0.19 plan is marked as an
   inherited record.

@@ -93,11 +93,16 @@ pub use runtime::columnar::{ColumnarFileFormat, ColumnarImportOptions, ColumnarI
 pub use runtime::db::Db;
 pub use runtime::db::NamedRows;
 pub use runtime::diagnostics::QueryWarning;
+pub use runtime::live::{LiveStats, SubscribeOptions, Subscription, SubscriptionEvent};
 #[cfg(feature = "graph-algo")]
 pub use runtime::graph_projection::{
     GraphSource, GraphVariant, ProjectionVariant, VariantKey, VariantSpec,
 };
-pub use runtime::hybrid::{build_hybrid_query, GraphLeg, HybridList, HybridSearch, MmrParams};
+pub use fixed_rule::utilities::rerank::Reranker;
+pub use runtime::hybrid::{
+    build_hybrid_query, Fusion, GraphLeg, HybridList, HybridSearch, MmrParams, RerankParams,
+    ScoreNorm, WeightedFusionParams,
+};
 pub use runtime::relation::{decode_tuple_from_kv, try_decode_tuple_from_kv};
 pub use runtime::temp_store::RegularTempStore;
 pub use storage::mem::{new_cozo_mem, MemStorage, MemTx};
@@ -120,6 +125,7 @@ pub use storage::{Storage, StoreTx};
 pub use crate::data::expr::{Expr, Op};
 use crate::data::json::JsonValue;
 pub use crate::data::relation::VecElementType;
+pub use crate::runtime::vec_quant::VecQuant;
 pub use crate::data::symb::Symbol;
 pub use crate::data::value::{JsonData, Vector};
 pub use crate::fixed_rule::SimpleFixedRule;
@@ -139,10 +145,12 @@ pub use crate::runtime::governed_transaction::{
     GovernedTransactionWorker,
 };
 pub use crate::runtime::relation::AccessLevel;
+pub use embed::{register_embedder, Embedder};
 
 #[cfg(feature = "cypher")]
 pub mod cypher;
 pub mod data;
+pub mod embed;
 pub(crate) mod fixed_rule;
 pub(crate) mod fts;
 /// Test-support metric, not a public API: process-wide FTS posting-scan
@@ -939,6 +947,65 @@ impl DbInstance {
         }
     }
 
+    /// Dispatcher method. See [crate::Db::subscribe].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn subscribe(
+        &self,
+        script: &str,
+        params: BTreeMap<String, DataValue>,
+        opts: SubscribeOptions,
+    ) -> Result<Subscription> {
+        match self {
+            DbInstance::Mem(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.subscribe(script, params, opts),
+        }
+    }
+
+    /// Dispatcher method. See [crate::Db::unsubscribe].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn unsubscribe(&self, id: u64) -> bool {
+        match self {
+            DbInstance::Mem(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.unsubscribe(id),
+        }
+    }
+
+    /// Dispatcher method. See [crate::Db::live_stats].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn live_stats(&self) -> LiveStats {
+        match self {
+            DbInstance::Mem(db) => db.live_stats(),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.live_stats(),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.live_stats(),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.live_stats(),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.live_stats(),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.live_stats(),
+        }
+    }
+
     /// Dispatcher method. See [crate::Db::unregister_callback].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn unregister_callback(&self, id: u32) -> bool {
@@ -1068,6 +1135,42 @@ impl DbInstance {
             DbInstance::Sled(db) => db.unregister_fixed_rule(name),
             #[cfg(feature = "storage-tikv")]
             DbInstance::TiKv(db) => db.unregister_fixed_rule(name),
+        }
+    }
+    /// Dispatcher method. See [crate::Db::register_reranker].
+    pub fn register_reranker(
+        &self,
+        name: impl Into<String>,
+        reranker: std::sync::Arc<dyn Reranker>,
+    ) -> Result<()> {
+        match self {
+            DbInstance::Mem(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.register_reranker(name, reranker),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.register_reranker(name, reranker),
+        }
+    }
+    /// Dispatcher method. See [crate::Db::unregister_reranker].
+    pub fn unregister_reranker(&self, name: &str) -> bool {
+        match self {
+            DbInstance::Mem(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.unregister_reranker(name),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.unregister_reranker(name),
         }
     }
 
