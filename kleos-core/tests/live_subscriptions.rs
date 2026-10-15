@@ -222,12 +222,7 @@ fn failed_commit_delivers_nothing() {
         kv(db);
         let s1 = sub(&db, "?[k, v] := *kv{k, v}");
         initial(&s1);
-            match db {
-            DbInstance::Mem(inner) => inner.fail_next_commit_for_tests(),
-            DbInstance::Sqlite(inner) => inner.fail_next_commit_for_tests(),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!(),
-        }
+        db.fail_next_commit_for_tests();
         let tx = db.multi_transaction(true);
         tx.run_script("?[k, v] <- [[20, 'x']] :put kv {k => v}", BTreeMap::new())
             .unwrap();

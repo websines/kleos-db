@@ -139,6 +139,18 @@ to kleos.
   stored row anyway; returned distances stay exact.
   Regression test: `tests/hnsw_filtered_search.rs`.
 
+- Filtered HNSW search no longer pays for both the graph search and the exact scan.
+  The switch to the scan compared the larger of the remaining and the already
+  spent graph visits with the cost of a scan, so a search that had nearly finished
+  dropped its results and scanned anyway. On 99,000 1536-d embeddings at 10%
+  selectivity, `ef: 128` cost 68 ms of CPU per query against 52 ms at `ef: 256`.
+  Only the remaining work counts now, and it is never estimated below the visits
+  needed to fill the result slots still empty. The visit and scan costs were also
+  re-measured by forcing each path over 1–50% selectivity and `ef` 32–256 (a graph
+  visit costs about 10.5 scanned rows, and a scanned row that passes the filter
+  1.7 more). On that index the scan takes over at 10% from `ef: 128` and at 2% and
+  below for every `ef`.
+
 - sqlite: a write could fail with `database is locked (code 5)` while another thread
   was reading. A read that found a row left its cached statement holding a SHARED lock
   on the file, and the statements were finalized only after the in-process lock was

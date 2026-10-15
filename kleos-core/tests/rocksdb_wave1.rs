@@ -180,9 +180,9 @@ fn quantized_f16_hnsw_persists_and_searches_on_rocksdb() {
     assert!(got.iter().all(|(id, _)| *id > 2), "deleted rows returned: {got:?}");
 }
 
-/// Unquantized F32 index on rocksdb with a selective filter that forces the
-/// exact-scan fallback and a broad one that stays on the graph: both return
-/// exactly the filtered top-k.
+/// Unquantized F16 index on rocksdb with selective filters that take the
+/// exact-scan fallback and a broad one that stays on the graph: all return the
+/// filtered top-k.
 #[test]
 fn filtered_search_graph_and_scan_paths_on_rocksdb() {
     let dir = tempfile::tempdir().unwrap();
@@ -196,12 +196,14 @@ fn filtered_search_graph_and_scan_paths_on_rocksdb() {
     let pts = vectors(4000, 5);
     put_range(&db, &pts, 0);
     for q in vectors(10, 77) {
-        for (filter, keep) in [
-            ("cat < 25", Box::new(|i: usize| i % CATS < 25) as Box<dyn Fn(usize) -> bool>),
-            ("cat == 3", Box::new(|i: usize| i % CATS == 3)),
-            ("cat == 3 && id < 400", Box::new(|i: usize| i % CATS == 3 && i < 400)),
+        // `ef: 8` at 50% is cheap enough to stay on the graph; the 2% and
+        // 0.2% filters at `ef: 64` switch to the exact scan.
+        for (filter, ef, keep) in [
+            ("cat < 25", 8, Box::new(|i: usize| i % CATS < 25) as Box<dyn Fn(usize) -> bool>),
+            ("cat == 3", 64, Box::new(|i: usize| i % CATS == 3)),
+            ("cat == 3 && id < 400", 64, Box::new(|i: usize| i % CATS == 3 && i < 400)),
         ] {
-            let got = search(&db, &q, 5, 64, &format!(", filter: {filter}"));
+            let got = search(&db, &q, 5, ef, &format!(", filter: {filter}"));
             let t = truth(&pts, &q, 5, &keep);
             assert_eq!(got.len(), t.len(), "`{filter}` under-filled");
             assert!(got.iter().all(|(id, _)| keep(*id as usize)), "{got:?}");
