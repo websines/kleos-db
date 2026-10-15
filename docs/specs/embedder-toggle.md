@@ -147,8 +147,22 @@ HTTP, the `::embedder` ops are ordinary scripts.
 ## Caveats
 
 * Freeing memory: after disable, the model's `Arc`s are dropped as soon as
-  in-flight `embed()` calls return. Whether the allocator returns the pages to
-  the OS is up to the allocator. See the RSS numbers in the CHANGELOG entry.
+  in-flight `embed()` calls return. Disable then asks the system allocator to
+  return freed pages (`malloc_zone_pressure_relief` on macOS, `malloc_trim` on
+  glibc). On macOS that is not enough. libmalloc keeps freed large blocks dirty
+  in its large cache, where the kernel reclaims them only under memory
+  pressure. These blocks are the load-time f32 buffers, and on CPU the weights
+  too. kleos-infer's probe (`kleos-infer/tests/unload_memory.rs`, gemma int8 on
+  Metal) shows the difference:
+
+  | Allocator setting | Loaded footprint | After unload | Over 3 cycles |
+  |---|---|---|---|
+  | Default | 840 MB | 474 MB | grows about 280 MB per cycle |
+  | `MallocLargeCache=0` | 432 MB | 10 MB | flat |
+
+  The model code does free everything. On macOS, run long-lived processes that
+  toggle embedders with `MallocLargeCache=0` in the environment. It has to be
+  set before the process starts, so it cannot be set from inside kleos.
 * A custom embedder's memory belongs to the host. Disable parks its handle so
   that it can be re-enabled, and calls `unload()` so the implementation can
   release what it can.

@@ -409,8 +409,19 @@ fn real_models_toggle_cycle() {
     eprintln!("gemma device after load: {:?}, precision {:?}", row[7], row[6]);
 
     run(&db, "::embedder disable tg_gemma");
+    std::thread::sleep(std::time::Duration::from_millis(500));
     let rss2 = rss_kib();
     let fp2 = footprint();
+    // direct API path, for comparison: does it matter that the script ran
+    // the model on a query thread?
+    if std::env::var("KLEOS_PROBE_DIRECT").is_ok() {
+        enable_embedder("tg_direct", EmbedderSpec::embeddinggemma()).unwrap();
+        kleos::embed::embed_texts("tg_direct", &[text]).unwrap();
+        eprintln!("direct loaded: [{}]", footprint());
+        disable_embedder("tg_direct").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        eprintln!("direct disabled: [{}]", footprint());
+    }
     assert!(!kleos::embed::is_embedder_enabled("tg_gemma"));
     assert!(!kleos::embed::is_embedder_enabled("tg_gemma_query"), "twin goes too");
     let e = err(&db, &format!("?[v] := v = embed('tg_gemma_query', '{text}')"));

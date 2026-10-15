@@ -117,7 +117,7 @@ impl GemmaModel {
 
     /// Drop the weights (they load again on next use).
     pub fn unload(&self) {
-        *self.weights.lock().unwrap() = None;
+        with_pool(|| *self.weights.lock().unwrap() = None);
     }
 
     /// Whether the weights are in memory.
@@ -210,6 +210,10 @@ impl GemmaModel {
 
     /// Embeds full-width, normalised vectors.
     fn embed_full(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        with_pool(|| self.embed_full_inner(texts))
+    }
+
+    fn embed_full_inner(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let w = self.weights()?;
         let encs = w
             .tokenizer
@@ -343,6 +347,22 @@ impl GemmaModel {
         dev.synchronize()?;
         Ok(rows)
     }
+}
+
+/// Run `f` inside an Objective-C autorelease pool. Metal objects that candle
+/// creates (command buffers, encoders, buffer handles) can be autoreleased;
+/// on a thread with no pool (any Rust thread) they are never released, which
+/// kept every loaded model's GPU and CPU buffers alive after `unload()` in
+/// debug builds (measured: +315 MB per load/unload cycle; release builds
+/// happened to avoid the autorelease path).
+#[cfg(feature = "metal")]
+fn with_pool<R>(f: impl FnOnce() -> R) -> R {
+    objc2::rc::autoreleasepool(|_| f())
+}
+
+#[cfg(not(feature = "metal"))]
+fn with_pool<R>(f: impl FnOnce() -> R) -> R {
+    f()
 }
 
 /// Gemma RMSNorm with the `(1 + w)` scale pre-folded into `w`.

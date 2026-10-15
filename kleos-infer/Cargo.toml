@@ -11,7 +11,7 @@ categories = ["science"]
 [features]
 default = []
 ## Apple-GPU kernels through candle's Metal backend (macOS only).
-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "dep:objc2"]
 
 [dependencies]
 candle-core = "0.11.0"
@@ -22,3 +22,6 @@ safetensors = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
+# Autorelease pool around Metal work (see gemma.rs `with_pool`); already in
+# the tree through candle-metal-kernels.
+objc2 = { version = "0.6", optional = true }
