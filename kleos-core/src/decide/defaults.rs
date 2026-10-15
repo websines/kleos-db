@@ -37,5 +37,6 @@ pub(super) fn calibration(t: Template, f: Family) -> Calibration {
         (Template::Duplicate, Family::Nano) => cal(&[], 0.5, 1.01, ADAPT),
         (Template::Relation, Family::Nano) => cal(&[], 0.0, 1.01, ADAPT),
         (Template::SameEntity | Template::Important, _) => cal(&[], 0.5, 0.9, NONE),
+        (_, Family::Custom(_)) => Calibration::default(),
     }
 }

@@ -100,29 +100,74 @@ pub mod builtin;
 // ------------------------------------------------------------------ templates
 
 /// The prompt dialect a backend was trained on. Templates are validated per
-/// family; a custom decider declares which family it speaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// family; a custom decider declares which family it speaks. A new backend
+/// with its own prompts registers a family with [`register_family`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
     /// LiquidAI d1-omni (Decision Index schema, option markers).
     D1,
     /// tasksource-decider-nano (cross-encoder, `Question: ..\nOption: ..`).
     Nano,
+    /// A family registered with [`register_family`].
+    Custom(&'static str),
+}
+
+/// The prompts of a registered family: a total function from template to
+/// spec, the prompt version, and the default calibration per template.
+#[derive(Clone, Copy)]
+pub struct FamilyTemplates {
+    /// The fixed prompt of each template.
+    pub spec: fn(Template) -> TemplateSpec,
+    /// Prompt version (bump on any prompt change).
+    pub version: u32,
+    /// Shipped calibration per template.
+    pub calibration: fn(Template) -> Calibration,
+}
+
+lazy_static! {
+    static ref FAMILIES: RwLock<BTreeMap<&'static str, FamilyTemplates>> = RwLock::new(BTreeMap::new());
+}
+
+/// Register (or replace) a template family for a new backend, e.g. a
+/// llama.cpp decision model with its own validated prompts. Returns the
+/// [`Family`] to pass to [`register_decider`].
+pub fn register_family(name: &str, templates: FamilyTemplates) -> Result<Family> {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.is_empty() || matches!(lower.as_str(), "d1" | "nano") {
+        bail!("family name '{name}' is empty or reserved");
+    }
+    let mut f = FAMILIES.write().map_err(|_| miette!("family registry poisoned"))?;
+    let key: &'static str = match f.keys().find(|k| **k == lower) {
+        Some(k) => k,
+        None => Box::leak(lower.into_boxed_str()),
+    };
+    f.insert(key, templates);
+    Ok(Family::Custom(key))
+}
+
+fn family_templates(name: &str) -> Option<FamilyTemplates> {
+    FAMILIES.read().ok().and_then(|f| f.get(name).copied())
 }
 
 impl Family {
-    /// `d1` / `nano`.
+    /// `d1` / `nano` / the registered name.
     pub fn name(self) -> &'static str {
         match self {
             Family::D1 => "d1",
             Family::Nano => "nano",
+            Family::Custom(n) => n,
         }
     }
-    /// Parse `d1`, `d1-omni`, `nano`, `decider-nano`.
+    /// Parse `d1`, `d1-omni`, `nano`, `decider-nano`, or a registered family.
     pub fn parse(s: &str) -> Result<Self> {
-        Ok(match s.trim().to_ascii_lowercase().as_str() {
+        let l = s.trim().to_ascii_lowercase();
+        Ok(match l.as_str() {
             "d1" | "d1-omni" | "d1-omni-600m" => Family::D1,
             "nano" | "decider-nano" | "tasksource-decider-nano" => Family::Nano,
-            other => bail!("unknown decider family '{other}': expected 'd1' or 'nano'"),
+            other => match FAMILIES.read().ok().and_then(|f| f.keys().find(|k| **k == other).copied()) {
+                Some(k) => Family::Custom(k),
+                None => bail!("unknown decider family '{other}': expected 'd1', 'nano' or a family registered with register_family"),
+            },
         })
     }
 }
@@ -216,8 +261,11 @@ impl Template {
     }
     /// Prompt version for `family`. Bumped whenever a prompt string changes;
     /// probes and calibrations fitted on another version are not applied.
-    pub fn version(self, _family: Family) -> u32 {
-        1
+    pub fn version(self, family: Family) -> u32 {
+        match family {
+            Family::Custom(n) => family_templates(n).map(|t| t.version).unwrap_or(0),
+            _ => 1,
+        }
     }
     /// `name@vN`.
     pub fn versioned(self, family: Family) -> String {
@@ -225,7 +273,13 @@ impl Template {
     }
     /// The fixed prompt and readout for `family`.
     pub fn spec(self, family: Family) -> TemplateSpec {
-        templates::spec(self, family)
+        match family {
+            Family::Custom(n) => match family_templates(n) {
+                Some(t) => (t.spec)(self),
+                None => panic!("template family '{n}' is not registered"),
+            },
+            _ => templates::spec(self, family),
+        }
     }
     /// Render the request for `(a, b)` (`b` ignored by `important`).
     pub fn render(self, family: Family, a: &str, b: &str) -> DecideRequest {
@@ -333,8 +387,8 @@ pub mod templates {
             (Template::Supersedes | Template::Contradicts, Family::D1) => cnli(&CNLI_CONTRA),
             (Template::Duplicate, Family::D1) => cnli(&CNLI_ENTAIL),
             // nano: premise/hypothesis NLI (adapt AUROC 0.894 / 0.946 / 1.0)
-            (Template::Supersedes | Template::Contradicts, Family::Nano) => nli(&NLI_CONTRA),
-            (Template::Duplicate, Family::Nano) => nli(&NLI_ENTAIL),
+            (Template::Supersedes | Template::Contradicts, _) => nli(&NLI_CONTRA),
+            (Template::Duplicate, _) => nli(&NLI_ENTAIL),
             // both: ContractNLI mapped to 3 of the 4 relation labels
             // (Entailment -> duplicate, Contradiction -> update,
             // NotMentioned -> compatible); a probe separates contradiction
@@ -413,7 +467,12 @@ impl Calibration {
     /// Templates without labelled adapt data (`same_entity`, `important`)
     /// get a neutral 0.5 threshold and a conservative 0.9 auto threshold.
     pub fn default_for(template: Template, family: Family) -> Self {
-        defaults::calibration(template, family)
+        match family {
+            Family::Custom(n) => family_templates(n)
+                .map(|t| (t.calibration)(template))
+                .unwrap_or_default(),
+            _ => defaults::calibration(template, family),
+        }
     }
     /// Band of probability `p`.
     pub fn band(&self, p: f64) -> Band {

@@ -582,3 +582,35 @@ fn fit_errors() {
     decide::remove_fitted("nofeat-model", Template::Supersedes);
     decide::unregister_decider("nofeat");
 }
+
+#[test]
+fn third_backend_registers_its_own_family() {
+    use kleos::decide::{register_family, FamilyTemplates, TemplateSpec};
+    fn spec(_t: Template) -> TemplateSpec {
+        fn st(a: &str, b: &str) -> String {
+            format!("A: {a}\nB: {b}")
+        }
+        fn q(_a: &str, _b: &str) -> String {
+            "Is B a change of A?".to_string()
+        }
+        TemplateSpec { state: st, question: q, options: &["no", "yes"], label_of_option: &[0, 1] }
+    }
+    fn cal(_t: Template) -> Calibration {
+        Calibration { threshold: 0.6, tau_auto: 0.95, source: "custom".into(), ..Default::default() }
+    }
+    let fam = register_family("jev", FamilyTemplates { spec, version: 3, calibration: cal }).unwrap();
+    assert_eq!(fam.name(), "jev");
+    assert_eq!(Family::parse("JEV").unwrap(), fam);
+    assert!(register_family("nano", FamilyTemplates { spec, version: 1, calibration: cal }).is_err());
+    let r = Template::Supersedes.render(fam, "x", "y");
+    assert_eq!((r.state.as_str(), r.question.as_str()), ("A: x\nB: y", "Is B a change of A?"));
+    assert_eq!(Template::Supersedes.versioned(fam), "supersedes@v3");
+    let m = Mock::new("jev-model", 4, |_| (vec![0.0, 0.5], vec![]));
+    decide::register_decider("jev1", m, fam).unwrap();
+    let d = decide::decide_one("jev1", Template::Supersedes, "x", "y").unwrap();
+    assert_eq!((d.label.as_str(), d.via.as_str(), d.template_version), ("yes", "calibrated", 3));
+    let db = mem();
+    let rows = run(&db, "::decider list").unwrap();
+    assert!(rows.rows.iter().any(|r| r[0] == DataValue::from("jev1") && r[2] == DataValue::from("jev")));
+    decide::unregister_decider("jev1");
+}
