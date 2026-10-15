@@ -26,6 +26,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smartstring::{LazyCompact, SmartString};
 use std::cmp::{max, Reverse};
 
+mod filtered;
+
 #[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 pub(crate) struct HnswIndexManifest {
     pub(crate) base_relation: SmartString<LazyCompact>,
@@ -1389,6 +1391,40 @@ impl<'a> SessionTx<'a> {
                     &mut vec_cache,
                 )?;
             }
+            // A search filter is applied inside the bottom-layer search (kleos
+            // fork, upgrade plan A1), so selective filters still return k rows.
+            if let Some((code, span)) = filter_bytecode {
+                let needs_bindings = match &config.filter {
+                    Some(f) => {
+                        let used = f.bindings()?;
+                        [
+                            &config.bind_field,
+                            &config.bind_field_idx,
+                            &config.bind_distance,
+                            &config.bind_vector,
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .any(|b| used.contains(b))
+                    }
+                    None => true,
+                };
+                let pred = filtered::SearchPredicate {
+                    code,
+                    span: *span,
+                    needs_bindings,
+                };
+                let seeds = found_nn.into_iter().map(|(k, _)| k).collect();
+                return self.hnsw_knn_filtered(
+                    &q,
+                    config,
+                    &pred,
+                    stack,
+                    &vec_cache,
+                    seeds,
+                    bottom_level,
+                );
+            }
             self.hnsw_search_level(
                 &q,
                 config.ef,
@@ -1402,10 +1438,8 @@ impl<'a> SessionTx<'a> {
                 return Ok(vec![]);
             }
 
-            if config.filter.is_none() {
-                while found_nn.len() > config.k {
-                    found_nn.pop();
-                }
+            while found_nn.len() > config.k {
+                found_nn.pop();
             }
 
             let mut ret = vec![];
@@ -1417,52 +1451,11 @@ impl<'a> SessionTx<'a> {
                     }
                 }
 
-                let mut cand_tuple = config
+                let cand_tuple = config
                     .base_handle
                     .get(self, &cand_key.0)?
                     .ok_or_else(|| miette!("corrupted index"))?;
-
-                // make sure the order is the same as in all_bindings()!!!
-                if config.bind_field.is_some() {
-                    let field = if cand_key.1 < config.base_handle.metadata.keys.len() {
-                        config.base_handle.metadata.keys[cand_key.1].name.clone()
-                    } else {
-                        config.base_handle.metadata.non_keys
-                            [cand_key.1 - config.base_handle.metadata.keys.len()]
-                        .name
-                        .clone()
-                    };
-                    cand_tuple.push(DataValue::Str(field));
-                }
-                if config.bind_field_idx.is_some() {
-                    cand_tuple.push(if cand_key.2 < 0 {
-                        DataValue::Null
-                    } else {
-                        DataValue::from(cand_key.2 as i64)
-                    });
-                }
-                if config.bind_distance.is_some() {
-                    cand_tuple.push(DataValue::from(distance));
-                }
-                if config.bind_vector.is_some() {
-                    let vec = if cand_key.2 < 0 {
-                        cand_tuple[cand_key.1].clone()
-                    } else {
-                        match &cand_tuple[cand_key.1] {
-                            DataValue::List(v) => v[cand_key.2 as usize].clone(),
-                            v => bail!("corrupted index value {:?}", v),
-                        }
-                    };
-                    cand_tuple.push(vec);
-                }
-
-                if let Some((code, span)) = filter_bytecode {
-                    if !eval_bytecode_pred(code, &cand_tuple, stack, *span)? {
-                        continue;
-                    }
-                }
-
-                ret.push(cand_tuple);
+                ret.push(filtered::bind_result(config, &cand_key, cand_tuple, distance)?);
             }
             ret.reverse();
             ret.truncate(config.k);
