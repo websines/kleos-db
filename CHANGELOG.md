@@ -62,6 +62,37 @@ to kleos.
   only. That matches its published SciFact score; a re-ranker is only worth
   using if it beats the first stage on your data.
 
+- Text embeddings inside the database (UPGRADE_PLAN D3). `embed('model', text)`
+  returns an F32 vector from an embedder registered with
+  `kleos::embed::register_embedder(name, Arc<dyn Embedder>)` (trait: `embed(&[&str])`,
+  `dim()`); `embed('model', text, 256)` takes a re-normalised Matryoshka prefix.
+  Every call goes through one embedding cache keyed on (model id, SHA-256 of the
+  text), bounded by a byte budget (default 64 MiB; `set_embedding_cache_capacity`,
+  `embedding_cache_stats`). The registry and cache are process-wide.
+- Computed columns: a column default may now read other columns of the row, so
+  `vec: <F32; 768> default embed('gemma', text)` keeps a vector column in sync with
+  its text. A `:put` that omits `vec` computes it; an `:update` that changes `text`
+  recomputes it; an `:update` that supplies only some of a computed column's sources
+  is rejected rather than leaving a stale value. The `embed()` calls of one write
+  are batched (256 rows per model call group) instead of one model call per row:
+  100 rows with a batch size of 16 make 7 model calls.
+- `kleos-infer`, a new workspace crate for single-forward-pass models (UPGRADE_PLAN
+  D2), built on candle: CPU everywhere, Apple GPU with the `metal` feature; f32,
+  f16, bf16, int8 (Q8_0) and int4 (Q4_0) weights; models load lazily from the local
+  Hugging Face cache and are never bundled or downloaded by the library. Ships
+  EmbeddingGemma-300m (output matches sentence-transformers f32 to cosine 1.0000 on
+  300 SciFact queries) and Model2Vec static embedders (potion-base-8M/32M). It is
+  opt-in: not a default workspace member, and kleos-core only uses it behind the new
+  off-by-default `infer` / `infer-metal` features (`kleos::embed::builtin`). candle 0.11
+  does not build on Rust 1.90 (unstable `stdarch_neon_f16`); it is verified on 1.99.
+  Measured on SciFact (M3, Metal, shared with other jobs): EmbeddingGemma int8
+  scores nDCG@10 0.785 on the full corpus through kleos (auto-embed on `:put`, HNSW,
+  `embed()` queries), the same as exact search; on a 1,500-document subset f32,
+  f16, bf16 and int8 all score 0.871-0.873 and int4 0.866, and the 256-d Matryoshka
+  prefix loses 0.006. int8 is the default: lowest load peak (1.1 GB vs 2.8 GB for
+  f32) at equal quality. potion-base-8M is the near-free fallback (0.506, about
+  4,000 documents/s on the CPU, 100 MB).
+
 ### Fixed
 
 - `int_range` and `rand_vec` can no longer exhaust memory (found by fuzzing). A zero

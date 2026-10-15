@@ -436,6 +436,11 @@ impl<'a> SessionTx<'a> {
         let hnsw_filters = Self::make_hnsw_filters(relation_store)?;
         let fts_lsh_processors = self.make_fts_lsh_processors(relation_store)?;
         let lsh_perms = self.make_lsh_hash_perms(relation_store);
+        // kleos fork (D3): batch the embed() calls of computed columns.
+        let res_iter = crate::embed::EmbedPrefetch::new(
+            res_iter,
+            key_extractors.iter().filter_map(DataExtractor::computed_expr),
+        );
 
         for tuple in res_iter {
             let extracted: Vec<DataValue> = key_extractors
@@ -772,6 +777,14 @@ impl<'a> SessionTx<'a> {
         let hnsw_filters = Self::make_hnsw_filters(relation_store)?;
         let fts_lsh_processors = self.make_fts_lsh_processors(relation_store)?;
         let lsh_perms = self.make_lsh_hash_perms(relation_store);
+        // kleos fork (D3): batch the embed() calls of recomputed columns.
+        let res_iter = crate::embed::EmbedPrefetch::new(
+            res_iter,
+            val_extractors
+                .iter()
+                .flatten()
+                .filter_map(DataExtractor::computed_expr),
+        );
 
         for tuple in res_iter {
             let mut new_kv: Vec<DataValue> = key_extractors
@@ -2308,6 +2321,10 @@ struct TransactAssertionFailure {
 enum DataExtractor {
     DefaultExtractor(Expr, NullableColType),
     IndexExtractor(usize, NullableColType),
+    /// kleos fork (UPGRADE_PLAN D3): a column default that reads other
+    /// columns of the same row, e.g. `vec: <F32; 768> default embed('m', text)`.
+    /// The expression's bindings are filled with the input tuple positions.
+    ComputedExtractor(Expr, NullableColType),
 }
 
 impl DataExtractor {
@@ -2319,7 +2336,16 @@ impl DataExtractor {
             DataExtractor::IndexExtractor(i, typ) => typ
                 .coerce(tuple[*i].clone(), cur_vld)
                 .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
+            DataExtractor::ComputedExtractor(expr, typ) => typ
+                .coerce(expr.eval(tuple)?, cur_vld)
+                .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
         })
+    }
+    fn computed_expr(&self) -> Option<&Expr> {
+        match self {
+            DataExtractor::ComputedExtractor(e, _) => Some(e),
+            _ => None,
+        }
     }
 }
 
@@ -2346,11 +2372,51 @@ fn make_update_extractors(
     for col in stored.iter() {
         if input_keys.contains(&col.name) {
             extractors.push(Some(make_extractor(col, input, bindings, tuple_headers)?));
+        } else if let Some(sources) = computed_default_sources(col)? {
+            // kleos fork (D3): a computed column follows its source columns.
+            // Recompute it when the update supplies all of them; reject an
+            // update that supplies only some (the stored value would go stale).
+            let given = sources.iter().filter(|c| input_keys.contains(c)).count();
+            if given == sources.len() {
+                extractors.push(Some(make_extractor(col, input, bindings, tuple_headers)?));
+            } else if given > 0 {
+                bail!(ComputedSourceMissing(
+                    col.name.to_string(),
+                    sources
+                        .iter()
+                        .filter(|c| !input_keys.contains(c))
+                        .join(", ")
+                ));
+            } else {
+                extractors.push(None);
+            }
         } else {
             extractors.push(None);
         }
     }
     Ok(extractors)
+}
+
+#[derive(Debug, Error, Diagnostic)]
+#[error("computed column {0} needs column(s) {1}, which the input does not provide")]
+#[diagnostic(code(eval::computed_source_missing))]
+#[diagnostic(help("a column whose default reads other columns needs all of them in the same write"))]
+struct ComputedSourceMissing(String, String);
+
+/// The columns a computed default reads, or `None` for a plain (constant)
+/// default or no default.
+fn computed_default_sources(col: &ColumnDef) -> Result<Option<Vec<SmartString<LazyCompact>>>> {
+    match &col.default_gen {
+        None => Ok(None),
+        Some(expr) => {
+            let refs = expr.bindings()?;
+            if refs.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(refs.into_iter().map(|s| s.name).collect()))
+            }
+        }
+    }
 }
 
 fn make_extractor(
@@ -2369,8 +2435,36 @@ fn make_extractor(
         }
     }
     if let Some(expr) = &stored.default_gen {
-        Ok(DataExtractor::DefaultExtractor(
-            expr.clone(),
+        let refs = expr.bindings()?;
+        if refs.is_empty() {
+            return Ok(DataExtractor::DefaultExtractor(
+                expr.clone(),
+                stored.typing.clone(),
+            ));
+        }
+        // kleos fork (D3): computed default — bind each referenced column to
+        // its position in the input tuple.
+        let mut positions = BTreeMap::new();
+        for r in refs {
+            let pos = input
+                .iter()
+                .zip(bindings.iter())
+                .find(|(c, _)| c.name == r.name)
+                .and_then(|(_, b)| tuple_headers.iter().position(|h| h == b));
+            match pos {
+                Some(p) => {
+                    positions.insert(r, p);
+                }
+                None => bail!(ComputedSourceMissing(
+                    stored.name.to_string(),
+                    r.name.to_string()
+                )),
+            }
+        }
+        let mut expr = expr.clone();
+        expr.fill_binding_indices(&positions)?;
+        Ok(DataExtractor::ComputedExtractor(
+            expr,
             stored.typing.clone(),
         ))
     } else {
