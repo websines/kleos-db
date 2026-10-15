@@ -145,7 +145,10 @@ pub use crate::runtime::governed_transaction::{
     GovernedTransactionWorker,
 };
 pub use crate::runtime::relation::AccessLevel;
-pub use embed::{register_embedder, Embedder};
+pub use embed::{
+    disable_embedder, embedders, enable_embedder, register_embedder, Embedder, EmbedderSpec,
+    EmbedderStatus,
+};
 
 #[cfg(feature = "cypher")]
 pub mod cypher;
@@ -1242,6 +1245,37 @@ impl DbInstance {
         MultiTransaction {
             sender: app2db_send,
             receiver: db2app_recv,
+        }
+    }
+    /// Turn a built-in embedder on under `name`, or re-enable a disabled one
+    /// (empty `spec`). Process-wide: see [crate::embed::enable_embedder] and
+    /// `::embedder enable`.
+    pub fn enable_embedder(&self, name: &str, spec: EmbedderSpec) -> Result<()> {
+        embed::enable_embedder(name, spec)
+    }
+    /// Turn the embedder `name` off, unloading its model and dropping its
+    /// cached vectors. Process-wide: see [crate::embed::disable_embedder].
+    pub fn disable_embedder(&self, name: &str) -> Result<bool> {
+        embed::disable_embedder(name)
+    }
+    /// Every enabled and disabled embedder (process-wide).
+    pub fn embedders(&self) -> Vec<EmbedderStatus> {
+        embed::embedders()
+    }
+    /// Dispatcher method. See [crate::Db::backfill_embeddings].
+    pub fn backfill_embeddings(&self, relation: &str) -> Result<NamedRows> {
+        match self {
+            DbInstance::Mem(db) => db.backfill_embeddings(relation),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.backfill_embeddings(relation),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.backfill_embeddings(relation),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.backfill_embeddings(relation),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.backfill_embeddings(relation),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.backfill_embeddings(relation),
         }
     }
     /// Dispatcher method. See [crate::Db::set_graph_projection_capacity].

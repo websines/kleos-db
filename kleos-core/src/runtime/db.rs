@@ -2763,6 +2763,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             SysOp::Memory(op) => {
                 crate::runtime::memory::run_memory_op(self, tx, op, read_only, skip_locking)
             }
+            // kleos fork: embedder on/off switch (process-wide state, no tx)
+            SysOp::Embedder(op) => self.run_embedder_op(op, read_only, true),
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3540,6 +3542,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         match &op {
             SysOp::ListRunning => return self.list_running(),
             SysOp::Warnings(clear) => return self.list_warnings(*clear),
+            // kleos fork: the embedder registry is process state; backfill
+            // runs its own scripts (docs/specs/embedder-toggle.md)
+            SysOp::Embedder(op) => return self.run_embedder_op(op, read_only, false),
             SysOp::KillRunning(id) => {
                 let queries = self.running_queries.lock().unwrap();
                 return Ok(match queries.get(id) {

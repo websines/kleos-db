@@ -11,6 +11,7 @@ pub(crate) mod callback;
 pub(crate) mod columnar;
 pub(crate) mod db;
 pub(crate) mod diagnostics;
+pub(crate) mod embedder;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod governed_transaction;
 pub(crate) mod graph_projection;
