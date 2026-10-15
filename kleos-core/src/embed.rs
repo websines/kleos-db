@@ -35,11 +35,12 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use miette::{bail, miette, Result};
+use miette::{miette, Result};
 use ndarray::Array1;
 use sha2::{Digest, Sha256};
 use smartstring::{LazyCompact, SmartString};
 
+use crate::bail;
 use crate::data::expr::{Expr, Op};
 use crate::data::tuple::Tuple;
 use crate::data::value::{DataValue, Vector};
