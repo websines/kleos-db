@@ -70,7 +70,11 @@ index_opt_field = {ident ~ ":" ~ expr}
 graph_opt_field = {ident ~ ":" ~ expr}
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
-BLOCK_COMMENT = _{ "/*" ~ (BLOCK_COMMENT | !"*/" ~ ANY)* ~ "*/" }
+// A nested comment that fails to close means no `*/` balances it, so the
+// enclosing one cannot close either: stop scanning there instead of retrying
+// every later `/*` (exponential in the number of unclosed `/*`). The `"/" ~ &"*/"`
+// arm keeps the one overlap the old rule accepted (`/* /*/`).
+BLOCK_COMMENT = _{ "/*" ~ (BLOCK_COMMENT | "/" ~ &"*/" | !"/*" ~ !"*/" ~ ANY)* ~ "*/" }
 LINE_COMMENT = _{ "#" ~ (!"\n" ~ ANY)* }
 COMMENT = _{(BLOCK_COMMENT | LINE_COMMENT)}
 

@@ -30,6 +30,13 @@ to kleos.
   `(x ~ ("," ~ x)* ~ ","?)?`, which accepts the same language (trailing commas
   included) and produces the same parse tree. Depth 40 parses in milliseconds.
   Regression test: `tests/parser_nesting.rs`.
+- Unclosed block comments no longer take exponential time to reject. When a nested
+  `/*` failed to close, the comment rule treated it as text and retried every later
+  `/*`, doubling the work per unclosed `/*` (18 took 2.7 s; the fuzzer found a
+  439-byte script that hung). The rule now stops at a nested comment that cannot
+  close, which cannot change the result, since the enclosing comment cannot close
+  either. A differential test checks the new rule against a reference implementation
+  of the old one on all 87,381 strings over `/ * a ␣` up to length 8.
 
 - Bulk loads no longer leave search-index entries for rows they delete or replace
   (upstream CozoDB #232). `import_relations`, columnar import and

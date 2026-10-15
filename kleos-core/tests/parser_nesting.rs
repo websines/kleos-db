@@ -65,3 +65,80 @@ fn trailing_commas_are_still_accepted() {
     assert!(!parses_quickly("?[x] <- [[1,,2]]".to_string()));
     assert!(!parses_quickly("?[x] <- [[,]]".to_string()));
 }
+
+#[test]
+fn unclosed_block_comments_parse_in_linear_time() {
+    let script = format!("?[x] := x = 1 {}", "/* ".repeat(DEPTH));
+    assert!(!parses_quickly(script));
+    let nested = format!(
+        "{}{} ?[x] <- [[1]]",
+        "/* ".repeat(DEPTH),
+        "*/ ".repeat(DEPTH)
+    );
+    assert!(parses_quickly(nested));
+}
+
+/// The block-comment rule as it was before the linear-time rewrite, with PEG
+/// semantics (ordered choice, greedy repetition that never backtracks):
+/// `"/*" ~ (BLOCK_COMMENT | !"*/" ~ ANY)* ~ "*/"`. Returns the end position.
+fn reference_block_comment(s: &[u8], p: usize) -> Option<usize> {
+    if !s[p..].starts_with(b"/*") {
+        return None;
+    }
+    let mut i = p + 2;
+    loop {
+        if let Some(end) = reference_block_comment(s, i) {
+            i = end;
+        } else if i < s.len() && !s[i..].starts_with(b"*/") {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    s[i..].starts_with(b"*/").then_some(i + 2)
+}
+
+/// Whether `s` is entirely whitespace and block comments under the reference rule.
+fn reference_is_trivia(s: &[u8]) -> bool {
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] == b' ' {
+            i += 1;
+        } else if let Some(end) = reference_block_comment(s, i) {
+            i = end;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// The rewritten rule must accept exactly the comments the old one did:
+/// compare against the reference on every string over `/ * a ␣` up to length 8.
+#[test]
+fn block_comments_accept_the_same_language_as_before() {
+    let db = DbInstance::new("mem", "", "").unwrap();
+    let alphabet = *b"/*a ";
+    let mut checked = 0;
+    for len in 0..=8u32 {
+        for mut n in 0..4usize.pow(len) {
+            let mut s = Vec::with_capacity(len as usize);
+            for _ in 0..len {
+                s.push(alphabet[n % 4]);
+                n /= 4;
+            }
+            let text = String::from_utf8(s).unwrap();
+            let script = format!("{text} ?[x] <- [[1]]");
+            let parsed = db
+                .run_script(&script, BTreeMap::new(), ScriptMutability::Immutable)
+                .is_ok();
+            assert_eq!(
+                parsed,
+                reference_is_trivia(text.as_bytes()),
+                "comment text {text:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, (0..=8).map(|l| 4usize.pow(l)).sum::<usize>());
+}
