@@ -168,7 +168,11 @@ fn main() {
     let engine = std::env::var("BENCH_ENGINE").unwrap_or_else(|_| "sqlite".into());
     let k = 10;
 
-    let (all, n, d) = load_npy(data_path);
+    let (mut all, mut n, d) = load_npy(data_path);
+    if let Some(limit) = std::env::var("BENCH_N").ok().and_then(|s| s.parse().ok()) {
+        n = n.min(limit);
+        all.truncate(n * d);
+    }
     let nb = n - nq;
     let (base, queries) = all.split_at(nb * d);
     let gt = ground_truth(
@@ -176,7 +180,7 @@ fn main() {
         queries,
         d,
         k,
-        &Path::new(data_path).with_extension(format!("gt{nq}.csv")),
+        &Path::new(data_path).with_extension(format!("gt{n}-{nq}.csv")),
     );
 
     let db_dir = work.join(format!("{engine}-bench"));
