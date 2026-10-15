@@ -129,6 +129,11 @@ to kleos.
   (`x * 2.0`) for arithmetic that may exceed the range.
 - **BREAKING (parse): Block comments nest like Rust's.** A comment that relied on `/*/`
   closing it after an unclosed nested `/*` (`/* a /*/`) is now a parse error.
+- Reading a stored row no longer formats its key for an error message on every
+  decode. The label (a `Debug` dump of the key tuple, or a hex dump of the key bytes
+  for value-only reads such as HNSW self rows) was built eagerly and discarded on
+  success; it is now built only when decoding fails. Exact HNSW search on the
+  in-memory store went from 15.0 to 5.6 ms of CPU per query (30K x 1536, `ef: 64`).
 - `ROADMAP.md` rewritten for kleos: agent-memory north star, a hardening phase first, and the
   inherited mnestic backlog as unscheduled candidates. mnestic's 0.19 plan is marked as an
   inherited record.
