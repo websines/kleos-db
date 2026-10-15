@@ -466,7 +466,7 @@ fn is_disabled(name: &str) -> bool {
 fn not_found(name: &str) -> miette::Report {
     if is_disabled(name) {
         #[derive(Debug, thiserror::Error, miette::Diagnostic)]
-        #[error("embedder '{0}' is disabled")]
+        #[error("embedder '{0}' is disabled; turn it back on with `::embedder enable {0}`")]
         #[diagnostic(code(eval::embedder_disabled))]
         #[diagnostic(help(
             "turn it back on with `::embedder enable {0}` (Rust: kleos::embed::enable_embedder), \
@@ -477,7 +477,9 @@ fn not_found(name: &str) -> miette::Report {
         EmbedderDisabled(name.to_string()).into()
     } else {
         #[derive(Debug, thiserror::Error, miette::Diagnostic)]
-        #[error("no embedder is enabled under the name '{0}'")]
+        #[error(
+            "no embedder is enabled under the name '{0}'; enable one with `::embedder enable {0} {{model: 'embeddinggemma'}}`"
+        )]
         #[diagnostic(code(eval::embedder_not_found))]
         #[diagnostic(help(
             "enable one with `::embedder enable {0} {{model: 'embeddinggemma'}}` (needs the `infer` \
