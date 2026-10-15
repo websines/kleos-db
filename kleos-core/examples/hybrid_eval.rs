@@ -14,8 +14,8 @@
 //! cargo run --release --example hybrid_eval -- <data_dir>
 //! ```
 //!
-//! `<data_dir>` holds what a preparation script wrote (see the fork's
-//! UPGRADE_PLAN C1/C2 notes): `corpus.jsonl` (`{id,title,text}`),
+//! `<data_dir>` holds what `examples/hybrid_eval_prep.py` wrote:
+//! `corpus.jsonl` (`{id,title,text}`),
 //! `docs_emb.npy` / `queries_emb.npy` (f32, L2-normalised, row-aligned with
 //! the corpus / `queries.tsv`), `queries.tsv` (`qid\tsplit\ttext`, split
 //! `test`|`dev`) and `qrels.tsv` (`qid\tdocid\trel`).
@@ -24,7 +24,8 @@
 //! to the re-ranker, writes the ones missing from `<data_dir>/rerank_scores.tsv`
 //! to `<data_dir>/rerank_candidates.tsv`, and runs `$RERANK_CMD` (a shell
 //! command that appends `qid\tdocid\tscore` lines for them, computed by a real
-//! cross-encoder) before evaluating. The scores are then served through a
+//! cross-encoder — e.g. `RERANK_CMD="python examples/hybrid_eval_rerank.py
+//! <data_dir>"`) before evaluating. The scores are then served through a
 //! `Reranker` registered on the database, so the `Rerank` stage runs
 //! end-to-end inside `hybrid_search`; a pair the table lacks is a hard error.
 
