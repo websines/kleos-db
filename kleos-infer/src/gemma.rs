@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, Tensor, D};
+use candle_core::{DType, Device, Tensor};
 use serde::Deserialize;
 use tokenizers::{Tokenizer, TruncationParams};
 
@@ -166,6 +166,9 @@ impl GemmaModel {
             bytes: 0,
         };
         let dtype = ld.act_dtype();
+        // Gemma RMSNorm scales by (1 + w): fold the 1 in once, in the
+        // activation dtype, so the fused rms_norm kernel can be used.
+        let norm_w = |t: Tensor| -> Result<Tensor> { Ok((t + 1.0)?.to_dtype(dtype)?) };
         let embed = ld.embedding("embed_tokens.weight")?;
         let mut layers = Vec::with_capacity(self.cfg.num_hidden_layers);
         for i in 0..self.cfg.num_hidden_layers {
@@ -175,19 +178,19 @@ impl GemmaModel {
                 k: ld.linear(&p("self_attn.k_proj.weight"))?,
                 v: ld.linear(&p("self_attn.v_proj.weight"))?,
                 o: ld.linear(&p("self_attn.o_proj.weight"))?,
-                q_norm: ld.f32(&p("self_attn.q_norm.weight"))?,
-                k_norm: ld.f32(&p("self_attn.k_norm.weight"))?,
+                q_norm: norm_w(ld.f32(&p("self_attn.q_norm.weight"))?)?,
+                k_norm: norm_w(ld.f32(&p("self_attn.k_norm.weight"))?)?,
                 gate: ld.linear(&p("mlp.gate_proj.weight"))?,
                 up: ld.linear(&p("mlp.up_proj.weight"))?,
                 down: ld.linear(&p("mlp.down_proj.weight"))?,
-                input_norm: ld.f32(&p("input_layernorm.weight"))?,
-                post_attn_norm: ld.f32(&p("post_attention_layernorm.weight"))?,
-                pre_ff_norm: ld.f32(&p("pre_feedforward_layernorm.weight"))?,
-                post_ff_norm: ld.f32(&p("post_feedforward_layernorm.weight"))?,
+                input_norm: norm_w(ld.f32(&p("input_layernorm.weight"))?)?,
+                post_attn_norm: norm_w(ld.f32(&p("post_attention_layernorm.weight"))?)?,
+                pre_ff_norm: norm_w(ld.f32(&p("pre_feedforward_layernorm.weight"))?)?,
+                post_ff_norm: norm_w(ld.f32(&p("post_feedforward_layernorm.weight"))?)?,
                 sliding: self.cfg.layer_types[i] == "sliding_attention",
             });
         }
-        let norm = ld.f32("norm.weight")?;
+        let norm = norm_w(ld.f32("norm.weight")?)?;
         let mut ld1 = Loader { st: &d1, device: &device, precision: self.engine.precision, bytes: 0 };
         let dense1 = ld1.linear("linear.weight")?;
         let mut ld2 = Loader { st: &d2, device: &device, precision: self.engine.precision, bytes: 0 };
@@ -247,7 +250,7 @@ impl GemmaModel {
         let ids_t = Tensor::from_vec(flat, (b, l), dev)?;
         let valid_t = Tensor::from_vec(valid.clone(), (b, l), dev)?;
         // additive key masks [b, 1, l(q), l(k)]: padding, plus |i-j| < window for sliding layers
-        let neg = -1e9f32;
+        let neg = -3.0e4f32; // finite in f16 too; exp(-3e4) == 0
         let key_pad = valid_t
             .affine(1.0, -1.0)?
             .affine(-(neg as f64), 0.0)?
@@ -283,21 +286,41 @@ impl GemmaModel {
             let q = layer.q.forward(&xn)?.reshape((b, l, h, hd))?.transpose(1, 2)?;
             let k = layer.k.forward(&xn)?.reshape((b, l, kvh, hd))?.transpose(1, 2)?;
             let v = layer.v.forward(&xn)?.reshape((b, l, kvh, hd))?.transpose(1, 2)?;
-            let q = rms(&q.contiguous()?, &layer.q_norm, eps)?;
-            let k = rms(&k.contiguous()?, &layer.k_norm, eps)?;
+            let q = rms(&q, &layer.q_norm, eps)?;
+            let k = rms(&k, &layer.k_norm, eps)?;
             let q = candle_nn::rotary_emb::rope(&q, cos, sin)?;
             let k = candle_nn::rotary_emb::rope(&k, cos, sin)?;
-            let (k, v) = if kvh == h {
-                (k, v.contiguous()?)
+            let a = if dev.is_metal() {
+                // Fused attention kernel (handles GQA without tiling k/v).
+                // candle's f32 kernel does not fit head_dim 256 in threadgroup
+                // memory, so f32-activation modes attend in f16: q and k are
+                // RMS-normalised, and the result is checked against f32 in tests.
+                let adt = if dt == DType::F32 { DType::F16 } else { dt };
+                let m = mask.to_dtype(adt)?.broadcast_as((b, h, l, l))?;
+                candle_nn::ops::sdpa(
+                    &q.to_dtype(adt)?,
+                    &k.to_dtype(adt)?,
+                    &v.to_dtype(adt)?.contiguous()?,
+                    Some(&m),
+                    false,
+                    scale as f32,
+                    1.0,
+                )?
+                .to_dtype(dt)?
             } else {
-                let r = h / kvh;
-                (repeat_kv(&k, r)?, repeat_kv(&v, r)?)
+                let (k, v) = if kvh == h {
+                    (k, v.contiguous()?)
+                } else {
+                    let r = h / kvh;
+                    (repeat_kv(&k, r)?, repeat_kv(&v, r)?)
+                };
+                let att = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?
+                    .to_dtype(DType::F32)?
+                    .broadcast_add(mask)?;
+                let att = candle_nn::ops::softmax_last_dim(&att)?.to_dtype(dt)?;
+                att.matmul(&v)?
             };
-            let att = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?
-                .to_dtype(DType::F32)?
-                .broadcast_add(mask)?;
-            let att = candle_nn::ops::softmax_last_dim(&att)?.to_dtype(dt)?;
-            let a = att.matmul(&v)?.transpose(1, 2)?.reshape((b, l, h * hd))?;
+            let a = a.transpose(1, 2)?.reshape((b, l, h * hd))?;
             let a = layer.o.forward(&a)?;
             x = (res + rms(&a, &layer.post_attn_norm, eps)?)?;
             let res = x.clone();
@@ -322,13 +345,9 @@ impl GemmaModel {
     }
 }
 
-/// Gemma RMSNorm: `x / rms(x) * (1 + w)`, computed in f32, returned in x's dtype.
+/// Gemma RMSNorm with the `(1 + w)` scale pre-folded into `w`.
 fn rms(x: &Tensor, w: &Tensor, eps: f64) -> Result<Tensor> {
-    let dt = x.dtype();
-    let xf = x.to_dtype(DType::F32)?;
-    let var = xf.sqr()?.mean_keepdim(D::Minus1)?;
-    let y = xf.broadcast_div(&(var + eps)?.sqrt()?)?;
-    Ok(y.broadcast_mul(&(w + 1.0)?)?.to_dtype(dt)?)
+    Ok(candle_nn::ops::rms_norm(&x.contiguous()?, w, eps as f32)?)
 }
 
 fn repeat_kv(x: &Tensor, r: usize) -> Result<Tensor> {
