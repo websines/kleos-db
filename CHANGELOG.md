@@ -11,6 +11,28 @@ to kleos.
 
 ### Fixed
 
+- HNSW search with a `filter` now returns `k` rows whenever at least `k` indexed rows
+  match. The filter used to run after the bottom layer had collected `ef` candidates,
+  so a selective filter silently returned fewer rows: on 99,000 real 1536-d
+  embeddings with `k: 10, ef: 64`, a filter keeping 10% of rows under-filled 899 of
+  1,000 queries and a filter keeping 1% under-filled all of them (recall@10 0.06).
+  The filter (and `radius`) is now applied inside the search. Rows failing it still
+  guide the search but never enter the results, and the search keeps expanding
+  until it holds `max(ef, k)` passing rows or runs out of reachable graph. When few
+  rows near the query pass, failing neighbours are expanded on the spot (ACORN-1
+  two-hop expansion). When the remaining graph work would cost more than a full
+  scan, the search switches to an exact scan of the rows that pass the filter and
+  are in the index. Unfiltered searches take the old code path unchanged.
+  Regression test: `tests/hnsw_filtered_search.rs`.
+
+### Added
+
+- `examples/vecbench.rs`: a vector-search benchmark harness. It loads an `.npy`
+  matrix, builds an HNSW index, runs held-out queries over an `ef` sweep and a
+  filter-selectivity sweep, and reports build time, recall@k against cached exact
+  ground truth, QPS, p50/p99 latency, CPU time per query, under-filled queries and
+  on-disk size as a markdown table.
+
 - `int_range` and `rand_vec` can no longer exhaust memory (found by fuzzing). A zero
   step (`int_range(30, 3, 0)`) looped forever, allocating until the process was killed;
   a step that overflowed `i64` wrapped in release builds and did the same; and very
