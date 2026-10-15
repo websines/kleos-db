@@ -13,10 +13,10 @@ query_script_inner_no_bracket = { (option | rule | const_rule | fixed_rule)+ }
 imperative_script = {SOI ~ imperative_stmt+ ~ EOI}
 sys_script = {SOI ~ "::" ~ (history_op | history_gc_op | evict_op | list_relations_op | list_columns_op | list_indices_op | describe_relation_op | repair_corrupt_op | reindex_op | remove_relations_op | trigger_relation_op |
                     trigger_relation_show_op | rename_relations_op | running_op | kill_op | explain_op |
-                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | warnings_op | list_fixed_rules | graph_op | query_op) ~ EOI}
+                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | warnings_op | list_fixed_rules | graph_op | query_op | memory_op) ~ EOI}
 sys_script_inner = {"{" ~ "::" ~ (history_op | history_gc_op | evict_op | list_relations_op | list_columns_op | list_indices_op | describe_relation_op | repair_corrupt_op | reindex_op | remove_relations_op | trigger_relation_op |
                     trigger_relation_show_op | rename_relations_op | running_op | kill_op | explain_op |
-                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | warnings_op | list_fixed_rules | graph_op | query_op) ~ "}"}
+                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | warnings_op | list_fixed_rules | graph_op | query_op | memory_op) ~ "}"}
 index_op = {"index" ~ (index_create | index_drop)}
 vec_idx_op = {"hnsw" ~ (index_create_adv | index_drop)}
 fts_idx_op = {"fts" ~ (index_create_adv | index_drop)}
@@ -37,6 +37,21 @@ index_create = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (ident ~ ("," ~ 
 index_create_adv = {"create" ~ compound_ident ~ ":" ~ ident ~ "{" ~ (index_opt_field ~ ("," ~ index_opt_field)* ~ ","?)? ~ "}"}
 index_drop = {"drop" ~ compound_ident ~ ":" ~ ident }
 compact_op = {"compact"}
+// kleos fork, agent memory (UPGRADE_PLAN E1/E2; docs/specs/memory-supersession-provenance.md)
+memory_op = _{supersede_op | changes_op | provenance_op | retract_op | erase_op | lineage_op}
+supersede_op = {"supersede" ~ (supersede_create | supersede_drop | supersede_list)}
+supersede_create = {"create" ~ compound_ident ~ "{" ~ (ident ~ ("," ~ ident)* ~ ","?)? ~ "}"}
+supersede_drop = {"drop" ~ compound_ident}
+supersede_list = {"list"}
+changes_op = {"changes" ~ compound_ident ~ "{" ~ (index_opt_field ~ ("," ~ index_opt_field)* ~ ","?)? ~ "}"}
+provenance_op = {"provenance" ~ (provenance_create | provenance_drop | provenance_list)}
+provenance_create = {"create" ~ compound_ident ~ "{" ~ (index_opt_field ~ ("," ~ index_opt_field)* ~ ","?)? ~ "}"}
+provenance_drop = {"drop" ~ compound_ident}
+provenance_list = {"list"}
+memory_at = {"@" ~ expr}
+retract_op = {"retract" ~ compound_ident ~ expr ~ memory_at?}
+erase_op = {"erase" ~ compound_ident ~ expr}
+lineage_op = {"lineage" ~ compound_ident ~ expr ~ memory_at?}
 warnings_op = {"warnings" ~ warnings_clear?}
 warnings_clear = {"clear"}
 history_op = {"history" ~ compound_ident ~ expr ~ (pos_int ~ pos_int?)?}

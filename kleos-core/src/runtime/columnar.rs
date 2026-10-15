@@ -380,6 +380,14 @@ impl<'s, S: Storage<'s>> Db<S> {
             )
             .into());
         }
+        // kleos fork, agent memory E1: bulk import bypasses supersession
+        if crate::runtime::memory::supersede_rule(&tx, &handle)?.is_some() {
+            return Err(ColumnarError::Schema(format!(
+                "relation '{relation}' declares a supersession key (::supersede), which columnar \
+                 import does not apply; write with :put, or ::supersede drop it first"
+            ))
+            .into());
+        }
 
         let mut bindings = resolve_bindings(
             relation,

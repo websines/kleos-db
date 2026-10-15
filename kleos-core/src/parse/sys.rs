@@ -95,6 +95,10 @@ pub enum SysOp {
         param_pool: Arc<BTreeMap<String, DataValue>>,
         cur_vld: ValidityTs,
     },
+    /// kleos fork, agent memory (UPGRADE_PLAN E1/E2): supersession keys,
+    /// change feeds, provenance links, cascading retract/erase, lineage.
+    /// See `parse/memory.rs` and `runtime/memory.rs`.
+    Memory(crate::parse::memory::MemoryOp),
 }
 
 /// A declared stored-query parameter. Types and defaults are optional, but
@@ -206,6 +210,14 @@ pub(crate) fn parse_sys(
             let unredacted = in_inner.next().is_some();
             SysOp::TtEvict(rel_symbol, keys, unredacted)
         }
+        Rule::supersede_op
+        | Rule::changes_op
+        | Rule::provenance_op
+        | Rule::retract_op
+        | Rule::erase_op
+        | Rule::lineage_op => SysOp::Memory(crate::parse::memory::parse_memory_op(
+            inner, param_pool, cur_vld,
+        )?),
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,
