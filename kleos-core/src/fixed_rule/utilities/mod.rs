@@ -7,6 +7,7 @@
  */
 
 pub(crate) mod constant;
+pub(crate) mod decide;
 #[cfg(feature = "data-import")]
 pub(crate) mod csv;
 #[cfg(feature = "data-import")]
@@ -22,6 +23,7 @@ pub(crate) mod weighted_fusion;
 #[cfg(feature = "data-import")]
 pub(crate) use self::csv::CsvReader;
 pub(crate) use constant::Constant;
+pub(crate) use decide::Decide;
 #[cfg(feature = "data-import")]
 pub(crate) use jlines::JsonReader;
 pub(crate) use mmr::MaximalMarginalRelevance;

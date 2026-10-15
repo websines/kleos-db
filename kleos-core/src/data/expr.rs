@@ -957,6 +957,16 @@ pub(crate) fn get_op(name: &str) -> Option<&'static Op> {
         // kleos fork: registered text embedders (UPGRADE_PLAN D3, src/embed.rs)
         "embed" => &crate::embed::OP_EMBED,
         "embed_or_null" => &crate::embed::OP_EMBED_OR_NULL,
+        // kleos fork: decision models (src/decide.rs, docs/specs/decide.md)
+        "decide_p" => &crate::decide::OP_DECIDE_P,
+        "decide_label" => &crate::decide::OP_DECIDE_LABEL,
+        "decide_band" => &crate::decide::OP_DECIDE_BAND,
+        "decide_supersedes" => &crate::decide::OP_DECIDE_SUPERSEDES,
+        "decide_same_entity" => &crate::decide::OP_DECIDE_SAME_ENTITY,
+        "decide_duplicate" => &crate::decide::OP_DECIDE_DUPLICATE,
+        "decide_contradicts" => &crate::decide::OP_DECIDE_CONTRADICTS,
+        "decide_important" => &crate::decide::OP_DECIDE_IMPORTANT,
+        "decide_relation" => &crate::decide::OP_DECIDE_RELATION,
         _ => return None,
     })
 }
