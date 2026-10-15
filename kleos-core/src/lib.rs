@@ -111,7 +111,7 @@ pub use storage::newrocks::{new_cozo_newrocksdb, NewRocksDbStorage};
 #[cfg(feature = "storage-rocksdb")]
 pub use storage::rocks::{
     new_cozo_rocksdb, new_cozo_rocksdb_with_memory, process_default_rocks_memory, RocksDbStorage,
-    RocksMemoryConfig, RocksMemoryConfigError, RocksMemoryResources, RocksMemoryStats,
+    RocksDbTx, RocksMemoryConfig, RocksMemoryConfigError, RocksMemoryResources, RocksMemoryStats,
     SharedMemoryConfigConflict,
 };
 #[cfg(feature = "storage-sled")]

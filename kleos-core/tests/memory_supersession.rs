@@ -12,7 +12,8 @@
 //! facts are re-asserted and arrive out of order, sources are retracted and
 //! finally erased for GDPR — with vector and full-text hits checked.
 //!
-//! sqlite-backed (the stored/scan path); the temp dir follows `TMPDIR`.
+//! sqlite-backed (the stored/scan path; `KLEOS_TEST_BACKEND=rocksdb` switches
+//! it); the temp dir follows `TMPDIR`.
 
 use std::collections::BTreeMap;
 
@@ -77,10 +78,13 @@ fn tt_mark() -> i64 {
     t
 }
 
+/// The stored-backend tests run on sqlite, or on the backend named by
+/// `KLEOS_TEST_BACKEND` (e.g. `rocksdb`, when compiled in).
 fn open() -> (tempfile::TempDir, DbInstance) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
-    let db = DbInstance::new("sqlite", path.to_str().unwrap(), "").unwrap();
+    let backend = std::env::var("KLEOS_TEST_BACKEND").unwrap_or_else(|_| "sqlite".into());
+    let db = DbInstance::new(&backend, path.to_str().unwrap(), "").unwrap();
     (dir, db)
 }
 

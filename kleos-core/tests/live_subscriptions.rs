@@ -103,12 +103,18 @@ fn wait_evals(db: &DbInstance, n: u64) {
 }
 
 /// Every test runs on `mem` and on `sqlite` (the repo's test-backend rule:
-/// the two take different storage paths).
+/// the two take different storage paths), and on `rocksdb` when that backend
+/// is compiled in.
 fn each(f: impl Fn(&DbInstance)) {
     f(&DbInstance::new("mem", "", "").unwrap());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.db");
     f(&DbInstance::new("sqlite", path.to_str().unwrap(), "").unwrap());
+    #[cfg(feature = "storage-rocksdb")]
+    {
+        let path = dir.path().join("live-rocks");
+        f(&DbInstance::new("rocksdb", path.to_str().unwrap(), "").unwrap());
+    }
 }
 
 fn kv(db: &DbInstance) {
