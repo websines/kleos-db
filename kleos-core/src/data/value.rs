@@ -313,10 +313,167 @@ impl<'de> Visitor<'de> for VectorVisitor {
                 }
                 Ok(Vector::F64(Array1::from(v)))
             }
+            2u8 | 3u8 => {
+                // Half-precision storage of `<F16; N>` / `<BF16; N>` columns
+                // (kleos fork): widened to F32 on read.
+                if bytes.len() % 2 != 0 {
+                    return Err(serde::de::Error::custom(
+                        "half-precision vector byte length must be a multiple of 2",
+                    ));
+                }
+                let kind = if tag == 2 { HalfKind::F16 } else { HalfKind::BF16 };
+                Ok(Vector::F32(Array1::from(kind.decode(bytes))))
+            }
             _ => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Unsigned(tag as u64),
                 &self,
             )),
+        }
+    }
+}
+
+/// Reduced-precision storage format of a `<F16; N>` / `<BF16; N>` column
+/// (kleos fork). In memory such vectors are [`Vector::F32`] holding values
+/// already rounded to the storage precision; only the stored value bytes are
+/// half width.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum HalfKind {
+    F16,
+    BF16,
+}
+
+impl HalfKind {
+    pub(crate) fn of(eltype: VecElementType) -> Option<Self> {
+        match eltype {
+            VecElementType::F16 => Some(HalfKind::F16),
+            VecElementType::BF16 => Some(HalfKind::BF16),
+            VecElementType::F32 | VecElementType::F64 => None,
+        }
+    }
+    /// Round `x` to the nearest representable value (ties to even).
+    pub(crate) fn round(self, x: f32) -> f32 {
+        match self {
+            HalfKind::F16 => half::f16::from_f32(x).to_f32(),
+            HalfKind::BF16 => half::bf16::from_f32(x).to_f32(),
+        }
+    }
+    pub(crate) fn round_slice(self, xs: &mut [f32]) {
+        use half::slice::HalfFloatSliceExt;
+        match self {
+            HalfKind::F16 => {
+                let mut tmp = vec![half::f16::ZERO; xs.len()];
+                tmp.convert_from_f32_slice(xs);
+                tmp.convert_to_f32_slice(xs);
+            }
+            HalfKind::BF16 => {
+                let mut tmp = vec![half::bf16::ZERO; xs.len()];
+                tmp.convert_from_f32_slice(xs);
+                tmp.convert_to_f32_slice(xs);
+            }
+        }
+    }
+    fn tag(self) -> u8 {
+        match self {
+            HalfKind::F16 => 2,
+            HalfKind::BF16 => 3,
+        }
+    }
+    /// Little-endian 16-bit encoding of `xs`.
+    pub(crate) fn encode(self, xs: &[f32]) -> Vec<u8> {
+        use half::slice::HalfFloatSliceExt;
+        let bits: Vec<u16> = match self {
+            HalfKind::F16 => {
+                let mut tmp = vec![half::f16::ZERO; xs.len()];
+                tmp.convert_from_f32_slice(xs);
+                tmp.iter().map(|h| h.to_bits()).collect()
+            }
+            HalfKind::BF16 => {
+                let mut tmp = vec![half::bf16::ZERO; xs.len()];
+                tmp.convert_from_f32_slice(xs);
+                tmp.iter().map(|h| h.to_bits()).collect()
+            }
+        };
+        bits.iter().flat_map(|b| b.to_le_bytes()).collect()
+    }
+    /// Inverse of [`Self::encode`].
+    pub(crate) fn decode(self, bytes: &[u8]) -> Vec<f32> {
+        use half::slice::HalfFloatSliceExt;
+        let bits = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+        let mut out = vec![0.0f32; bytes.len() / 2];
+        match self {
+            HalfKind::F16 => {
+                let tmp: Vec<half::f16> = bits.map(half::f16::from_bits).collect();
+                tmp.convert_to_f32_slice(&mut out);
+            }
+            HalfKind::BF16 => {
+                let tmp: Vec<half::bf16> = bits.map(half::bf16::from_bits).collect();
+                tmp.convert_to_f32_slice(&mut out);
+            }
+        }
+        out
+    }
+}
+
+/// Serialises an F32 vector in a half-precision storage format, producing the
+/// same msgpack shape as [`Vector`]'s own `Serialize` with tag 2 (F16) or 3
+/// (BF16).
+pub(crate) struct HalfVecSer<'a>(pub(crate) &'a Array1<f32>, pub(crate) HalfKind);
+
+impl serde::Serialize for HalfVecSer<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_tuple(2)?;
+        state.serialize_element(&self.1.tag())?;
+        let bytes = match self.0.as_slice() {
+            Some(s) => self.1.encode(s),
+            None => self.1.encode(&self.0.to_vec()),
+        };
+        state.serialize_element(&VecBytes(&bytes))?;
+        state.end()
+    }
+}
+
+/// A stored (non-key) value together with its column's half-precision format,
+/// if any. Serialises exactly like the plain [`DataValue`] except that F32
+/// vectors (also inside lists) destined for `<F16; N>` / `<BF16; N>` columns
+/// are written half width. Variant names and order mirror [`DataValue`], so
+/// the msgpack encoding of every other value is unchanged (pinned by a test).
+pub(crate) struct StoredValue<'a>(pub(crate) &'a DataValue, pub(crate) Option<HalfKind>);
+
+#[derive(serde_derive::Serialize)]
+#[serde(rename = "DataValue")]
+#[allow(dead_code)]
+enum StoredValueShim<'a> {
+    Null,
+    Bool(()),
+    Num(()),
+    Str(()),
+    Bytes(()),
+    Uuid(()),
+    Regex(()),
+    List(Vec<StoredValue<'a>>),
+    Set(()),
+    Vec(HalfVecSer<'a>),
+}
+
+impl serde::Serialize for StoredValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match (self.0, self.1) {
+            (DataValue::Vec(Vector::F32(a)), Some(kind)) => {
+                StoredValueShim::Vec(HalfVecSer(a, kind)).serialize(serializer)
+            }
+            (DataValue::List(l), Some(kind)) => StoredValueShim::List(
+                l.iter().map(|v| StoredValue(v, Some(kind))).collect(),
+            )
+            .serialize(serializer),
+            (v, _) => v.serialize(serializer),
         }
     }
 }
@@ -762,5 +919,53 @@ mod tests {
 
         assert!(rmp_serde::from_slice::<Vector>(&malformed_f32).is_err());
         assert!(rmp_serde::from_slice::<Vector>(&malformed_f64).is_err());
+        let malformed_f16 = [0x92, 0x02, 0xc4, 0x01, 0x41];
+        assert!(rmp_serde::from_slice::<Vector>(&malformed_f16).is_err());
+    }
+
+    fn encode<T: serde::Serialize + ?Sized>(v: &T) -> Vec<u8> {
+        let mut out = vec![];
+        v.serialize(&mut rmp_serde::Serializer::new(&mut out)).unwrap();
+        out
+    }
+
+    #[test]
+    fn stored_value_shim_matches_datavalue_encoding() {
+        use super::{DataValue, HalfKind, StoredValue};
+        let vals = vec![
+            DataValue::Null,
+            DataValue::from(1),
+            DataValue::from("x"),
+            DataValue::List(vec![DataValue::from(1.5)]),
+            DataValue::Vec(Vector::F32(ndarray::arr1(&[1.0, 2.5]))),
+            DataValue::Vec(Vector::F64(ndarray::arr1(&[1.0, 2.5]))),
+        ];
+        for v in &vals {
+            // Without a half format, and for non-F32 values with one, the
+            // shim is byte-identical to the plain encoding.
+            assert_eq!(encode(&StoredValue(v, None)), encode(v));
+            if !matches!(v, DataValue::Vec(Vector::F32(_)) | DataValue::List(_)) {
+                assert_eq!(encode(&StoredValue(v, Some(HalfKind::F16))), encode(v));
+            }
+        }
+        // F32 vectors (also inside lists) are written half width and read
+        // back as F32 holding the rounded values.
+        for kind in [HalfKind::F16, HalfKind::BF16] {
+            let v = DataValue::List(vec![DataValue::Vec(Vector::F32(ndarray::arr1(&[
+                1.0, -2.5, 0.1, 65504.0,
+            ])))]);
+            let bytes = encode(&StoredValue(&v, Some(kind)));
+            assert!(bytes.len() < encode(&v).len());
+            let back: DataValue = rmp_serde::from_slice(&bytes).unwrap();
+            let DataValue::List(l) = back else { panic!() };
+            let DataValue::Vec(Vector::F32(a)) = &l[0] else {
+                panic!()
+            };
+            let expect: Vec<f32> = [1.0f32, -2.5, 0.1, 65504.0]
+                .iter()
+                .map(|x| kind.round(*x))
+                .collect();
+            assert_eq!(a.to_vec(), expect);
+        }
     }
 }

@@ -2065,19 +2065,24 @@ fn val2str(arg: &DataValue) -> String {
 
 define_op!(OP_VEC, 1, true);
 pub(crate) fn op_vec(args: &[DataValue]) -> Result<DataValue> {
-    let t = match args.get(1) {
-        Some(DataValue::Str(s)) => match s as &str {
-            "F32" | "Float" => VecElementType::F32,
-            "F64" | "Double" => VecElementType::F64,
-            _ => bail!("'vec' does not recognize type {}", s),
-        },
+    let declared = match args.get(1) {
+        Some(DataValue::Str(s)) => VecElementType::from_name(s)
+            .ok_or_else(|| miette!("'vec' does not recognize type {}", s))?,
         None => VecElementType::F32,
         _ => bail!("'vec' requires a string as second argument"),
     };
+    // Half-width types are held in memory as F32 rounded to their precision.
+    let mut res = op_vec_typed(&args[0], declared.in_memory())?;
+    if let DataValue::Vec(Vector::F32(a)) = &mut res {
+        crate::data::relation::round_to_half(a, declared);
+    }
+    Ok(res)
+}
 
-    match &args[0] {
+fn op_vec_typed(arg: &DataValue, t: VecElementType) -> Result<DataValue> {
+    match arg {
         DataValue::Json(j) => match t {
-            VecElementType::F32 => {
+            VecElementType::F32 | VecElementType::F16 | VecElementType::BF16 => {
                 let mut res_arr = ndarray::Array1::zeros(j.0.as_array().unwrap().len());
                 for (mut row, el) in res_arr
                     .axis_iter_mut(ndarray::Axis(0))
@@ -2105,7 +2110,7 @@ pub(crate) fn op_vec(args: &[DataValue]) -> Result<DataValue> {
             }
         },
         DataValue::List(l) => match t {
-            VecElementType::F32 => {
+            VecElementType::F32 | VecElementType::F16 | VecElementType::BF16 => {
                 let mut res_arr = ndarray::Array1::zeros(l.len());
                 for (mut row, el) in res_arr.axis_iter_mut(ndarray::Axis(0)).zip(l.iter()) {
                     let f = el
@@ -2127,21 +2132,19 @@ pub(crate) fn op_vec(args: &[DataValue]) -> Result<DataValue> {
             }
         },
         DataValue::Vec(v) => match (t, v) {
-            (VecElementType::F32, Vector::F32(v)) => Ok(DataValue::Vec(Vector::F32(v.clone()))),
             (VecElementType::F64, Vector::F64(v)) => Ok(DataValue::Vec(Vector::F64(v.clone()))),
-            (VecElementType::F32, Vector::F64(v)) => {
-                Ok(DataValue::Vec(Vector::F32(v.mapv(|x| x as f32))))
-            }
             (VecElementType::F64, Vector::F32(v)) => {
                 Ok(DataValue::Vec(Vector::F64(v.mapv(|x| x as f64))))
             }
+            (_, Vector::F32(v)) => Ok(DataValue::Vec(Vector::F32(v.clone()))),
+            (_, Vector::F64(v)) => Ok(DataValue::Vec(Vector::F32(v.mapv(|x| x as f32)))),
         },
         DataValue::Str(s) => {
             let bytes = STANDARD
                 .decode(s)
                 .map_err(|_| miette!("Data is not base64 encoded"))?;
             match t {
-                VecElementType::F32 => {
+                VecElementType::F32 | VecElementType::F16 | VecElementType::BF16 => {
                     let f32_count = bytes.len() / mem::size_of::<f32>();
                     let arr = unsafe {
                         ndarray::ArrayView1::from_shape_ptr(
@@ -2177,22 +2180,20 @@ pub(crate) fn op_rand_vec(args: &[DataValue]) -> Result<DataValue> {
     }
     let len = check_generated_len("rand_vec", len as u128)?;
     let t = match args.get(1) {
-        Some(DataValue::Str(s)) => match s as &str {
-            "F32" | "Float" => VecElementType::F32,
-            "F64" | "Double" => VecElementType::F64,
-            _ => bail!("'vec' does not recognize type {}", s),
-        },
+        Some(DataValue::Str(s)) => VecElementType::from_name(s)
+            .ok_or_else(|| miette!("'vec' does not recognize type {}", s))?,
         None => VecElementType::F32,
         _ => bail!("'vec' requires a string as second argument"),
     };
 
     let mut rng = thread_rng();
     match t {
-        VecElementType::F32 => {
+        VecElementType::F32 | VecElementType::F16 | VecElementType::BF16 => {
             let mut res_arr = ndarray::Array1::zeros(len);
             for mut row in res_arr.axis_iter_mut(ndarray::Axis(0)) {
                 row.fill(rng.gen::<f64>() as f32);
             }
+            crate::data::relation::round_to_half(&mut res_arr, t);
             Ok(DataValue::Vec(Vector::F32(res_arr)))
         }
         VecElementType::F64 => {

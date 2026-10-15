@@ -1103,6 +1103,8 @@ fn precheck_vector_element(
     target: VecElementType,
 ) -> std::result::Result<(), String> {
     match (target, value) {
+        // Half-width columns round by declaration (kleos fork).
+        (VecElementType::F16 | VecElementType::BF16, DataValue::Num(_)) => Ok(()),
         (VecElementType::F64, DataValue::Num(Num::Float(_))) => Ok(()),
         (VecElementType::F64, DataValue::Num(Num::Int(value))) => {
             if (*value as f64) as i128 == *value as i128 {

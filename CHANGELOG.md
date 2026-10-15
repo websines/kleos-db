@@ -175,6 +175,40 @@ to kleos.
 
 ### Added
 
+- Half-width vector column types `<F16; N>` and `<BF16; N>` (also inside lists,
+  e.g. `[<F16; 1536>]`). Values are rounded to the declared precision on write,
+  stored 2 bytes per element (half the size of `<F32; N>`; new storage tags 2/3 in
+  the vector encoding, so existing F32/F64 rows are byte-identical and still
+  readable), and read back as F32 vectors, so every vector function, `vec()`,
+  `rand_vec()` (`'F16'`/`'BF16'` type argument), JSON output and HNSW work on them
+  unchanged. HNSW indexes over such columns use `dtype: F16` / `dtype: BF16`. On the
+  100K x 1536 DBpedia/OpenAI set the f16 rounding loses no recall@10 (0.9994
+  before exact rescoring, 1.0 after). Half-width compaction applies to non-key
+  columns; key columns keep the F32 key encoding.
+- Quantized HNSW traversal: `::hnsw create ... { ..., quantize: turbo4 }` (also
+  `binary`, `turbo2`, `turbo8`; default `none`), with optional `rescore: <n>`. The
+  index keeps one compact TurboQuant-style code per vector (seeded two-round
+  permuted block-Hadamard rotation, Lloyd-Max scalar codebook, length
+  renormalisation; 1536-d `turbo4` = 776 bytes vs 6,144 for F32) in the index
+  relation at layer 2. Search estimates distances from codes instead of fetching
+  full base rows per hop, then rescores the best `k * rescore` candidates exactly
+  (default 4 for `turbo2`/`turbo4`, 8 for `binary`, 2 for `turbo8`; all `ef`
+  candidates when a search filter is present), so returned distances are exact.
+  Codes are maintained by `:put`/`:rm`/import, orphan repair, `::reindex` and the
+  parallel bulk build; graph construction always uses exact distances. Indexes
+  created without `quantize` are unchanged and store no codes; manifests written
+  before this change load as unquantized. `::indices` reports `quantize` and
+  `rescore`. Measured on 99.5K x 1536 DBpedia/OpenAI vectors (cosine, `m: 16`,
+  one query at a time): SQLite store, `ef: 64`, `turbo4` 21.1 vs 25.5 ms CPU and
+  53 vs 67 ms p50 per query at equal recall@10 (0.975 vs 0.973), for +113 MiB of
+  codes; in-memory store (30K), 4.2 vs 5.6 ms. In a brute-force codec comparison
+  `turbo4` reaches recall@10 0.969 from codes alone and 1.0 after rescoring 2x;
+  dense random, Clifford-rotor, quaternion and Givens rotations gave the same
+  recall on this data, but the block rotations fell to 0.81 when coordinate energy
+  is importance-ordered (matryoshka-style), so the Hadamard rotation is used; a
+  1-bit QJL residual was worse than the plain codes at equal size. Design follows
+  turbovec (MIT; see `NOTICE.md`). Tests:
+  `tests/hnsw_quantized.rs`; benchmark: `examples/hnsw_quant_bench.rs`.
 - A `cargo-fuzz` harness in `kleos-core/fuzz/`. The `run_script` target runs arbitrary
   CozoScript against an in-memory database built without network access or
   file-backed engines, under the engine's own query time and memory budgets.
@@ -188,6 +222,11 @@ to kleos.
   (`x * 2.0`) for arithmetic that may exceed the range.
 - **BREAKING (parse): Block comments nest like Rust's.** A comment that relied on `/*/`
   closing it after an unclosed nested `/*` (`/* a /*/`) is now a parse error.
+- Reading a stored row no longer formats its key for an error message on every
+  decode. The label (a `Debug` dump of the key tuple, or a hex dump of the key bytes
+  for value-only reads such as HNSW self rows) was built eagerly and discarded on
+  success; it is now built only when decoding fails. Exact HNSW search on the
+  in-memory store went from 15.0 to 5.6 ms of CPU per query (30K x 1536, `ef: 64`).
 - `ROADMAP.md` rewritten for kleos: agent-memory north star, a hardening phase first, and the
   inherited mnestic backlog as unscheduled candidates. mnestic's 0.19 plan is marked as an
   inherited record.

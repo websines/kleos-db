@@ -3937,6 +3937,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                     "level_multiplier": manifest.level_multiplier,
                     "extend_candidates": manifest.extend_candidates,
                     "keep_pruned_connections": manifest.keep_pruned_connections,
+                    "quantize": manifest.quantize.name(),
+                    "rescore": manifest.rescore,
                 }),
             ]);
         }

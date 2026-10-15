@@ -124,6 +124,7 @@ pub use storage::{Storage, StoreTx};
 pub use crate::data::expr::{Expr, Op};
 use crate::data::json::JsonValue;
 pub use crate::data::relation::VecElementType;
+pub use crate::runtime::vec_quant::VecQuant;
 pub use crate::data::symb::Symbol;
 pub use crate::data::value::{JsonData, Vector};
 pub use crate::fixed_rule::SimpleFixedRule;

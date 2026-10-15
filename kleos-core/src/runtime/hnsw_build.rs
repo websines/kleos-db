@@ -186,9 +186,9 @@ impl FlatHnswBuilder {
             ef_construction: manifest.ef_construction,
             extend_candidates: manifest.extend_candidates,
             keep_pruned_connections: manifest.keep_pruned_connections,
-            slab: match manifest.dtype {
-                VecElementType::F32 => VecSlab::F32(vec![]),
+            slab: match manifest.dtype.in_memory() {
                 VecElementType::F64 => VecSlab::F64(vec![]),
+                _ => VecSlab::F32(vec![]),
             },
             norms_sq: vec![],
             levels: vec![],

@@ -144,11 +144,8 @@ fn parse_type_inner(pair: Pair<'_>) -> Result<ColType> {
         }
         Rule::vec_type => {
             let mut inner = pair.into_inner();
-            let eltype = match inner.next().unwrap().as_str() {
-                "F32" | "Float" => VecElementType::F32,
-                "F64" | "Double" => VecElementType::F64,
-                _ => unreachable!(),
-            };
+            let eltype = VecElementType::from_name(inner.next().unwrap().as_str())
+                .unwrap_or_else(|| unreachable!());
             let len = inner.next().unwrap();
             let len = len
                 .as_str()
