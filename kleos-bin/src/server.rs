@@ -40,7 +40,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use kleos::{
     format_error_as_json, DataValue, DbInstance, MultiTransaction, NamedRows, ScriptMutability,
-    ScriptRunOptions, SimpleFixedRule,
+    ScriptRunOptions, SimpleFixedRule, SubscribeOptions, SubscriptionEvent,
 };
 
 #[derive(Args, Debug)]
@@ -548,6 +548,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .route("/backup", post(backup))
         .route("/import-from-backup", post(import_from_backup))
         .route("/changes/:relation", get(observe_changes))
+        .route("/subscribe", get(subscribe_query))
         .route("/rules/:name", get(register_rule))
         .route(
             "/rule-result/:id",
@@ -1154,6 +1155,80 @@ async fn observe_changes(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[derive(serde_derive::Deserialize)]
+struct SubscribeParams {
+    script: String,
+    /// JSON object of query parameters, e.g. `{"min": 2}`.
+    params: Option<String>,
+    /// Per-subscriber queue capacity (events); default 64.
+    queue: Option<usize>,
+}
+
+/// Live query subscription over server-sent events (UPGRADE_PLAN F1;
+/// `docs/specs/live-subscriptions.md`). `GET /subscribe?script=...&params=...`
+/// streams `initial`, then `delta` / `resync` / `error` events as JSON. The
+/// subscription ends when the client disconnects.
+async fn subscribe_query(
+    State(st): State<DbState>,
+    Query(q): Query<SubscribeParams>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let params: BTreeMap<String, DataValue> = match q.params.as_deref() {
+        None | Some("") => BTreeMap::new(),
+        Some(p) => match serde_json::from_str::<BTreeMap<String, serde_json::Value>>(p) {
+            Ok(m) => m.into_iter().map(|(k, v)| (k, DataValue::from(v))).collect(),
+            Err(e) => {
+                return wrap_json(json!({"ok": false, "message": format!("bad params: {e}")}))
+                    .into_response()
+            }
+        },
+    };
+    let opts = SubscribeOptions {
+        queue_capacity: q.queue.unwrap_or(SubscribeOptions::default().queue_capacity),
+    };
+    let db = st.db.clone();
+    let script = q.script.clone();
+    let sub = match spawn_blocking(move || db.subscribe(&script, params, opts)).await {
+        Ok(Ok(sub)) => sub,
+        Ok(Err(err)) => {
+            return wrap_json(format_error_as_json(err, Some(&q.script))).into_response()
+        }
+        Err(err) => return internal_error(err).into_response(),
+    };
+    let id = sub.id();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<SubscriptionEvent>(16);
+    spawn_blocking(move || {
+        // Poll so a disconnected client releases its subscription even when
+        // no event is coming.
+        while !sender.is_closed() {
+            if let Some(ev) = sub.recv_timeout(Duration::from_secs(1)) {
+                if sender.blocking_send(ev).is_err() {
+                    break;
+                }
+            }
+        }
+        info!("subscription SSE {id} closed");
+    });
+    let stream = async_stream::stream! {
+        info!("starting subscription SSE {id}");
+        while let Some(ev) = receiver.recv().await {
+            let (name, item) = match ev {
+                SubscriptionEvent::Initial { rows } => ("initial", json!({"rows": (*rows).clone().into_json()})),
+                SubscriptionEvent::Delta { added, removed } => ("delta", json!({
+                    "added": (*added).clone().into_json(),
+                    "removed": (*removed).clone().into_json(),
+                })),
+                SubscriptionEvent::Resync { rows } => ("resync", json!({"rows": (*rows).clone().into_json()})),
+                SubscriptionEvent::Error { message } => ("error", json!({"message": message})),
+            };
+            yield Ok::<_, Infallible>(Event::default().event(name).json_data(item).unwrap());
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn root() -> Html<&'static str> {

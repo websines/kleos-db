@@ -532,7 +532,7 @@ impl LiveHub {
                 }
                 st.errored = true;
                 SubscriptionEvent::Error {
-                    message: format!("{err:?}"),
+                    message: err.to_string(),
                 }
             }
         };
