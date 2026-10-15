@@ -818,6 +818,73 @@ impl CozoDbPy {
         let db = self.db_ref()?;
         Ok(db.unregister_reranker(name))
     }
+    /// Live query subscription (kleos, UPGRADE_PLAN F1;
+    /// `docs/specs/live-subscriptions.md`). `callback(event: dict)` runs on a
+    /// background thread for every event: `{"kind": "initial" | "resync",
+    /// "headers", "rows"}`, `{"kind": "delta", "headers", "added", "removed"}`
+    /// or `{"kind": "error", "message"}`. Returns an id for `unsubscribe`.
+    #[pyo3(signature = (query, params, callback, queue=None))]
+    pub fn subscribe(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        params: &PyDict,
+        callback: &PyAny,
+        queue: Option<usize>,
+    ) -> PyResult<u64> {
+        let db = self.db_ref()?;
+        let params = convert_params(params)?;
+        let opts = SubscribeOptions {
+            queue_capacity: queue.unwrap_or(SubscribeOptions::default().queue_capacity),
+        };
+        let sub = py
+            .allow_threads(|| db.subscribe(query, params, opts))
+            .map_err(report2py)?;
+        let id = sub.id();
+        let cb: Py<PyAny> = callback.into();
+        std::thread::spawn(move || {
+            while let Some(ev) = sub.recv() {
+                Python::with_gil(|py| {
+                    let rows_ev = |kind: &str, rows: &NamedRows| -> PyObject {
+                        BTreeMap::from([
+                            ("kind", kind.into_py(py)),
+                            ("headers", rows.headers.clone().into_py(py)),
+                            ("rows", rows_to_py_rows(rows.rows.clone(), py)),
+                        ])
+                        .into_py(py)
+                    };
+                    let event: PyObject = match ev {
+                        SubscriptionEvent::Initial { rows } => rows_ev("initial", &rows),
+                        SubscriptionEvent::Resync { rows } => rows_ev("resync", &rows),
+                        SubscriptionEvent::Delta { added, removed } => BTreeMap::from([
+                            ("kind", "delta".into_py(py)),
+                            ("headers", added.headers.clone().into_py(py)),
+                            ("added", rows_to_py_rows(added.rows.clone(), py)),
+                            ("removed", rows_to_py_rows(removed.rows.clone(), py)),
+                        ])
+                        .into_py(py),
+                        SubscriptionEvent::Error { message } => BTreeMap::from([
+                            ("kind", "error".into_py(py)),
+                            ("message", message.into_py(py)),
+                        ])
+                        .into_py(py),
+                    };
+                    if let Err(err) = cb.as_ref(py).call1((event,)) {
+                        eprintln!("{}", err);
+                    }
+                })
+            }
+        });
+        Ok(id)
+    }
+    /// End a subscription made with `subscribe`. Returns whether it existed.
+    pub fn unsubscribe(&self, id: u64) -> bool {
+        let maybe_db = self.db.read().unwrap().clone();
+        match maybe_db {
+            Some(db) => db.unsubscribe(id),
+            None => false,
+        }
+    }
     pub fn unregister_callback(&self, id: u32) -> bool {
         // Preserve the pre-fork behavior: a closed handle returns `false`,
         // not an error. Clone out of a momentary guard, drop it, then call.

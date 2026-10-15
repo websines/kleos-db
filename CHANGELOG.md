@@ -61,6 +61,27 @@ to kleos.
   re-ranker scores about 0.69 on top of every first stage, so it helps BM25
   only. That matches its published SciFact score; a re-ranker is only worth
   using if it beats the first stage on your data.
+- Live query subscriptions (UPGRADE_PLAN F1). `db.subscribe("?[k, v] := *kv{k, v},
+  k >= $min", params, SubscribeOptions::default())` returns a `Subscription` that
+  yields `Initial { rows }`, then `Delta { added, removed }` whenever a committed
+  transaction changes the result. The query is re-evaluated only when a commit writes a
+  relation it read: dependencies are recorded while it runs, so rules, fixed-rule
+  inputs, HNSW/FTS/LSH searches (their base relation) and stored queries all count.
+  Identical `(script, params)` subscriptions share one evaluation. Nothing is delivered
+  for aborted, failed or rolled-back transactions. Re-evaluation runs on one background
+  worker per `Db`, never on the writer's thread; commits that land while it is busy are
+  coalesced, and a subscriber whose bounded queue (`queue_capacity`, default 64) fills
+  up gets one `Resync { rows }` instead of the deltas it missed. Only single read-only
+  queries can be subscribed. `'NOW'` is read at each re-evaluation, so a result that
+  changes only because time passes is not pushed until some write triggers it.
+  Re-evaluation is a full query run, not incremental (that is F2): on `mem`, 1000
+  point-lookup subscriptions on other relations left single-writer throughput unchanged
+  (about 31k txns/s), while subscriptions on the written relation halved it (about 14k)
+  and delivery took 18 ms p50 at 1000 of them (0.4 ms at 10). Also `Db::unsubscribe(id)`,
+  `Db::live_stats()`, `DbInstance` dispatch, Python `db.subscribe(query, params,
+  callback)`, and server-sent events at `GET /subscribe?script=…&params=…` in
+  `kleos-bin`. Spec: `docs/specs/live-subscriptions.md`; tests:
+  `kleos-core/tests/live_subscriptions.rs`; benchmark: `examples/livebench.rs`.
 
 - Text embeddings inside the database (UPGRADE_PLAN D3). `embed('model', text)`
   returns an F32 vector from an embedder registered with
@@ -94,6 +115,12 @@ to kleos.
   4,000 documents/s on the CPU, 100 MB).
 
 ### Fixed
+
+- sqlite: a write could fail with `database is locked (code 5)` while another thread
+  was reading. A read that found a row left its cached statement holding a SHARED lock
+  on the file, and the statements were finalized only after the in-process lock was
+  released. `SqliteTx` now finalizes them first. Found by the live-subscription
+  benchmark, where the worker reads right after every commit.
 
 - `int_range` and `rand_vec` can no longer exhaust memory (found by fuzzing). A zero
   step (`int_range(30, 3, 0)`) looped forever, allocating until the process was killed;

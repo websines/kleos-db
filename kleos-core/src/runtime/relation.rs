@@ -1154,6 +1154,13 @@ impl<'a> SessionTx<'a> {
                 .ok_or_else(|| StoredRelationNotFoundError(name.to_string()))?
         };
         let metadata = RelationHandle::decode(&found)?;
+        if let Some(log) = &self.read_log {
+            if !metadata.is_temp {
+                log.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(metadata.name.clone(), metadata.id);
+            }
+        }
         Ok(metadata)
     }
     pub(crate) fn describe_relation(&mut self, name: &str, description: &str) -> Result<()> {
