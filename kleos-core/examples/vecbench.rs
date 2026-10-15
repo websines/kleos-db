@@ -75,6 +75,7 @@ struct Args {
     out: Option<PathBuf>,
     reuse_db: bool,
     variants: Vec<String>,
+    snapshot: bool,
 }
 
 fn usage() -> ! {
@@ -83,7 +84,12 @@ fn usage() -> ! {
          \x20               [--ef 32,64,..] [--m M] [--ef-construction E] [--backend mem|sqlite]\n\
          \x20               [--filter-selectivity 1.0,0.1,..] [--metric cosine|l2]\n\
          \x20               [--threads T] [--index-opts 'extra: opts'] [--label TEXT]\n\
-         \x20               [--out FILE.md] [--reuse-db] [--variants 'K=V K2=V;K=W']\n\
+         \x20               [--out FILE.md] [--reuse-db] [--snapshot]\n\
+         \x20               [--variants 'K=V K2=V;K=W']\n\
+         \n\
+         --snapshot (mem backend) saves the built database as an sqlite backup under\n\
+         --data-dir and restores it on later runs with the same build parameters\n\
+         (`--index-opts` is part of the key) instead of rebuilding the index.\n\
          \n\
          --variants repeats the whole query sweep once per `;`-separated variant,\n\
          setting that variant's space-separated KEY=VALUE environment variables\n\
@@ -120,6 +126,7 @@ fn parse_args() -> Args {
         out: None,
         reuse_db: false,
         variants: vec![],
+        snapshot: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -147,6 +154,7 @@ fn parse_args() -> Args {
             "--label" => a.label = val(),
             "--out" => a.out = Some(val().into()),
             "--reuse-db" => a.reuse_db = true,
+            "--snapshot" => a.snapshot = true,
             "--variants" => {
                 a.variants = val()
                     .split(';')
@@ -389,7 +397,34 @@ fn main() {
     let db = DbInstance::new(&a.backend, &db_path, "").expect("open db");
     let mut insert_time = Duration::ZERO;
     let mut build_time = Duration::ZERO;
-    if !reuse {
+    let snap_key = format!(
+        "snap_{}_n{n}_m{}_efc{}_{}_{:016x}",
+        a.npy.file_stem().unwrap().to_string_lossy(),
+        a.m,
+        a.ef_construction,
+        a.metric.name(),
+        // cheap stable hash of the extra index options
+        a.index_opts
+            .bytes()
+            .fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+    );
+    let snap_path = a.data_dir.join(format!("{snap_key}.sqlite"));
+    let snap_meta = a.data_dir.join(format!("{snap_key}.build"));
+    let restored = a.snapshot && a.backend == "mem" && snap_path.exists();
+    if restored {
+        let t = Instant::now();
+        db.restore_backup(&snap_path).expect("restore snapshot");
+        if let Ok(meta) = fs::read_to_string(&snap_meta) {
+            let mut it = meta.split_whitespace().map(|x| x.parse::<f64>().unwrap_or(0.0));
+            insert_time = Duration::from_secs_f64(it.next().unwrap_or(0.0));
+            build_time = Duration::from_secs_f64(it.next().unwrap_or(0.0));
+        }
+        eprintln!(
+            "restored snapshot {snap_path:?} in {:.1}s (build time from the original build)",
+            t.elapsed().as_secs_f64()
+        );
+    }
+    if !reuse && !restored {
         db.run_script(
             &format!(":create vecs {{ id: Int => bucket: Int, emb: <F32; {dim}> }}"),
             BTreeMap::new(),
@@ -440,6 +475,15 @@ fn main() {
             insert_time.as_secs_f64(),
             build_time.as_secs_f64()
         );
+        if a.snapshot && a.backend == "mem" {
+            let _ = fs::remove_file(&snap_path);
+            db.backup_db(&snap_path).expect("save snapshot");
+            fs::write(
+                &snap_meta,
+                format!("{} {}", insert_time.as_secs_f64(), build_time.as_secs_f64()),
+            )
+            .unwrap();
+        }
     }
     let disk = if a.backend == "sqlite" {
         format!("{:.1} MiB", dir_size(&db_path) as f64 / (1024.0 * 1024.0))
