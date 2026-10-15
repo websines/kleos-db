@@ -261,8 +261,11 @@ fn quantized_search_recall_and_exact_distances() {
                 err < 1e-4,
                 "{dist} {quant}: returned distances must be exact (rel err {err})"
             );
+            // 1-bit codes are coarse at this low dimension (48, padded to 64);
+            // the multi-bit codes track the exact index closely.
+            let slack = if quant == "binary" { 0.12 } else { 0.05 };
             assert!(
-                recall >= base_recall - 0.05,
+                recall >= base_recall - slack,
                 "{dist} {quant}: recall {recall} vs unquantized {base_recall}"
             );
         }

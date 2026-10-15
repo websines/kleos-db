@@ -91,6 +91,31 @@ to kleos.
 
 ### Added
 
+- Half-width vector column types `<F16; N>` and `<BF16; N>` (also inside lists,
+  e.g. `[<F16; 1536>]`). Values are rounded to the declared precision on write,
+  stored 2 bytes per element (half the size of `<F32; N>`; new storage tags 2/3 in
+  the vector encoding, so existing F32/F64 rows are byte-identical and still
+  readable), and read back as F32 vectors, so every vector function, `vec()`,
+  `rand_vec()` (`'F16'`/`'BF16'` type argument), JSON output and HNSW work on them
+  unchanged. HNSW indexes over such columns use `dtype: F16` / `dtype: BF16`. On the
+  100K x 1536 DBpedia/OpenAI set the f16 rounding loses no recall@10 (0.9994
+  before exact rescoring, 1.0 after). Half-width compaction applies to non-key
+  columns; key columns keep the F32 key encoding.
+- Quantized HNSW traversal: `::hnsw create ... { ..., quantize: turbo4 }` (also
+  `binary`, `turbo2`, `turbo8`; default `none`), with optional `rescore: <n>`. The
+  index keeps one compact TurboQuant-style code per vector (seeded two-round
+  permuted block-Hadamard rotation, Lloyd-Max scalar codebook, length
+  renormalisation; 1536-d `turbo4` = 776 bytes vs 6,144 for F32) in the index
+  relation at layer 2. Search estimates distances from codes instead of fetching
+  full base rows per hop, then rescores the best `k * rescore` candidates exactly
+  (default 4 for `turbo2`/`turbo4`, 8 for `binary`, 2 for `turbo8`; all `ef`
+  candidates when a search filter is present), so returned distances are exact.
+  Codes are maintained by `:put`/`:rm`/import, orphan repair, `::reindex` and the
+  parallel bulk build; graph construction always uses exact distances. Indexes
+  created without `quantize` are unchanged and store no codes; manifests written
+  before this change load as unquantized. `::indices` reports `quantize` and
+  `rescore`. Design follows turbovec (MIT; see `NOTICE.md`). Tests:
+  `tests/hnsw_quantized.rs`; benchmark: `examples/hnsw_quant_bench.rs`.
 - A `cargo-fuzz` harness in `kleos-core/fuzz/`. The `run_script` target runs arbitrary
   CozoScript against an in-memory database built without network access or
   file-backed engines, under the engine's own query time and memory budgets.
