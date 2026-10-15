@@ -119,8 +119,21 @@ to kleos.
   prefix loses 0.006. int8 is the default: lowest load peak (1.1 GB vs 2.8 GB for
   f32) at equal quality. potion-base-8M is the near-free fallback (0.506, about
   4,000 documents/s on the CPU, 100 MB).
+- Python: `kleos.register_embedder(name, fn, dim, max_batch=32, model_id=None)`,
+  `kleos.unregister_embedder(name)` and `kleos.registered_embedders()`. `fn(texts)`
+  returns one `dim`-wide vector per text; the embedder then works in `embed()` and
+  computed columns like a Rust one. The registry is process-wide, so these are module
+  functions, not `CozoDbPy` methods. Tests: `kleos-lib-python/tests/test_wave1.py`.
 
 ### Fixed
+
+- Python: `register_callback` no longer hangs queries. Each callback's delivery loop
+  ran on a rayon worker and kept it for the callback's lifetime, so once a process had
+  as many callbacks as CPU cores, every query that uses rayon (`PageRank` and the other
+  graph algorithms) waited forever for a worker. Each callback now gets its own thread.
+- Python: `close()` now ends the handle's live subscriptions. Before, they kept running
+  after `close()`, holding their callbacks, a delivery thread, the engine's live worker
+  and the database itself, and `unsubscribe` on a closed handle could not stop them.
 
 - HNSW search with a `filter` now returns `k` rows whenever at least `k` indexed rows
   match. The filter used to run after the bottom layer had collected `ef` candidates,

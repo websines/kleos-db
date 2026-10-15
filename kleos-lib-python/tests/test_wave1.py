@@ -475,6 +475,62 @@ def test_unsubscribe_and_close(data_dir):
         db.subscribe("?[k] := *kv{k}", {}, c)
 
 
+def test_close_ends_subscriptions(data_dir):
+    """close() unsubscribes: the delivery thread exits and drops the callback."""
+    import gc
+    import weakref
+
+    db = CozoDbPy("sqlite", str(data_dir / "close2.db"), "{}")
+    run(db, ":create kv {k: Int => v: Int}")
+
+    class Cb:
+        def __init__(self):
+            self.n = 0
+
+        def __call__(self, ev):
+            self.n += 1
+
+    cb = Cb()
+    ref = weakref.ref(cb)
+    db.subscribe("?[k] := *kv{k}", {}, cb)
+    assert wait_for(lambda: cb.n >= 1)
+    del cb
+    assert db.close()
+
+    def released():
+        gc.collect()
+        # pyo3 releases a Py handle dropped off-GIL at the next GIL acquisition
+        rows(CozoDbPy("mem", "", "{}"), "?[x] := x = 1")
+        return ref() is None
+
+    assert wait_for(released, 5), "subscription survived close()"
+
+
+def test_many_register_callbacks_do_not_starve_rayon(db):
+    """register_callback used to park one rayon worker per callback forever."""
+    run(db, ":create e {a: Int, b: Int}")
+    got = []
+    ids_ = [
+        db.register_callback("e", lambda op, new, old: got.append((op, new)))
+        for _ in range((os.cpu_count() or 8) * 2 + 2)
+    ]
+    run(db, "?[a, b] <- [[1, 2], [2, 3], [3, 1]] :put e {a, b}")
+    res = {}
+
+    def q():
+        res["r"] = rows(db, "?[n, r] <~ PageRank(*e[])")
+
+    t = threading.Thread(target=q, daemon=True)
+    t.start()
+    t.join(30)
+    assert not t.is_alive(), "rayon-using query hung"
+    assert len(res["r"]) == 3
+    assert wait_for(lambda: len(got) >= len(ids_))
+    assert got[0][0] == "Put"
+    for i in ids_:
+        assert db.unregister_callback(i)
+
+
 # --------------------------------------------------------------------------
 # 4. supersession and provenance via scripts
 # --------------------------------------------------------------------------
@@ -824,3 +880,48 @@ def test_embed_function_and_computed_column(db):
         assert not kleos.unregister_embedder(name)
     with pytest.raises(Exception):
         rows(db, f"?[v] := v = embed('{name}', 'new text')")
+
+
+@needs_embedder
+def test_embed_hnsw_and_threads(db):
+    name = "py_hnsw_" + uuid.uuid4().hex[:6]
+    kleos.register_embedder(name, toy_embed, 4, max_batch=3)
+    try:
+        run(
+            db,
+            f":create mem {{ id: Int => text: String, vec: <F32; 4> default embed('{name}', text) }}",
+        )
+        run(
+            db,
+            "::hnsw create mem:v { dim: 4, m: 8, dtype: F32, fields: [vec], distance: L2, ef_construction: 16 }",
+        )
+        texts = ["aaaa", "bbbb", "cccc", "dddd", "abab", "cdcd"]
+        run(db, "?[id, text] <- $rows :put mem {id => text}", {"rows": list(enumerate(texts))})
+        r = rows(
+            db,
+            f"?[id] := ~mem:v{{ id | query: embed('{name}', 'bbbb'), k: 1, ef: 16 }}",
+        )
+        assert r == [[1]]
+        # embed() from several Python threads at once (GIL re-acquired inside
+        # GIL-released queries)
+        errs = []
+
+        def worker(j):
+            try:
+                for i in range(10):
+                    v = rows(db, f"?[v] := v = embed('{name}', $t)", {"t": f"t{j}-{i}"})[0][0]
+                    assert v == toy_embed([f"t{j}-{i}"])[0]
+            except Exception as e:  # pragma: no cover
+                errs.append(e)
+
+        ts = [threading.Thread(target=worker, args=(j,)) for j in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(60)
+        assert not any(t.is_alive() for t in ts), "deadlock"
+        assert not errs, errs
+        # module-level eval_expressions keeps the GIL; embed() must still work
+        assert kleos.eval_expressions(f"embed('{name}', 'ab')", {}, {}) == toy_embed(["ab"])[0]
+    finally:
+        kleos.unregister_embedder(name)
