@@ -547,7 +547,13 @@ fn removed_relation_reports_an_error_then_resyncs() {
         // the re-created relation (a new id) on its first write.
         run(&db, ":create kv {k: Int => v: String}");
         run(&db, "?[k, v] <- [[42, 'x']] :put kv {k => v}");
+        // The `:create` commit may or may not get its own evaluation before
+        // the `:put` lands (coalescing): either Resync [] then a delta, or
+        // one Resync [42].
         match next(&s1) {
+            SubscriptionEvent::Resync { rows } if rows.rows.is_empty() => {
+                assert_eq!(delta(&s1), (t(&[&["42"]]), vec![]));
+            }
             SubscriptionEvent::Resync { rows } => assert_eq!(table(&rows), t(&[&["42"]])),
             e => panic!("expected Resync, got {e:?}"),
         }
