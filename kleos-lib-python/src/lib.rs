@@ -7,7 +7,7 @@
  */
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 #[cfg(feature = "columnar-io")]
 use std::time::Duration;
 
@@ -260,6 +260,38 @@ impl Reranker for PyReranker {
             let res = self.0.as_ref(py).call1(args).into_diagnostic()?;
             res.extract::<Vec<f32>>().into_diagnostic()
         })
+    }
+}
+
+/// A Python callable `(texts: list[str]) -> list[list[float]]` as a kleos
+/// `Embedder` (for `embed('name', text)` and computed columns).
+struct PyEmbedder {
+    callback: Py<PyAny>,
+    dim: usize,
+    max_batch: usize,
+    model_id: Option<String>,
+}
+
+impl ::kleos::embed::Embedder for PyEmbedder {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Python::with_gil(|py| -> Result<Vec<Vec<f32>>> {
+            let res = self
+                .callback
+                .as_ref(py)
+                .call1((PyList::new(py, texts),))
+                .map_err(|e| miette::miette!("Python embedder raised: {e}"))?;
+            res.extract::<Vec<Vec<f32>>>()
+                .map_err(|e| miette::miette!("Python embedder must return list[list[float]]: {e}"))
+        })
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn model_id(&self) -> Option<String> {
+        self.model_id.clone()
+    }
+    fn max_batch(&self) -> usize {
+        self.max_batch
     }
 }
 
@@ -572,6 +604,11 @@ fn named_rows_to_py(named_rows: NamedRows, py: Python<'_>) -> PyObject {
 #[pyclass]
 struct CozoDbPy {
     db: RwLock<Option<DbInstance>>,
+    /// Ids of live subscriptions made through this handle, so `close` can end
+    /// them. Without this a closed handle left every subscription running
+    /// (its delivery thread, the engine's live worker and the `Db` it holds)
+    /// with no way to stop it: `unsubscribe` on a closed handle is a no-op.
+    subs: Mutex<BTreeSet<u64>>,
 }
 
 #[pyclass]
@@ -602,6 +639,7 @@ impl CozoDbPy {
         match DbInstance::new(engine, path, options) {
             Ok(db) => Ok(Self {
                 db: RwLock::new(Some(db)),
+                subs: Mutex::new(BTreeSet::new()),
             }),
             Err(err) => Err(PyException::new_err(format!("{err:?}"))),
         }
@@ -766,7 +804,11 @@ impl CozoDbPy {
         let db = self.db_ref()?;
         let cb: Py<PyAny> = callback.into();
         let (id, ch) = db.register_callback(rel, None);
-        rayon::spawn(move || {
+        // A dedicated thread, not `rayon::spawn`: this loop blocks for the
+        // callback's whole lifetime, and parking it on a rayon worker took that
+        // worker from the global pool. With as many callbacks as cores, every
+        // query that uses rayon (graph algorithms, parallel evaluation) hung.
+        std::thread::spawn(move || {
             for (op, new, old) in ch {
                 Python::with_gil(|py| {
                     let op = PyString::new(py, op.as_str()).into();
@@ -841,6 +883,7 @@ impl CozoDbPy {
             .allow_threads(|| db.subscribe(query, params, opts))
             .map_err(report2py)?;
         let id = sub.id();
+        self.subs.lock().unwrap().insert(id);
         let cb: Py<PyAny> = callback.into();
         std::thread::spawn(move || {
             while let Some(ev) = sub.recv() {
@@ -879,6 +922,7 @@ impl CozoDbPy {
     }
     /// End a subscription made with `subscribe`. Returns whether it existed.
     pub fn unsubscribe(&self, id: u64) -> bool {
+        self.subs.lock().unwrap().remove(&id);
         let maybe_db = self.db.read().unwrap().clone();
         match maybe_db {
             Some(db) => db.unsubscribe(id),
@@ -1049,8 +1093,18 @@ impl CozoDbPy {
     /// PyCell borrow — the "Already borrowed" bug. Returns immediately even while
     /// queries run; the underlying storage drops when the last in-flight
     /// `DbInstance` clone is dropped.
+    ///
+    /// Live subscriptions made through this handle are ended first, so their
+    /// delivery threads exit and release their callbacks.
     pub fn close(&self) -> bool {
-        self.db.write().unwrap().take().is_some()
+        let Some(db) = self.db.write().unwrap().take() else {
+            return false;
+        };
+        let subs = std::mem::take(&mut *self.subs.lock().unwrap());
+        for id in subs {
+            db.unsubscribe(id);
+        }
+        true
     }
     pub fn multi_transact(&self, write: bool) -> PyResult<CozoDbMulTx> {
         let db = self.db_ref()?;
@@ -1126,11 +1180,59 @@ fn variables(py: Python<'_>, query: &str, params: &PyDict) -> PyResult<BTreeSet<
     }
 }
 
+/// Register a Python embedder (kleos fork): `callback(texts: list[str]) ->
+/// list[list[float]]`, one `dim`-wide vector per text, in order. Callable from
+/// CozoScript as `embed(name, text)` and usable in computed columns
+/// (`vec: <F32; dim> default embed(name, text)`). The registry is
+/// process-wide (shared by every open database). `max_batch` caps the texts per
+/// call; `model_id`, if given, is the embedding-cache identity (vectors cached
+/// under it are reused across re-registrations), otherwise each registration
+/// gets a fresh cache identity. Replaces an embedder already registered under
+/// `name`.
+#[pyfunction]
+#[pyo3(signature = (name, callback, dim, max_batch=32, model_id=None))]
+#[pyo3(name = "register_embedder")]
+fn py_register_embedder(
+    name: &str,
+    callback: &PyAny,
+    dim: usize,
+    max_batch: usize,
+    model_id: Option<String>,
+) -> PyResult<()> {
+    if !callback.is_callable() {
+        return Err(PyException::new_err("register_embedder: callback is not callable"));
+    }
+    let e = PyEmbedder {
+        callback: callback.into(),
+        dim,
+        max_batch: max_batch.max(1),
+        model_id,
+    };
+    ::kleos::embed::register_embedder(name, std::sync::Arc::new(e)).map_err(report2py)
+}
+
+/// Remove an embedder registered under `name`; returns whether one existed.
+#[pyfunction]
+#[pyo3(name = "unregister_embedder")]
+fn py_unregister_embedder(name: &str) -> bool {
+    ::kleos::embed::unregister_embedder(name)
+}
+
+/// `[(name, dim)]` of every registered embedder (Python and built-in).
+#[pyfunction]
+#[pyo3(name = "registered_embedders")]
+fn py_registered_embedders() -> Vec<(String, usize)> {
+    ::kleos::embed::registered_embedders()
+}
+
 #[pymodule]
 fn kleos(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<CozoDbPy>()?;
     m.add_class::<CozoDbMulTx>()?;
     m.add_function(wrap_pyfunction!(eval_expressions, m)?)?;
     m.add_function(wrap_pyfunction!(variables, m)?)?;
+    m.add_function(wrap_pyfunction!(py_register_embedder, m)?)?;
+    m.add_function(wrap_pyfunction!(py_unregister_embedder, m)?)?;
+    m.add_function(wrap_pyfunction!(py_registered_embedders, m)?)?;
     Ok(())
 }
