@@ -100,6 +100,12 @@ pub struct SessionTx<'a> {
     /// through the storage commit, `Drop` reads this and balances the `inflight`
     /// increment — otherwise the sources would be denied cache hits forever.
     pub(crate) commit_inflight: bool,
+    /// Live-subscription hub (kleos, F1), shared with the `Db`. Told about
+    /// `dirty_relations` after every successful commit.
+    pub(crate) live: Arc<crate::runtime::live::LiveHub>,
+    /// Set only while evaluating a subscription query: records every stored
+    /// relation resolved by name, which is the query's dependency set.
+    pub(crate) read_log: Option<crate::runtime::live::ReadLog>,
 }
 
 /// One statement's worth of buffered writes to a tt-stamped relation.
@@ -297,6 +303,10 @@ impl<'a> SessionTx<'a> {
         self.projections.run_commit_fence(&self.dirty_relations);
         self.commit_inflight = false;
         self.projections.finish_commit(&self.dirty_relations);
+        // Live subscriptions (F1): only a commit that succeeded is announced.
+        if res.is_ok() {
+            self.live.notify_commit(&self.dirty_relations);
+        }
         self.dirty_relations.clear();
         res
     }

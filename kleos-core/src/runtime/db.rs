@@ -220,6 +220,10 @@ pub struct Db<S> {
     /// `SessionTx`, which captures a watermark off it before its storage
     /// transaction pins and reports its dirty relations back at commit.
     pub(crate) graph_projections: Arc<ProjectionCache>,
+    /// Live query subscriptions (kleos, UPGRADE_PLAN F1;
+    /// `runtime/live.rs`). Cloned into every `SessionTx`, whose commit
+    /// funnel reports successfully committed dirty relations to it.
+    pub(crate) live: Arc<crate::runtime::live::LiveHub>,
     /// Bounded ring of recent structured query warnings (kleos fork,
     /// `runtime/diagnostics.rs`): `(seq, warning)`, oldest dropped past
     /// [`WARNING_RING_CAP`]. Filled by `flush_warnings`, read by `::warnings`
@@ -451,6 +455,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             // to `AtomicBool::new(false)` to make the rewrite opt-in again.
             enable_factorize: Arc::new(AtomicBool::new(true)),
             graph_projections: Default::default(),
+            live: Default::default(),
             warnings: Default::default(),
             warning_seq: Default::default(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -818,7 +823,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// Returns the earliest (`min`) of whichever are set; `None` if neither is
     /// set, if the budget overflows `Instant`, or if the target has no monotonic
     /// clock (wasm).
-    fn effective_outer_deadline(&self, call_timeout: Option<f64>) -> Option<Instant> {
+    pub(crate) fn effective_outer_deadline(&self, call_timeout: Option<f64>) -> Option<Instant> {
         let start = budget_now()?;
         let mut deadline = call_timeout.and_then(|secs| deadline_from_secs(start, secs));
         let default_ms = self.default_query_timeout_ms.load(Ordering::Relaxed);
@@ -833,7 +838,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// The whole-script memory budget from the per-call option and the Db
     /// default (kleos fork, query memory budget): the minimum of whichever
     /// are set, `None` if neither is.
-    fn effective_outer_mem_limit(&self, call_limit: Option<usize>) -> Option<usize> {
+    pub(crate) fn effective_outer_mem_limit(&self, call_limit: Option<usize>) -> Option<usize> {
         let default = {
             let v = self.default_query_mem_limit.load(Ordering::Relaxed);
             if v == 0 {
@@ -2089,6 +2094,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             watermark,
             dirty_relations: Default::default(),
             commit_inflight: false,
+            live: self.live.clone(),
+            read_log: None,
         };
         Ok(ret)
     }
@@ -2114,6 +2121,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             watermark,
             dirty_relations: Default::default(),
             commit_inflight: false,
+            live: self.live.clone(),
+            read_log: None,
         };
         Ok(ret)
     }

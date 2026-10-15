@@ -93,6 +93,7 @@ pub use runtime::columnar::{ColumnarFileFormat, ColumnarImportOptions, ColumnarI
 pub use runtime::db::Db;
 pub use runtime::db::NamedRows;
 pub use runtime::diagnostics::QueryWarning;
+pub use runtime::live::{LiveStats, SubscribeOptions, Subscription, SubscriptionEvent};
 #[cfg(feature = "graph-algo")]
 pub use runtime::graph_projection::{
     GraphSource, GraphVariant, ProjectionVariant, VariantKey, VariantSpec,
@@ -940,6 +941,65 @@ impl DbInstance {
             DbInstance::Sled(db) => db.register_callback(relation, capacity),
             #[cfg(feature = "storage-tikv")]
             DbInstance::TiKv(db) => db.register_callback(relation, capacity),
+        }
+    }
+
+    /// Dispatcher method. See [crate::Db::subscribe].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn subscribe(
+        &self,
+        script: &str,
+        params: BTreeMap<String, DataValue>,
+        opts: SubscribeOptions,
+    ) -> Result<Subscription> {
+        match self {
+            DbInstance::Mem(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.subscribe(script, params, opts),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.subscribe(script, params, opts),
+        }
+    }
+
+    /// Dispatcher method. See [crate::Db::unsubscribe].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn unsubscribe(&self, id: u64) -> bool {
+        match self {
+            DbInstance::Mem(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.unsubscribe(id),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.unsubscribe(id),
+        }
+    }
+
+    /// Dispatcher method. See [crate::Db::live_stats].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn live_stats(&self) -> LiveStats {
+        match self {
+            DbInstance::Mem(db) => db.live_stats(),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.live_stats(),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.live_stats(),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.live_stats(),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.live_stats(),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.live_stats(),
         }
     }
 

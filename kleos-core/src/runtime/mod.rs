@@ -18,6 +18,7 @@ pub(crate) mod hnsw;
 pub(crate) mod hnsw_build;
 pub(crate) mod hybrid;
 pub(crate) mod imperative;
+pub(crate) mod live;
 pub(crate) mod memory;
 pub(crate) mod minhash_lsh;
 pub(crate) mod reindex;
