@@ -14,14 +14,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{DType, Device, Tensor, D};
 use serde::Deserialize;
 use tokenizers::{Tokenizer, TruncationParams};
 
 use crate::device::device_name;
 use crate::error::tok_err;
-use crate::linear::{Embedding, Linear, Loader};
+use crate::linear::{Embedding, Linear, Loader, TensorFile};
 use crate::{hub, l2_normalize, EngineConfig, Error, Result, TextEmbedder};
 
 /// Prompt EmbeddingGemma expects in front of search queries.
@@ -157,11 +156,9 @@ impl GemmaModel {
             }))
             .map_err(tok_err)?;
         tokenizer.with_padding(None);
-        // SAFETY: the files are memory-mapped read-only; the HF cache is not
-        // modified while we hold them.
-        let st = unsafe { MmapedSafetensors::new(hub::resolve_hf_file(&self.repo, "model.safetensors")?)? };
-        let d1 = unsafe { MmapedSafetensors::new(hub::resolve_hf_file(&self.repo, "2_Dense/model.safetensors")?)? };
-        let d2 = unsafe { MmapedSafetensors::new(hub::resolve_hf_file(&self.repo, "3_Dense/model.safetensors")?)? };
+        let st = TensorFile::open(&hub::resolve_hf_file(&self.repo, "model.safetensors")?)?;
+        let d1 = TensorFile::open(&hub::resolve_hf_file(&self.repo, "2_Dense/model.safetensors")?)?;
+        let d2 = TensorFile::open(&hub::resolve_hf_file(&self.repo, "3_Dense/model.safetensors")?)?;
         let mut ld = Loader {
             st: &st,
             device: &device,
