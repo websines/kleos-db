@@ -65,6 +65,11 @@ pub trait Embedder: Send + Sync {
     }
 }
 
+/// Built-in embedders (cargo feature `infer`).
+#[cfg(feature = "infer")]
+#[path = "embed_builtin.rs"]
+pub mod builtin;
+
 struct Registered {
     embedder: Arc<dyn Embedder>,
     cache_id: Arc<str>,

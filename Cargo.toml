@@ -5,6 +5,15 @@ members = [
     "kleos-rocks",
     "kleos-bin",
     "kleos-core-examples",
+    "kleos-infer",
+]
+# kleos-infer (ML inference, UPGRADE_PLAN D2) is opt-in: a bare `cargo build`
+# at the root keeps building only the database crates.
+default-members = [
+    "kleos-core",
+    "kleos-rocks",
+    "kleos-bin",
+    "kleos-core-examples",
 ]
 # Language bindings are built outside the workspace. kleos-lib-python is
 # maintained and built on its own (maturin); the C, Java, Node.js, Swift and
