@@ -2156,7 +2156,11 @@ define_op!(OP_RAND_VEC, 1, true);
 pub(crate) fn op_rand_vec(args: &[DataValue]) -> Result<DataValue> {
     let len = args[0]
         .get_int()
-        .ok_or_else(|| miette!("'rand_vec' requires an integer"))? as usize;
+        .ok_or_else(|| miette!("'rand_vec' requires an integer"))?;
+    if len < 0 {
+        bail!("'rand_vec' requires a non-negative length");
+    }
+    let len = check_generated_len("rand_vec", len as u128)?;
     let t = match args.get(1) {
         Some(DataValue::Str(s)) => match s as &str {
             "F32" | "Float" => VecElementType::F32,
@@ -2277,52 +2281,60 @@ pub(crate) fn op_cos_dist(args: &[DataValue]) -> Result<DataValue> {
     }
 }
 
+/// Most elements a builtin may generate from a caller-supplied size (`int_range`,
+/// `rand_vec`). Such results are allocated in one step, before the query memory
+/// budget can see them, so an unbounded size aborted the process instead of
+/// returning an error.
+pub(crate) const MAX_GENERATED_LEN: usize = 1 << 24;
+
+fn check_generated_len(name: &str, len: u128) -> Result<usize> {
+    if len > MAX_GENERATED_LEN as u128 {
+        bail!(
+            "'{}' would generate {} elements; the limit is {} per call",
+            name,
+            len,
+            MAX_GENERATED_LEN
+        );
+    }
+    Ok(len as usize)
+}
+
 define_op!(OP_INT_RANGE, 1, true);
 pub(crate) fn op_int_range(args: &[DataValue]) -> Result<DataValue> {
-    let [start, end] = match args.len() {
-        1 => {
-            let end = args[0]
-                .get_int()
-                .ok_or_else(|| miette!("'int_range' requires integer argument for end"))?;
-            [0, end]
-        }
-        2 => {
-            let start = args[0]
-                .get_int()
-                .ok_or_else(|| miette!("'int_range' requires integer argument for start"))?;
-            let end = args[1]
-                .get_int()
-                .ok_or_else(|| miette!("'int_range' requires integer argument for end"))?;
-            [start, end]
-        }
-        3 => {
-            let start = args[0]
-                .get_int()
-                .ok_or_else(|| miette!("'int_range' requires integer argument for start"))?;
-            let end = args[1]
-                .get_int()
-                .ok_or_else(|| miette!("'int_range' requires integer argument for end"))?;
-            let step = args[2]
-                .get_int()
-                .ok_or_else(|| miette!("'int_range' requires integer argument for step"))?;
-            let mut current = start;
-            let mut result = vec![];
-            if step > 0 {
-                while current < end {
-                    result.push(DataValue::from(current));
-                    current += step;
-                }
-            } else {
-                while current > end {
-                    result.push(DataValue::from(current));
-                    current += step;
-                }
-            }
-            return Ok(DataValue::List(result));
-        }
+    let int_arg = |i: usize, what: &str| {
+        args[i]
+            .get_int()
+            .ok_or_else(|| miette!("'int_range' requires integer argument for {}", what))
+    };
+    let (start, end, step) = match args.len() {
+        1 => (0, int_arg(0, "end")?, 1),
+        2 => (int_arg(0, "start")?, int_arg(1, "end")?, 1),
+        3 => (
+            int_arg(0, "start")?,
+            int_arg(1, "end")?,
+            int_arg(2, "step")?,
+        ),
         _ => bail!("'int_range' requires 1 to 3 argument"),
     };
-    Ok(DataValue::List((start..end).map(DataValue::from).collect()))
+    if step == 0 {
+        bail!("'int_range' requires a non-zero step");
+    }
+    // Count the elements first, in i128 so neither the span nor the last
+    // `current + step` can overflow (it used to wrap in release builds and
+    // loop forever, and a zero step never terminated).
+    let (start, end, step) = (start as i128, end as i128, step as i128);
+    let span = if step > 0 { end - start } else { start - end };
+    let len = if span <= 0 {
+        0
+    } else {
+        (span + step.abs() - 1) / step.abs()
+    };
+    let len = check_generated_len("int_range", len as u128)?;
+    Ok(DataValue::List(
+        (0..len as i128)
+            .map(|i| DataValue::from((start + i * step) as i64))
+            .collect(),
+    ))
 }
 
 define_op!(OP_RAND_FLOAT, 0, false);

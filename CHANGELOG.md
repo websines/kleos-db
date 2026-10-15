@@ -11,6 +11,15 @@ to kleos.
 
 ### Fixed
 
+- `int_range` and `rand_vec` can no longer exhaust memory (found by fuzzing). A zero
+  step (`int_range(30, 3, 0)`) looped forever, allocating until the process was killed;
+  a step that overflowed `i64` wrapped in release builds and did the same; and very
+  large ranges or `rand_vec(-1)` aborted on allocation. These results are built
+  before the query memory budget can see them. `int_range` now rejects a zero step,
+  computes its length in overflow-safe arithmetic, and both functions refuse to
+  generate more than 2^24 (16,777,216) elements per call. `int_range(0, 10, 0)`, which
+  silently returned `[]`, is now an error too.
+
 - Deleting vectors no longer makes surviving vectors unreachable in HNSW search.
   Removal only unlinked the node (upstream CozoDB noted it "still has some probability
   of disconnecting the graph"), so neighbours that were connected through it were cut

@@ -1488,6 +1488,40 @@ fn test_range() {
     assert_eq!(res["rows"][0][0], json!([15, 13, 11, 9, 7, 5]));
 }
 
+/// Found by fuzzing: `int_range(30, 3, 0)` looped forever, allocating until the
+/// process died; a step that overflowed i64 wrapped (release) and did the same;
+/// huge ranges and `rand_vec(-1)` aborted on allocation instead of erroring.
+#[test]
+fn generated_sizes_are_validated() {
+    let db = DbInstance::default();
+    let list = |s: &str| db.run_default(s).unwrap().into_json()["rows"][0][0].clone();
+    let err = |s: &str| format!("{:?}", db.run_default(s).unwrap_err());
+
+    assert!(err("?[a] := a = int_range(30, 3, 0)").contains("non-zero step"));
+    assert!(err("?[a] := a = int_range(0, 10, 0)").contains("non-zero step"));
+    assert_eq!(
+        list("?[a] := a = int_range(9223372036854775805, 9223372036854775807, 2)"),
+        json!([9223372036854775805i64])
+    );
+    assert_eq!(
+        list("?[a] := a = int_range(-9223372036854775807, -9223372036854775807 - 1, -5)"),
+        json!([-9223372036854775807i64])
+    );
+    assert_eq!(list("?[a] := a = int_range(10, 3)"), json!([]));
+    assert_eq!(list("?[a] := a = int_range(3, 10, -1)"), json!([]));
+    assert_eq!(list("?[a] := a = int_range(0, 10, 4)"), json!([0, 4, 8]));
+    assert_eq!(list("?[a] := a = int_range(10, 0, -4)"), json!([10, 6, 2]));
+
+    assert!(err("?[a] := a = int_range(1000000000000)").contains("limit"));
+    assert!(
+        err("?[a] := a = int_range(-9223372036854775807 - 1, 9223372036854775807)")
+            .contains("limit")
+    );
+    assert!(err("?[a] := a = rand_vec(-1)").contains("non-negative"));
+    assert!(err("?[a] := a = rand_vec(1000000000000)").contains("limit"));
+    assert_eq!(list("?[a] := a = length(rand_vec(3))"), json!(3));
+}
+
 // ---- kleos fork (0.13.0): datetime function library ----
 
 fn dt_secs(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DataValue {
