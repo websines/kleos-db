@@ -17,7 +17,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyList, PyString, PyTuple};
 use serde_json::json;
 
-use kleos::*;
+use ::kleos::*;
 
 fn py_to_rows(ob: &PyAny) -> PyResult<Vec<Vec<DataValue>>> {
     let rows = ob.extract::<Vec<Vec<&PyAny>>>()?;
