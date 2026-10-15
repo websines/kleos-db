@@ -114,7 +114,16 @@ to kleos.
   parallel bulk build; graph construction always uses exact distances. Indexes
   created without `quantize` are unchanged and store no codes; manifests written
   before this change load as unquantized. `::indices` reports `quantize` and
-  `rescore`. Design follows turbovec (MIT; see `NOTICE.md`). Tests:
+  `rescore`. Measured on 99.5K x 1536 DBpedia/OpenAI vectors (cosine, `m: 16`,
+  one query at a time): SQLite store, `ef: 64`, `turbo4` 21.1 vs 25.5 ms CPU and
+  53 vs 67 ms p50 per query at equal recall@10 (0.975 vs 0.973), for +113 MiB of
+  codes; in-memory store (30K), 4.2 vs 5.6 ms. In a brute-force codec comparison
+  `turbo4` reaches recall@10 0.969 from codes alone and 1.0 after rescoring 2x;
+  dense random, Clifford-rotor, quaternion and Givens rotations gave the same
+  recall on this data, but the block rotations fell to 0.81 when coordinate energy
+  is importance-ordered (matryoshka-style), so the Hadamard rotation is used; a
+  1-bit QJL residual was worse than the plain codes at equal size. Design follows
+  turbovec (MIT; see `NOTICE.md`). Tests:
   `tests/hnsw_quantized.rs`; benchmark: `examples/hnsw_quant_bench.rs`.
 - A `cargo-fuzz` harness in `kleos-core/fuzz/`. The `run_script` target runs arbitrary
   CozoScript against an in-memory database built without network access or
