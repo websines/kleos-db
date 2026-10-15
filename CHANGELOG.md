@@ -11,11 +11,44 @@ to kleos.
 
 ### Fixed
 
+- Bulk loads no longer leave search-index entries for rows they delete or replace
+  (upstream CozoDB #232). `import_relations`, columnar import and
+  `import_from_backup` skipped HNSW/FTS/LSH maintenance entirely. A row deleted
+  through `import_relations({"-rel": ..})` left a dangling HNSW node, and every later
+  vector search on that index failed with "Cannot find compound key for HNSW", as did
+  writes that traversed it. Replaced rows kept FTS/LSH postings for text they no
+  longer contain. Bulk loads now remove the old row's entries, as `:rm` does. New row
+  versions are still left unindexed (the fast path, which warns and points at
+  `::reindex`), so a search index may miss imported rows but never points at a row
+  that is gone or has changed. Regression tests: `tests/import_search_index_integrity.rs`.
+  `::reindex` still repairs databases damaged before this fix. Its ghost-postings test
+  now builds that damage through the new `test-hooks` switch
+  `legacy_next_import_for_tests`, and CI runs it in the test-hooks job.
+- Floats now display as float literals (upstream CozoDB #236). `Display` for numbers
+  renders CozoScript, but `1.0` printed as `1` and `1e300` as a 301-digit integer, both
+  of which parse back as Int. Finite floats now use Rust's shortest round-trip form
+  (`1.0`, `1e300`, `1.5e-7`); a unit test parses every case back.
+- `first`, `last`, `get` and `maybe_get` accept a `Validity` value and read it as the
+  `[timestamp, is_assert]` pair it is written as, instead of failing with
+  "'first' requires lists" (upstream CozoDB #246).
+- Every type reachable through the public API can now be named (upstream CozoDB #288).
+  `kleos::parse` exports `SysOp` and the `::hnsw`/`::fts`/`::lsh` config types. The
+  crate root exports `Aggregation`, `Op`, `VecElementType`, `TokenizerConfig`,
+  `AccessLevel`, `MemTx` and `SqliteTx`. A crate-level `unnameable_types` lint keeps
+  the list complete under CI's `-D warnings`.
 - The clippy CI gate passes again on Rust 1.99. miette's `bail!` expands with a trailing
   semicolon, which rustc's `semicolon_in_expressions_from_non_local_macros` future-compat
   lint rejects in expression position (289 sites). The core crate now uses an
   expression-safe crate-local `bail!` with the same arguments and errors.
 - Broken gitee mirror links and a stale `cozo-lib-*` reference left by the rename.
+
+### Added
+
+- A `cargo-fuzz` harness in `kleos-core/fuzz/`. The `run_script` target runs arbitrary
+  CozoScript against an in-memory database built without network access or
+  file-backed engines, under the engine's own query time and memory budgets.
+  `gen_corpus.py` builds the libFuzzer dictionary (grammar literals, builtin
+  functions, fixed rules) and a seed corpus from the scripts in tests and docs.
 
 ### Changed
 

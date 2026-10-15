@@ -27,6 +27,9 @@
 //!
 #![doc = document_features::document_features!()]
 #![warn(rust_2018_idioms, future_incompatible)]
+// Every type reachable through the public API must also be nameable by callers
+// (upstream CozoDB #288); CI's `-D warnings` turns this into a gate.
+#![warn(unnameable_types)]
 // kleos fork: the CI clippy gate runs `-D warnings`. The allows below are
 // inherited from upstream CozoDB across the whole tree (or intrinsic to its
 // design) and are tracked as a cleanup backlog rather than gated on, so the gate
@@ -65,7 +68,8 @@ pub(crate) use crate::utils::bail;
 #[cfg(feature = "cypher")]
 pub use cypher::{CypherGraphSchema, EdgeMap, NodeMap};
 pub use data::aggr::{
-    CustomAggrRegistries, MeetAggrObj, NormalAggrObj, RegisteredAggr, RegisteredBoundedMeet,
+    Aggregation, CustomAggrRegistries, MeetAggrObj, NormalAggrObj, RegisteredAggr,
+    RegisteredBoundedMeet,
 };
 pub use data::value::{DataValue, Num, RegexWrapper, UuidWrapper, Validity, ValidityTs};
 pub use fixed_rule::{FixedRule, FixedRuleInputRelation, FixedRulePayload};
@@ -96,7 +100,7 @@ pub use runtime::graph_projection::{
 pub use runtime::hybrid::{build_hybrid_query, GraphLeg, HybridList, HybridSearch, MmrParams};
 pub use runtime::relation::{decode_tuple_from_kv, try_decode_tuple_from_kv};
 pub use runtime::temp_store::RegularTempStore;
-pub use storage::mem::{new_cozo_mem, MemStorage};
+pub use storage::mem::{new_cozo_mem, MemStorage, MemTx};
 #[cfg(feature = "storage-new-rocksdb")]
 pub use storage::newrocks::{new_cozo_newrocksdb, NewRocksDbStorage};
 #[cfg(feature = "storage-rocksdb")]
@@ -108,16 +112,18 @@ pub use storage::rocks::{
 #[cfg(feature = "storage-sled")]
 pub use storage::sled::{new_cozo_sled, SledStorage};
 #[cfg(feature = "storage-sqlite")]
-pub use storage::sqlite::{new_cozo_sqlite, SqliteStorage};
+pub use storage::sqlite::{new_cozo_sqlite, SqliteStorage, SqliteTx};
 #[cfg(feature = "storage-tikv")]
 pub use storage::tikv::{new_cozo_tikv, TiKvStorage};
 pub use storage::{Storage, StoreTx};
 
-pub use crate::data::expr::Expr;
+pub use crate::data::expr::{Expr, Op};
 use crate::data::json::JsonValue;
+pub use crate::data::relation::VecElementType;
 pub use crate::data::symb::Symbol;
 pub use crate::data::value::{JsonData, Vector};
 pub use crate::fixed_rule::SimpleFixedRule;
+pub use crate::fts::TokenizerConfig;
 pub use crate::parse::SourceSpan;
 pub use crate::runtime::callback::CallbackOp;
 pub use crate::runtime::db::evaluate_expressions;
@@ -132,6 +138,7 @@ pub use crate::runtime::governed_transaction::{
     GovernedTransaction, GovernedTransactionCancellation, GovernedTransactionOptions,
     GovernedTransactionWorker,
 };
+pub use crate::runtime::relation::AccessLevel;
 
 #[cfg(feature = "cypher")]
 pub mod cypher;
@@ -493,6 +500,24 @@ impl DbInstance {
             DbInstance::Sled(db) => db.fail_next_commit_for_tests(),
             #[cfg(feature = "storage-tikv")]
             DbInstance::TiKv(db) => db.fail_next_commit_for_tests(),
+        }
+    }
+    /// Test-only dispatcher. See [`crate::Db::legacy_next_import_for_tests`].
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn legacy_next_import_for_tests(&self) {
+        match self {
+            DbInstance::Mem(db) => db.legacy_next_import_for_tests(),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.legacy_next_import_for_tests(),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.legacy_next_import_for_tests(),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.legacy_next_import_for_tests(),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.legacy_next_import_for_tests(),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.legacy_next_import_for_tests(),
         }
     }
 

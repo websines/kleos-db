@@ -27,7 +27,7 @@ jobs:
       # job above compiles them to zero tests. They must be named explicitly here
       # or they silently never run.
       - name: Test (test-hooks suites)
-        run: cargo test -p kleos --features test-hooks --test commit_fence --test callback_commit_contract --test governed_transaction --verbose
+        run: cargo test -p kleos --features test-hooks --test commit_fence --test callback_commit_contract --test governed_transaction --test reindex --verbose
       - name: Test (columnar import contract)
         run: cargo test -p kleos --features columnar-io,test-hooks --test columnar_import --verbose
 

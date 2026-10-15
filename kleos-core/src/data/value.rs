@@ -576,7 +576,11 @@ impl Display for Num {
                         write!(f, r#"to_float("INF")"#)
                     }
                 } else {
-                    write!(f, "{n}")
+                    // `{n:?}` always keeps a `.` or an exponent (`1.0`, `1e300`),
+                    // so the literal parses back as a Float. `{n}` printed `1.0`
+                    // as `1` and `1e300` as a 301-digit integer, which re-parse
+                    // as Int (upstream CozoDB #236).
+                    write!(f, "{n:?}")
                 }
             }
         }
@@ -587,7 +591,7 @@ impl Debug for Num {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Num::Int(i) => write!(f, "{i}"),
-            Num::Float(n) => write!(f, "{n}"),
+            Num::Float(n) => write!(f, "{n:?}"),
         }
     }
 }

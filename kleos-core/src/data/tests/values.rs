@@ -57,3 +57,29 @@ fn display_datavalues() {
         ])
     );
 }
+
+#[test]
+fn float_display_round_trips_as_float() {
+    use crate::parse::parse_expressions;
+    for f in [
+        1.0,
+        -2.0,
+        0.0,
+        0.1,
+        1e300,
+        1.5e-7,
+        -1_121_212_121.331_212,
+        123_456_789.0,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+    ] {
+        let v = DataValue::from(f);
+        let src = v.to_string();
+        let back = parse_expressions(&src, &BTreeMap::new())
+            .and_then(|e| e.eval_to_const())
+            .unwrap_or_else(|e| panic!("{src} does not parse back: {e:?}"));
+        assert_eq!(back, v, "{f} displayed as {src}");
+    }
+    assert_eq!(DataValue::from(1.0).to_string(), "1.0");
+    assert_eq!(DataValue::from(1).to_string(), "1");
+}

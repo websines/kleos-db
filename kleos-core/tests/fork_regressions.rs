@@ -307,3 +307,44 @@ fn repair_corrupt_basics() {
         )
         .is_err());
 }
+
+/// Upstream CozoDB #246: a `Validity` is written as `[timestamp, is_assert]`,
+/// so the list accessors read it that way instead of failing with
+/// "'first' requires lists".
+#[test]
+fn list_accessors_read_validity_as_its_pair() {
+    let db = DbInstance::new("mem", "", Default::default()).unwrap();
+    let run = |s: &str| {
+        db.run_script(s, BTreeMap::new(), ScriptMutability::Mutable)
+            .unwrap_or_else(|e| panic!("{e:?}\n{s}"))
+    };
+    run(":create hos {s: String, y: Validity => h: String}");
+    run("?[s, y, h] <- [['US', [2001, true], 'Bush']] :put hos {s, y => h}");
+    let rows = run(
+        "?[t, a, g0, g1, gl, m] := *hos{y}, t = first(y), a = last(y), \
+         g0 = get(y, 0), g1 = get(y, 1), gl = get(y, -1), m = maybe_get(y, 2)",
+    );
+    assert_eq!(
+        rows.rows,
+        vec![vec![
+            DataValue::from(2001),
+            DataValue::from(true),
+            DataValue::from(2001),
+            DataValue::from(true),
+            DataValue::from(true),
+            DataValue::Null,
+        ]]
+    );
+}
+
+/// Upstream CozoDB #288: `CozoScript::Sys` carries a `SysOp`, which callers
+/// could receive but not name. Every public-API type is now nameable, and the
+/// crate-level `unnameable_types` lint keeps it that way.
+#[test]
+fn public_ast_types_are_nameable() {
+    let script = kleos::parse::CozoScript::Sys(kleos::parse::SysOp::ListRelations);
+    assert!(matches!(
+        script,
+        kleos::parse::CozoScript::Sys(kleos::parse::SysOp::ListRelations)
+    ));
+}

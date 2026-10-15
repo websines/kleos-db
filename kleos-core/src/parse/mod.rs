@@ -15,8 +15,8 @@ use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use either::{Either, Left};
 use crate::bail;
+use either::{Either, Left};
 use miette::{Diagnostic, IntoDiagnostic, Result};
 use pest::error::InputLocation;
 use pest::Parser;
@@ -30,7 +30,7 @@ use crate::parse::expr::build_expr;
 use crate::parse::imperative::parse_imperative_block;
 use crate::parse::query::parse_query;
 use crate::parse::schema::parse_nullable_type;
-use crate::parse::sys::{parse_sys, SysOp};
+use crate::parse::sys::parse_sys;
 use crate::{Expr, FixedRule};
 
 pub(crate) mod expr;
@@ -39,6 +39,8 @@ pub(crate) mod imperative;
 pub(crate) mod query;
 pub(crate) mod schema;
 pub(crate) mod sys;
+
+pub use sys::{FtsIndexConfig, HnswDistance, HnswIndexConfig, MinHashLshConfig, SysOp};
 
 #[derive(pest_derive::Parser)]
 #[grammar = "cozoscript.pest"]

@@ -45,7 +45,9 @@ use uuid::Uuid;
 use crate::data::functions::current_validity;
 use crate::data::relation::{ColType, ColumnDef, NullableColType, VecElementType};
 use crate::data::value::{DataValue, JsonData, UuidWrapper};
-use crate::runtime::db::{stranded_index_names, warn_if_indexes_stranded, write_import_tuple, Db};
+use crate::runtime::db::{
+    stranded_index_names, warn_if_indexes_stranded, write_import_tuple, Db, ImportSearchIndexes,
+};
 use crate::runtime::relation::{AccessLevel, InsufficientAccessLevel};
 use crate::storage::Storage;
 use crate::Num;
@@ -388,6 +390,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         )?;
         let mut reader = source.build(options, &mut bindings)?;
         let stale_indexes = stranded_index_names(&handle);
+        let mut search = ImportSearchIndexes::new(&tx, &handle)?;
         tx.mark_dirty(&handle);
         let cur_vld = current_validity();
 
@@ -468,7 +471,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                             })?;
                         tuple.push(coerced);
                     }
-                    write_import_tuple(&mut tx, &handle, tuple, false)?;
+                    write_import_tuple(&mut tx, &handle, &mut search, tuple, false)?;
                     rows_processed += 1;
                 }
             }

@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use itertools::Itertools;
 use crate::bail;
+use itertools::Itertools;
 use miette::{Diagnostic, IntoDiagnostic, Result, WrapErr};
 use pest::Parser;
 use smartstring::{LazyCompact, SmartString};
@@ -445,7 +445,7 @@ impl<'a> SessionTx<'a> {
         Ok(())
     }
 
-    fn del_in_fts(
+    pub(crate) fn del_in_fts(
         &mut self,
         rel_handle: &RelationHandle,
         stack: &mut Vec<DataValue>,
@@ -484,7 +484,11 @@ impl<'a> SessionTx<'a> {
         Ok(())
     }
 
-    fn del_in_lsh(&mut self, rel_handle: &RelationHandle, old_kv: &[DataValue]) -> Result<()> {
+    pub(crate) fn del_in_lsh(
+        &mut self,
+        rel_handle: &RelationHandle,
+        old_kv: &[DataValue],
+    ) -> Result<()> {
         for (idx_handle, inv_idx_handle, _) in rel_handle.lsh_indices.values() {
             self.del_lsh_index_item(old_kv, None, idx_handle, inv_idx_handle)?;
         }

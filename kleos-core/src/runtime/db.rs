@@ -21,18 +21,20 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[allow(unused_imports)]
+use crate::bail;
+#[allow(unused_imports)]
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
 use crossbeam::sync::ShardedLock;
 use either::{Left, Right};
 use itertools::Itertools;
 use miette::Report;
 #[allow(unused_imports)]
-use crate::bail;
 use miette::{ensure, miette, Diagnostic, IntoDiagnostic, Result, WrapErr};
 use serde_json::json;
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
 
+use crate::data::expr::Bytecode;
 use crate::data::functions::current_validity;
 use crate::data::json::JsonValue;
 use crate::data::memsize::est_tuple_bytes;
@@ -41,6 +43,7 @@ use crate::data::relation::ColumnDef;
 use crate::data::tuple::{Tuple, TupleT};
 use crate::data::value::{DataValue, ValidityTs, LARGEST_UTF_CHAR};
 use crate::fixed_rule::DEFAULT_FIXED_RULES;
+use crate::fts::tokenizer::TextAnalyzer;
 use crate::fts::TokenizerCache;
 use crate::parse::sys::{HnswIndexConfig, SysOp};
 use crate::parse::{parse_expressions, parse_script, CozoScript, SourceSpan};
@@ -229,6 +232,12 @@ pub struct Db<S> {
     /// this switch injects it. Set via [`Db::fail_next_commit_for_tests`].
     #[cfg(any(test, feature = "test-hooks"))]
     fail_next_commit: Arc<AtomicBool>,
+    /// Test-only: make the next `import_relations` skip removing replaced rows
+    /// from search indexes, as imports did before kleos fixed it. There is no
+    /// other way left to create the legacy ghost postings that `::reindex`
+    /// must repair. Set via [`Db::legacy_next_import_for_tests`].
+    #[cfg(any(test, feature = "test-hooks"))]
+    legacy_next_import: Arc<AtomicBool>,
 }
 
 impl<S> Debug for Db<S> {
@@ -434,6 +443,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             warning_seq: Default::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             fail_next_commit: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-hooks"))]
+            legacy_next_import: Arc::new(AtomicBool::new(false)),
         };
         Ok(ret)
     }
@@ -967,6 +978,15 @@ impl<'s, S: Storage<'s>> Db<S> {
         self.fail_next_commit.store(true, Ordering::SeqCst);
     }
 
+    /// Test-only: the next [`Db::import_relations`] leaves the search-index
+    /// entries of the rows it replaces or deletes in place, reproducing the
+    /// stale postings that imports wrote before kleos fixed them.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn legacy_next_import_for_tests(&self) {
+        self.legacy_next_import.store(true, Ordering::SeqCst);
+    }
+
     /// Set a Db-wide default per-query wall-clock budget in seconds (kleos
     /// fork, query budget). `None` (or a non-positive value) disables it. The
     /// default is folded (via `min`) into every subsequent script's effective
@@ -1328,6 +1348,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         let _guards = locks.iter().map(|l| l.read().unwrap()).collect_vec();
 
         let cur_vld = current_validity();
+        #[cfg(any(test, feature = "test-hooks"))]
+        let legacy = self.legacy_next_import.swap(false, Ordering::SeqCst);
 
         let mut tx = self.transact_write()?;
 
@@ -1366,6 +1388,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                     "data import".to_string(),
                     handle.access_level
                 ));
+            }
+
+            let mut search = ImportSearchIndexes::new(&tx, &handle)?;
+            #[cfg(any(test, feature = "test-hooks"))]
+            if legacy {
+                search.has_any = false;
             }
 
             let header2idx: BTreeMap<_, _> = in_data
@@ -1475,7 +1503,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     })
                     .try_collect()?;
                 if is_delete {
-                    write_import_tuple(&mut tx, &handle, keys, true)?;
+                    write_import_tuple(&mut tx, &handle, &mut search, keys, true)?;
                 } else {
                     let vals: Vec<_> = val_indices
                         .iter()
@@ -1488,7 +1516,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                         .try_collect()?;
                     let mut tuple = keys;
                     tuple.extend(vals);
-                    write_import_tuple(&mut tx, &handle, tuple, false)?;
+                    write_import_tuple(&mut tx, &handle, &mut search, tuple, false)?;
                 }
             }
         }
@@ -1666,8 +1694,20 @@ impl<'s, S: Storage<'s>> Db<S> {
                         Ok((src_k, src_v))
                     },
                 );
+                let mut search = ImportSearchIndexes::new(&dst_tx, &dst_handle)?;
+                let n_keys = dst_handle.metadata.keys.len();
                 for result in data_it {
                     let (key, val) = result?;
+                    if search.has_any {
+                        if let Some(existing) = dst_tx.store_tx.get(&key, false)? {
+                            if existing != val {
+                                let mut old =
+                                    crate::data::tuple::decode_tuple_from_key(&key, n_keys);
+                                try_extend_tuple_from_v(&mut old, &existing)?;
+                                search.remove(&mut dst_tx, &dst_handle, &old)?;
+                            }
+                        }
+                    }
                     dst_tx.store_tx.put(&key, &val)?;
                 }
             }
@@ -4227,9 +4267,62 @@ pub(crate) fn warn_if_indexes_stranded(handle: &RelationHandle, relation: &str, 
     );
 }
 
+/// Per-relation state that bulk loads need to remove a replaced or deleted row
+/// from the relation's HNSW / FTS / LSH indexes. Build it once per relation,
+/// outside the row loop: it compiles the FTS/LSH extractors.
+///
+/// Bulk loads leave *new* row versions unindexed (the fast path; callers warn
+/// and point at `::reindex`), but they must remove the entries of every row
+/// they delete or replace. A search index may therefore miss imported rows,
+/// but never points at a row that is gone or has changed. Dangling HNSW nodes
+/// used to make every later vector search fail (upstream CozoDB #232), and
+/// stale FTS/LSH postings matched text the row no longer contains.
+pub(crate) struct ImportSearchIndexes {
+    has_any: bool,
+    processors: BTreeMap<SmartString<LazyCompact>, (Arc<TextAnalyzer>, Vec<Bytecode>)>,
+    stack: Vec<DataValue>,
+}
+
+impl ImportSearchIndexes {
+    pub(crate) fn new(tx: &SessionTx<'_>, handle: &RelationHandle) -> Result<Self> {
+        let has_text = !handle.fts_indices.is_empty() || !handle.lsh_indices.is_empty();
+        Ok(Self {
+            has_any: has_text || !handle.hnsw_indices.is_empty(),
+            processors: if has_text {
+                tx.make_fts_lsh_processors(handle)?
+            } else {
+                BTreeMap::new()
+            },
+            stack: vec![],
+        })
+    }
+
+    /// Remove `old` (a full stored tuple) from every search index. Call it while
+    /// `old` is still the stored row, as `:rm` does: HNSW removal reads the
+    /// vectors from the base relation.
+    fn remove(
+        &mut self,
+        tx: &mut SessionTx<'_>,
+        handle: &RelationHandle,
+        old: &[DataValue],
+    ) -> Result<()> {
+        if !self.has_any {
+            return Ok(());
+        }
+        tx.del_in_fts(handle, &mut self.stack, &self.processors, old)?;
+        tx.del_in_lsh(handle, old)?;
+        let keys = &old[..handle.metadata.keys.len()];
+        for (idx_handle, _) in handle.hnsw_indices.values() {
+            tx.hnsw_remove(handle, idx_handle, keys)?;
+        }
+        Ok(())
+    }
+}
+
 /// Write one already-coerced, storage-ordered bulk-import tuple while keeping
-/// ordinary B-tree indexes synchronized. Search indexes, triggers, and
-/// callbacks deliberately remain outside the bulk-import contract.
+/// ordinary B-tree indexes synchronized and removing a replaced or deleted
+/// row's search-index entries (see [`ImportSearchIndexes`]). Triggers and
+/// callbacks remain outside the bulk-import contract.
 ///
 /// The equality check is against the coerced tuple, not the caller's source
 /// row. This avoids needless index rewrites for reordered or differently
@@ -4237,6 +4330,7 @@ pub(crate) fn warn_if_indexes_stranded(handle: &RelationHandle, relation: &str, 
 pub(crate) fn write_import_tuple(
     tx: &mut SessionTx<'_>,
     handle: &RelationHandle,
+    search: &mut ImportSearchIndexes,
     tuple: Vec<DataValue>,
     is_delete: bool,
 ) -> Result<()> {
@@ -4256,7 +4350,7 @@ pub(crate) fn write_import_tuple(
 
     let keys = &tuple[..n_keys];
     let k_store = handle.encode_key_for_store(keys, Default::default())?;
-    if !handle.indices.is_empty() {
+    if !handle.indices.is_empty() || search.has_any {
         if let Some(existing) = tx.store_tx.get(&k_store, false)? {
             let mut old = keys.to_vec();
             try_extend_tuple_from_v(&mut old, &existing)?;
@@ -4266,6 +4360,7 @@ pub(crate) fn write_import_tuple(
                     let encoded = idx_rel.encode_key_for_store(&idx_tup, Default::default())?;
                     tx.store_tx.del(&encoded)?;
                 }
+                search.remove(tx, handle, &old)?;
             }
         }
     }

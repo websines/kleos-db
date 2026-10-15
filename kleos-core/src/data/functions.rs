@@ -13,6 +13,7 @@ use std::ops::{Div, Rem};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::bail;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::format::StrftimeItems;
@@ -23,7 +24,6 @@ use chrono::{
 use itertools::Itertools;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
-use crate::bail;
 use miette::{ensure, miette, IntoDiagnostic, Result};
 use num_traits::FloatConst;
 use rand::prelude::*;
@@ -1656,6 +1656,9 @@ pub(crate) fn op_rad_to_deg(args: &[DataValue]) -> Result<DataValue> {
 
 define_op!(OP_FIRST, 1, false);
 pub(crate) fn op_first(args: &[DataValue]) -> Result<DataValue> {
+    if let Some(l) = validity_as_list(&args[0]) {
+        return Ok(l[0].clone());
+    }
     Ok(args[0]
         .get_slice()
         .ok_or_else(|| miette!("'first' requires lists"))?
@@ -1666,6 +1669,9 @@ pub(crate) fn op_first(args: &[DataValue]) -> Result<DataValue> {
 
 define_op!(OP_LAST, 1, false);
 pub(crate) fn op_last(args: &[DataValue]) -> Result<DataValue> {
+    if let Some(l) = validity_as_list(&args[0]) {
+        return Ok(l[1].clone());
+    }
     Ok(args[0]
         .get_slice()
         .ok_or_else(|| miette!("'last' requires lists"))?
@@ -1752,7 +1758,26 @@ pub(crate) fn op_get(args: &[DataValue]) -> Result<DataValue> {
     }
 }
 
+/// A `Validity` reads as the `[timestamp, is_assert]` list it is written as, so
+/// `first`, `last` and `get` work on it (upstream CozoDB #246).
+fn validity_as_list(v: &DataValue) -> Option<[DataValue; 2]> {
+    match v {
+        DataValue::Validity(v) => Some([
+            DataValue::from(v.timestamp.0 .0),
+            DataValue::from(v.is_assert.0),
+        ]),
+        _ => None,
+    }
+}
+
 fn get_impl(args: &[DataValue]) -> Result<DataValue> {
+    if let Some(l) = validity_as_list(&args[0]) {
+        let n = args[1]
+            .get_int()
+            .ok_or_else(|| miette!("second argument to 'get' mut be an integer"))?;
+        let idx = get_index(n, l.len(), false)?;
+        return Ok(l[idx].clone());
+    }
     match &args[0] {
         DataValue::List(l) => {
             let n = args[1]
@@ -1781,7 +1806,7 @@ fn get_impl(args: &[DataValue]) -> Result<DataValue> {
             let res = json2val(res);
             Ok(res)
         }
-        _ => bail!("first argument to 'get' mut be a list or json"),
+        _ => bail!("first argument to 'get' mut be a list, json or validity"),
     }
 }
 

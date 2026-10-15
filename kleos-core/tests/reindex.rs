@@ -78,11 +78,13 @@ fn fts_scores(db: &DbInstance, query: &str) -> Vec<(String, f64)> {
 /// The leak is simulated exactly as it occurred: postings written for a document
 /// version that no longer exists. We do that by building the index while the old
 /// text is live, then rewriting the row's value underneath it via a bulk import
-/// (which does not touch the index) — leaving the index holding the *old*
-/// document's terms while the relation holds the new one. That is precisely the
-/// end state the leak produced.
+/// in legacy mode (imports now remove replaced rows from search indexes, so the
+/// `test-hooks` switch restores the old behaviour) — leaving the index holding
+/// the *old* document's terms while the relation holds the new one. That is
+/// precisely the end state the leak produced.
 ///
 /// Discrimination: skip the `::reindex` and `hello` still matches `k1`.
+#[cfg(feature = "test-hooks")]
 #[test]
 fn reindex_evicts_ghost_postings() {
     let dir = tempfile::tempdir().unwrap();
@@ -107,6 +109,7 @@ fn reindex_evicts_ghost_postings() {
 
     // Rewrite the row without touching the index — the index now holds a
     // document version the relation no longer has.
+    db.legacy_next_import_for_tests();
     db.import_relations(BTreeMap::from([(
         "doc".to_string(),
         NamedRows::new(
