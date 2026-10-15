@@ -87,7 +87,11 @@ fn search(db: &DbInstance, q: &[f32], k: usize, ef: usize, extra: &str) -> Vec<(
         "?[id, cat, d] := ~pts:idx{{ id, cat | query: $q, k: {k}, ef: {ef}, \
          bind_distance: d{extra} }}"
     );
-    let res = run(db, &script, BTreeMap::from([("q".to_string(), vec_value(q))]));
+    let res = run(
+        db,
+        &script,
+        BTreeMap::from([("q".to_string(), vec_value(q))]),
+    );
     res.rows
         .iter()
         .map(|r| {
@@ -107,7 +111,11 @@ fn exact(db: &DbInstance, q: &[f32], k: usize, cond: &str) -> Vec<i64> {
         "?[id, d] := *pts{{ id, cat, emb }}, d = cos_dist(emb, $q), {cond} \
          :order d :limit {k}"
     );
-    let res = run(db, &script, BTreeMap::from([("q".to_string(), vec_value(q))]));
+    let res = run(
+        db,
+        &script,
+        BTreeMap::from([("q".to_string(), vec_value(q))]),
+    );
     res.rows.iter().map(|r| r[0].get_int().unwrap()).collect()
 }
 
@@ -134,7 +142,11 @@ fn selective_filters_fill_k() {
             assert_eq!(got.len(), k, "filter `{filter}` under-filled: {got:?}");
             for (id, cat, _) in &got {
                 assert_eq!(*cat, id % 1000);
-                let ok = if filter == "cat < 10" { *cat < 10 } else { *cat == 7 };
+                let ok = if filter == "cat < 10" {
+                    *cat < 10
+                } else {
+                    *cat == 7
+                };
                 assert!(ok, "row {id} (cat {cat}) violates `{filter}`");
             }
             total_recall += recall(&got, &exact(&db, &q, k, cond));
@@ -160,8 +172,14 @@ fn unfiltered_and_pass_all_filter_agree_with_exact() {
         r_plain += recall(&plain, &truth);
         r_true += recall(&all, &truth);
     }
-    assert!(r_plain / trials as f64 >= 0.9, "unfiltered recall {r_plain}");
-    assert!(r_true / trials as f64 >= 0.9, "pass-all filter recall {r_true}");
+    assert!(
+        r_plain / trials as f64 >= 0.9,
+        "unfiltered recall {r_plain}"
+    );
+    assert!(
+        r_true / trials as f64 >= 0.9,
+        "pass-all filter recall {r_true}"
+    );
 }
 
 #[test]

@@ -41,16 +41,30 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::{max, Reverse};
 
 /// Below this observed pass rate a failing neighbour is expanded immediately
-/// (two-hop) instead of being queued.
-const TWO_HOP_PASS_RATE: f64 = 0.1;
+/// (two-hop) instead of being queued. Measured on 99k 1536-d embeddings this
+/// was cost-neutral (within noise) at 1-3% pass rates: the predicate needs the
+/// stored row, so a failing node costs a full fetch either way, and an exact
+/// scan takes over below about 2-3%. It is kept for larger indexes, where the
+/// graph remains cheaper than a scan at lower pass rates.
+const TWO_HOP_PASS_RATE: f64 = 0.05;
 /// Predicate evaluations before the observed pass rate drives any decision.
 const MIN_SAMPLE: usize = 128;
-/// Projected remaining graph visits below which brute force is never
-/// considered (so cheap searches never pay for the size estimate).
-const BRUTE_FORCE_MIN_VISITS: f64 = 1024.0;
-/// Cost of one graph visit (fetch + distance + predicate + share of the
-/// adjacency reads) relative to one row of a full base-relation scan.
-const VISIT_COST: f64 = 3.0;
+/// Graph cost (in scanned-row units) below which the exact scan is never
+/// considered, so cheap searches never pay for the size estimate.
+const MIN_SCAN_COST: f64 = 4096.0;
+/// Nodes visited per node of the explored region: collecting `target`
+/// passing rows at pass rate `p` explores about `target / p` nodes and fetches
+/// about this many times as many (their unvisited neighbours).
+const GRAPH_FANOUT: f64 = 9.0;
+/// Cost of one graph visit (point fetch + decode + distance + predicate +
+/// share of the adjacency reads) relative to one row of a sequential scan.
+///
+/// Both constants were measured with `examples/vecbench.rs` (99k x 1536-d,
+/// M=16, mem backend): collecting 32 passing rows at a 1% pass rate visited
+/// about 29k nodes (9 x 32 / 0.01), and a visit cost about 9 times a scanned
+/// row (about 8.6 us against 0.9 us). So the scan wins below a pass rate of
+/// roughly `81 * max(ef, k) / rows`.
+const VISIT_COST: f64 = 9.0;
 /// A level must hold this many nodes before its count is used to estimate the
 /// index size.
 const SIZE_SAMPLE_NODES: usize = 16;
@@ -190,26 +204,6 @@ fn into_output(
     ret
 }
 
-// TEMP tuning knobs (removed before merge)
-struct Tuning {
-    two_hop_rate: f64,
-    two_hop_mode: u8,
-    visit_cost: f64,
-}
-fn tuning() -> Tuning {
-    let get = |k: &str, d: f64| {
-        std::env::var(k)
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(d)
-    };
-    Tuning {
-        two_hop_rate: get("KLEOS_A1_TWO_HOP", TWO_HOP_PASS_RATE),
-        two_hop_mode: get("KLEOS_A1_TWO_HOP_MODE", 1.0) as u8,
-        visit_cost: get("KLEOS_A1_VISIT_COST", VISIT_COST),
-    }
-}
-
 impl SessionTx<'_> {
     /// Bottom-layer search with the filter applied inside the search. `seeds`
     /// are the entry points found by the upper-layer descent; `top_level` is
@@ -237,11 +231,12 @@ impl SessionTx<'_> {
         for s in &seeds {
             st.visited.insert(s.clone());
         }
-        for (key, dist, _) in self.hnsw_filtered_visit(seeds, q, config, pred, stack, vec_cache, &mut st)? {
+        for (key, dist, _) in
+            self.hnsw_filtered_visit(seeds, q, config, pred, stack, vec_cache, &mut st)?
+        {
             st.candidates.push(key, Reverse(OrderedFloat(dist)));
         }
 
-        let tun = tuning();
         let mut size_estimate: Option<f64> = None;
         while let Some((cand, Reverse(OrderedFloat(cand_dist)))) = st.candidates.pop() {
             if let Some(worst) = st.worst() {
@@ -256,11 +251,15 @@ impl SessionTx<'_> {
                     break;
                 }
             }
-            // Selective filter: switch to brute force once the projected
-            // remaining graph work costs more than scanning the relation.
-            if st.results.len() < st.target && st.evaluated >= MIN_SAMPLE {
-                let remaining = (st.target - st.results.len()) as f64 / st.pass_rate();
-                if remaining >= BRUTE_FORCE_MIN_VISITS {
+            // Selective filter: switch to an exact scan once the projected
+            // graph work, or the work already spent, costs more than scanning
+            // the relation.
+            if st.evaluated >= MIN_SAMPLE {
+                let projected = GRAPH_FANOUT * st.target as f64 / st.pass_rate();
+                let spent = st.visited.len() as f64;
+                let remaining = (projected - spent).max(0.0);
+                let cost = remaining.max(spent) * VISIT_COST;
+                if cost >= MIN_SCAN_COST {
                     let size = match size_estimate {
                         Some(s) => s,
                         None => {
@@ -269,18 +268,13 @@ impl SessionTx<'_> {
                             s
                         }
                     };
-                    if remaining * tun.visit_cost > size {
-                        if std::env::var_os("KLEOS_A1_TRACE").is_some() {
-                            eprintln!("A1TRACE brute visited={} evaluated={} passed={} size={size:.0}", st.visited.len(), st.evaluated, st.passed);
-                        }
+                    if cost > size {
                         return self.hnsw_knn_brute_force(q, config, pred, stack, vec_cache);
                     }
                 }
             }
 
-            let two_hop = tun.two_hop_mode > 0
-                && st.evaluated >= MIN_SAMPLE
-                && st.pass_rate() < tun.two_hop_rate;
+            let two_hop = st.evaluated >= MIN_SAMPLE && st.pass_rate() < TWO_HOP_PASS_RATE;
             let unvisited: Vec<CompoundKey> = self
                 .hnsw_get_neighbours(&cand, 0, &config.idx_handle, false)?
                 .filter_map(|(k, _)| st.visited.insert(k.clone()).then_some(k))
@@ -289,7 +283,7 @@ impl SessionTx<'_> {
             for (key, dist, passed) in
                 self.hnsw_filtered_visit(unvisited, q, config, pred, stack, vec_cache, &mut st)?
             {
-                if two_hop && !passed && (tun.two_hop_mode == 1 || dist <= cand_dist) {
+                if two_hop && !passed {
                     for (k2, _) in self.hnsw_get_neighbours(&key, 0, &config.idx_handle, false)? {
                         if st.visited.insert(k2.clone()) {
                             second_hop.push(k2);
@@ -306,9 +300,6 @@ impl SessionTx<'_> {
                     st.candidates.push(key, Reverse(OrderedFloat(dist)));
                 }
             }
-        }
-        if std::env::var_os("KLEOS_A1_TRACE").is_some() {
-            eprintln!("A1TRACE graph visited={} evaluated={} passed={} results={}", st.visited.len(), st.evaluated, st.passed, st.results.len());
         }
         Ok(into_output(st.results, st.result_tuples, config.k))
     }
@@ -416,8 +407,7 @@ impl SessionTx<'_> {
                     _ => continue,
                 };
                 for (sub_idx, v) in vectors {
-                    if v.el_type() != config.manifest.dtype || v.len() != config.manifest.vec_dim
-                    {
+                    if v.el_type() != config.manifest.dtype || v.len() != config.manifest.vec_dim {
                         continue;
                     }
                     let dist = vec_cache.dist(q, v);

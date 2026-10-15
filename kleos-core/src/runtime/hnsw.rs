@@ -1455,7 +1455,9 @@ impl<'a> SessionTx<'a> {
                     .base_handle
                     .get(self, &cand_key.0)?
                     .ok_or_else(|| miette!("corrupted index"))?;
-                ret.push(filtered::bind_result(config, &cand_key, cand_tuple, distance)?);
+                ret.push(filtered::bind_result(
+                    config, &cand_key, cand_tuple, distance,
+                )?);
             }
             ret.reverse();
             ret.truncate(config.k);

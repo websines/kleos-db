@@ -155,12 +155,7 @@ fn parse_args() -> Args {
             "--out" => a.out = Some(val().into()),
             "--reuse-db" => a.reuse_db = true,
             "--snapshot" => a.snapshot = true,
-            "--variants" => {
-                a.variants = val()
-                    .split(';')
-                    .map(|v| v.trim().to_string())
-                    .collect()
-            }
+            "--variants" => a.variants = val().split(';').map(|v| v.trim().to_string()).collect(),
             _ => usage(),
         }
     }
@@ -188,7 +183,10 @@ fn read_npy(path: &Path) -> (Vec<f32>, usize, usize) {
     let mut header = vec![0u8; header_len];
     f.read_exact(&mut header).unwrap();
     let header = String::from_utf8_lossy(&header);
-    assert!(header.contains("'<f4'"), "only little-endian f32 supported: {header}");
+    assert!(
+        header.contains("'<f4'"),
+        "only little-endian f32 supported: {header}"
+    );
     assert!(
         header.contains("'fortran_order': False"),
         "only C order supported: {header}"
@@ -230,11 +228,7 @@ fn distance(metric: Metric, a: &[f32], a_norm_sq: f32, b: &[f32], b_norm_sq: f32
                 2.0
             }
         }
-        Metric::L2 => a
-            .iter()
-            .zip(b)
-            .map(|(x, y)| (x - y) * (x - y))
-            .sum::<f32>() as f64,
+        Metric::L2 => a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() as f64,
     }
 }
 
@@ -316,7 +310,9 @@ fn ground_truth(
 }
 
 fn to_vec(data: &[f32], dim: usize, i: usize) -> DataValue {
-    DataValue::Vec(Vector::F32(Array1::from(data[i * dim..(i + 1) * dim].to_vec())))
+    DataValue::Vec(Vector::F32(Array1::from(
+        data[i * dim..(i + 1) * dim].to_vec(),
+    )))
 }
 
 fn dir_size(p: &Path) -> u64 {
@@ -406,7 +402,8 @@ fn main() {
         // cheap stable hash of the extra index options
         a.index_opts
             .bytes()
-            .fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+            .fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64)
+                .wrapping_mul(0x100000001b3))
     );
     let snap_path = a.data_dir.join(format!("{snap_key}.sqlite"));
     let snap_meta = a.data_dir.join(format!("{snap_key}.build"));
@@ -415,7 +412,9 @@ fn main() {
         let t = Instant::now();
         db.restore_backup(&snap_path).expect("restore snapshot");
         if let Ok(meta) = fs::read_to_string(&snap_meta) {
-            let mut it = meta.split_whitespace().map(|x| x.parse::<f64>().unwrap_or(0.0));
+            let mut it = meta
+                .split_whitespace()
+                .map(|x| x.parse::<f64>().unwrap_or(0.0));
             insert_time = Duration::from_secs_f64(it.next().unwrap_or(0.0));
             build_time = Duration::from_secs_f64(it.next().unwrap_or(0.0));
         }
@@ -544,46 +543,50 @@ fn main() {
         a.variants.clone()
     };
     for variant in &variants {
-    for kv in variant.split_whitespace() {
-        if let Some((k, v)) = kv.split_once('=') {
-            std::env::set_var(k, v);
-        }
-    }
-    let vname = if variant.is_empty() { "-" } else { variant.as_str() };
-    for &s in &a.selectivities {
-        let threshold = ((s * BUCKETS as f64).round() as usize).clamp(1, BUCKETS);
-        let matches = (0..n).filter(|i| i % BUCKETS < threshold).count();
-        let gt = ground_truth(&a, &data, dim, n, &queries, threshold);
-        for &ef in &a.ef {
-            let mut lat = Vec::with_capacity(queries.len());
-            let mut hits = 0usize;
-            let mut expected = 0usize;
-            let mut under = 0usize;
-            let t = Instant::now();
-            let cpu0 = process_cpu_time();
-            for (qi, truth) in queries.iter().zip(&gt) {
-                let tq = Instant::now();
-                let got = run_query(*qi, ef, threshold);
-                lat.push(tq.elapsed());
-                for id in &got {
-                    assert!(
-                        (*id as usize) % BUCKETS < threshold,
-                        "filter violated: id {id}"
-                    );
-                }
-                if got.len() < a.k && matches >= a.k {
-                    under += 1;
-                }
-                expected += truth.len();
-                hits += truth
-                    .iter()
-                    .filter(|id| got.contains(&(**id as i64)))
-                    .count();
+        for kv in variant.split_whitespace() {
+            if let Some((k, v)) = kv.split_once('=') {
+                std::env::set_var(k, v);
             }
-            let total = t.elapsed();
-            let cpu = process_cpu_time().saturating_sub(cpu0);
-            lat.sort();
-            let line = format!(
+        }
+        let vname = if variant.is_empty() {
+            "-"
+        } else {
+            variant.as_str()
+        };
+        for &s in &a.selectivities {
+            let threshold = ((s * BUCKETS as f64).round() as usize).clamp(1, BUCKETS);
+            let matches = (0..n).filter(|i| i % BUCKETS < threshold).count();
+            let gt = ground_truth(&a, &data, dim, n, &queries, threshold);
+            for &ef in &a.ef {
+                let mut lat = Vec::with_capacity(queries.len());
+                let mut hits = 0usize;
+                let mut expected = 0usize;
+                let mut under = 0usize;
+                let t = Instant::now();
+                let cpu0 = process_cpu_time();
+                for (qi, truth) in queries.iter().zip(&gt) {
+                    let tq = Instant::now();
+                    let got = run_query(*qi, ef, threshold);
+                    lat.push(tq.elapsed());
+                    for id in &got {
+                        assert!(
+                            (*id as usize) % BUCKETS < threshold,
+                            "filter violated: id {id}"
+                        );
+                    }
+                    if got.len() < a.k && matches >= a.k {
+                        under += 1;
+                    }
+                    expected += truth.len();
+                    hits += truth
+                        .iter()
+                        .filter(|id| got.contains(&(**id as i64)))
+                        .count();
+                }
+                let total = t.elapsed();
+                let cpu = process_cpu_time().saturating_sub(cpu0);
+                lat.sort();
+                let line = format!(
                 "| {vname} | {s} | {matches} | {ef} | {:.4} | {:.1} | {:.3} | {:.3} | {:.3} | {under} |\n",
                 hits as f64 / expected.max(1) as f64,
                 queries.len() as f64 / total.as_secs_f64(),
@@ -591,10 +594,10 @@ fn main() {
                 percentile(&lat, 0.99).as_secs_f64() * 1e3,
                 cpu.as_secs_f64() * 1e3 / queries.len() as f64,
             );
-            eprint!("{line}");
-            table.push_str(&line);
+                eprint!("{line}");
+                table.push_str(&line);
+            }
         }
-    }
     }
     println!("{table}");
     if let Some(out) = &a.out {
