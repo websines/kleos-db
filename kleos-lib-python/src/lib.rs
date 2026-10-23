@@ -1462,9 +1462,12 @@ impl CozoDbPy {
     /// Store a memory. Options: `ns`, `kind`, `source`, `importance`,
     /// `entities` (names, resolved to the namespace's entities; include the
     /// subject, e.g. "user"), `at` (valid-from µs), `ttl` / `expires` (µs),
-    /// `k`, `decider`, `embedder`. Returns `{action, id, superseded,
-    /// duplicate_of, tentative, decisions, gated, entities, entity_links,
-    /// embedded, decider, ns}`; decisions carry `decided_by`.
+    /// `k`, `decider`, `embedder`, `split` (`"auto"`, the default: a text of
+    /// several sentences becomes one memory per claim; `"none"`: one memory),
+    /// `min_similarity`. Returns `{action, id, superseded, duplicate_of,
+    /// tentative, decisions, gated, entities, entity_links, embedded,
+    /// decider, ns}`, plus `claims` when the text was split; decisions carry
+    /// `decided_by`.
     #[pyo3(signature = (text, **opts))]
     pub fn remember(&self, py: Python<'_>, text: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "remember", vec![("text", json!(text))], opts)

@@ -10,6 +10,13 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Memory API: claim-level `remember`.** A multi-sentence text (a chat message) is split into claims, one memory each, and every claim is decided on its own. See "Claims" in docs/specs/memory-api.md.
+  - **Splitting** (`split: 'auto'`, the default; `'none'` keeps one memory per text) is a rule-based splitter (`memory_claims::split_claims`): abbreviations and initials, decimals, URLs and versions, quotes and brackets, ellipses, list bullets and hard-wrapped lines. A text that is one sentence is stored exactly as before.
+  - **Ids and provenance:** claim ids are `<statement id>.<n>`; a one-claim statement keeps the plain id. Each claim's `kleos_mem_source` row holds the whole statement, recall hits of a claim carry it as `context`, and `forget` / `set` of a statement id cover all its claims. The result lists `claims` (`id, text, action, duplicate_of, superseded, decided`), and each decision names its `claim` and the vectors' `similarity`.
+  - **Decisions per claim:** candidates are searched per claim, and the decider is batched over all claims (one call per template). Only declarative claims are decided, and only declarative memories are candidates: questions, requests to the assistant, greetings and fragments under three words are stored but never compared. A supersede ends only the old claim. Entity names are linked to the claims that mention them (to all claims when none does), and the same-subject gate is per claim.
+  - **Review noise and latency** (claims of a split text): a candidate under cosine 0.6 (`min_similarity`) is not sent to the decider, and of each claim only its likeliest pending `supersedes` (p ≥ 0.9) and `duplicate` (p ≥ 0.5) are kept for review.
+  - All claims of one `remember` are written in one transaction under the namespace version. With an Engram model attached, each added claim enqueues its own job, numbered with consecutive versions (the namespace version advances by the number of jobs).
+  - Results on LongMemEval knowledge-update questions and the life stream: docs/specs/memory-api.md, "Claims".
 - **Metal works from the Python bindings.** Inside a host linked against an old macOS SDK, Metal compiled candle's kernels as pre-3.1 MSL, so every Metal model call failed with `unknown type name 'float16_t'`. Python interpreters such as miniconda's 3.12 (SDK 11.1) are one example. Benchmarks had fallen back to CPU, which is 30–40× slower.
   - candle-metal-kernels is now vendored with the MSL version pinned (3.2 on macOS 15+, 3.1 on macOS 14).
   - In that interpreter, decider-nano on Metal now takes 29 ms per decision, and its p differs from CPU by 3.7e-5.

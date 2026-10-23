@@ -65,7 +65,9 @@ Options:
 - `ttl` (µs after `at`) or `expires` (absolute µs): past it, recall leaves the memory out by default;
 - `k`: the number of candidates, default 5;
 - `decider`;
-- `embedder`: only used when this call creates the store.
+- `embedder`: only used when this call creates the store;
+- `split`: `auto` (the default) stores a text of several sentences as one memory per claim (see "Claims"); `none` stores the whole text as one memory, as before claims;
+- `min_similarity`: the cosine below which a claim's candidate is not sent to the decider (default 0.6; claims of a split text only).
 
 Steps:
 1. Embed the text, if the store's embedder is enabled.
@@ -113,6 +115,37 @@ The result:
 Each decision carries the candidate, template, label, p, band, `decided_by`, reason and action.
 
 **Never deletes.** Supersession ends validity. Nothing in `remember` removes a row.
+
+#### Claims (multi-sentence text)
+
+Status: implemented (wave2/claims). Code: `kleos-core/src/memory_claims.rs` (splitter, declarative test) and `plan_remember` / `remember` in `memory.rs`.
+
+Real agent input is a chat message, not a sentence. In LongMemEval's knowledge-update questions the update is one clause of a long message ("…Currently, my favourite is Kansas City Masterpiece BBQ sauce, but…") and the stale fact is one clause of an older one. Treating the message as one memory fails three ways: the old message is often not among the top-k candidates; "does this whole message supersede that one?" is the wrong question; and superseding the whole old message would also end its unrelated facts. So `remember` works per claim.
+
+**Splitting** (`split: 'auto'`, the default). `memory_claims::split_claims` is rule-based and deterministic:
+- lines first: a list bullet (`-`, `*`, `•`, `1.`, `2)`, `a)`) or a blank line starts a new item; a line that continues an unfinished one (starts in lower case, previous line without closing punctuation) is joined to it;
+- then sentences: `.`, `!`, `?`, `…` (with closing quotes or brackets) followed by whitespace and a capital letter or a digit. A period that is not followed by whitespace never splits (decimals, URLs, e-mail addresses, version numbers). Titles and number words never end a sentence ("Dr.", "St.", "No.", "e.g."); words that may ("etc.", "p.m.", "U.S.", "Inc.", months) only before a capital; one-letter initials ("A. Smith") never; an ellipsis only before a capital;
+- a claim with no letter or digit is dropped, and a repeated claim is kept once.
+
+A text that yields one claim is stored exactly as before: the trimmed text, under the plain statement id.
+
+**Storage.** Each claim is a memory row (with its own vector, TTL row, importance and kind from the call's options). Its id is `<statement id>.<n>`, n from 1; a one-claim statement keeps the plain `m_…` id. Every claim's `kleos_mem_source` row holds the whole statement (`stmt` = statement id), so:
+- recall hits of a claim carry `context`: the statement it came from (absent when it is the memory's own text);
+- `forget` and `set` of a statement id cover all its claims (`forget` of a claim id covers that claim only);
+- a claim that duplicates an existing memory adds a source row to it, as a whole statement did.
+
+**Decisions per claim.**
+- Only **declarative** claims are decided (`memory_claims::is_declarative`): not a question (`?`, or a wh-/auxiliary opening such as "Can you", "Do you", "What … " without a comma clause), not a request ("Please", "Suggest", "Recommend", "I need some ideas", "Any tips"…), not a greeting or thanks, and at least three words. The others are stored and recallable, and never candidates either: candidates are fetched 2k deep and the first k declarative ones are kept. With `split: 'none'` every statement and candidate is decided, as before.
+- Candidates are searched per claim; the decider is **batched across all claims**: one `decide(supersedes)` and one `decide(duplicate)` call per `remember`, through the pair cache.
+- **Similarity floor** (claims of a split text only): a candidate whose vector has cosine < `min_similarity` (default 0.6) with the claim is not sent to the decider. Each decision reports `similarity`.
+- **Review noise** (claims of a split text only): of a claim's pending `supersedes` answers, only the one with the highest p stays pending; the others are recorded as `none`.
+- A supersede ends **only the old claim**; the old statement's other claims stay current. A memory that one claim of the statement duplicates is not ended by another claim of the same statement (that supersede is left pending). Claims of one statement are not compared with each other.
+- **Entities:** names are resolved once per statement. A name is linked to (mentions) the claims whose text contains it (case-insensitive, at word boundaries), or to every claim when no claim does, e.g. the subject `user`. The same-subject gate uses each claim's own entities.
+- A single sentence keeps the old behaviour except that a question, request or fragment is not decided (it would otherwise be compared as if it stated a fact).
+
+**One transaction.** All claims of a `remember` are written in its one script, under the namespace version assert, with one re-plan of the whole statement on conflict. With an Engram model attached, each added claim enqueues its own job (`write` or `supersede` with the old claims it ended, the claim's text, and the entity names linked to it), numbered `v+1 … v+n` from the planned version `v`; the version then advances by `n`, so the last job id is still the commit's version.
+
+**Result.** For a split statement, `id` is the statement id (when any claim was added), `action` is `added` unless every claim was a duplicate, `superseded` is the union, and `claims` lists `{id, text, action, duplicate_of, superseded, decided}` per claim. Each decision names its `claim`. A one-claim statement's result is unchanged (no `claims`).
 
 #### Template choice (why supersedes + duplicate, not relation)
 
@@ -163,7 +196,7 @@ It is one script:
 - The result is joined with `kleos_mem` `@ 'NOW'` (or `@ $as_of`), plus the kind and entity filters. Archived memories, and memories whose expiry is at or before the read time, are left out unless asked. The order is by relevance; with the blend on, a window of max(2k + 10, k) is fetched and re-ranked.
 - Both legs over-fetch (4k + 16, and 4× more with a filter), because the indexes also hold stale versions.
 
-Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
+Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`, and `context` (the whole statement) when the memory is one claim of a longer text. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
 
 The vector leg always returns the nearest neighbours, so recall returns up to k memories even when none are relevant. There is no score cutoff.
 
@@ -295,6 +328,7 @@ db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "
 ::memory init {embedder: 'gemma', decider: 'nano'}
 ::memory init {engram: 'nano'}             # feature engram: remember/forget enqueue Engram jobs
 ::memory remember 'I moved to Lisbon.' {ns: 'alice', entities: ['Lisbon'], source: 'chat-12'}
+::memory remember 'I moved to Lisbon. My rent is €900.' {ns: 'alice', split: 'none'}   # one memory, not two claims
 ::memory recall 'where do I live?' {ns: 'alice', k: 5, as_of: 1767225600000000}
 ::memory forget $id {ns: 'alice', mode: 'erase'}
 ::memory forget {ns: 'alice', kind: 'preference'}
@@ -307,7 +341,7 @@ db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "
 ```
 
 Output:
-- `recall` returns one row per hit: `id, text, score, kind, valid_from, valid_to, created, source, importance, pending_superseded_by, relevance, recency, access_count, last_access, expires, archived`.
+- `recall` returns one row per hit: `id, text, score, kind, valid_from, valid_to, created, source, importance, pending_superseded_by, relevance, recency, access_count, last_access, expires, archived, context`.
 - The other ops return one row with a column per result field. Lists of plain values become lists; records become JSON.
 - `recall` and `reflect` run in read-only scripts (a read-only recall does not count accesses). The others are refused there, and inside imperative blocks, because they run their own transactions.
 - Unknown options are errors.
@@ -317,6 +351,7 @@ Output:
 ```python
 db.memory_init(embedder="gemma", decider="nano")
 r = db.remember("I moved to Lisbon.", ns="alice", entities=["Lisbon"])   # dict
+db.remember("I moved to Lisbon. My rent is €900.", ns="alice")          # two claims: r["claims"]; split="none" for one memory
 db.recall("where do I live?", ns="alice", k=5, as_of=None)               # list of dicts
 db.forget(r["id"], ns="alice", mode="erase"); db.forget(ns="alice", kind="preference")
 db.reflect("alice"); db.link(a, b, "works_at", ns="alice")

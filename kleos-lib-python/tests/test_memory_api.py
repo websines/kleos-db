@@ -131,3 +131,21 @@ def test_entities_gate_scoring_ttl_and_archive(db):
     db.memory_set(b["id"], ns="u", archived=True)
     assert all(h["id"] != b["id"] for h in db.recall("rent", ns="u"))
     assert any(h["id"] == b["id"] and h["archived"] for h in db.recall("rent", ns="u", include_archived=True))
+
+
+def test_claims_split_and_forget_statement(db):
+    a = db.remember("My rent is $1,800 per month. I have a dog named Max. Any tips for walks?", ns="c", at=d(1))
+    stmt = a["id"]
+    assert [c["id"] for c in a["claims"]] == [f"{stmt}.1", f"{stmt}.2", f"{stmt}.3"]
+    assert [c["decided"] for c in a["claims"]] == [True, True, False]
+    # one claim updates the rent (value rule); the dog claim stays
+    b = db.remember("My rent is $2,100 per month.", ns="c", at=d(5))
+    assert b["superseded"] == [f"{stmt}.1"]
+    hit = [h for h in db.recall("dog named Max", ns="c", k=5) if h["id"] == f"{stmt}.2"][0]
+    assert hit["context"].startswith("My rent is $1,800")
+    # split="none": one memory, as before claims
+    w = db.remember("I like jazz. I play the piano.", ns="w", split="none")
+    assert "claims" not in w and "." not in w["id"]
+    # forget of the statement id covers its claims
+    f = db.forget(stmt, ns="c")
+    assert f["ids"] == [f"{stmt}.2", f"{stmt}.3"]
