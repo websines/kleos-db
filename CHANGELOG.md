@@ -10,6 +10,10 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Metal works from the Python bindings.** Inside a host linked against an old macOS SDK, Metal compiled candle's kernels as pre-3.1 MSL, so every Metal model call failed with `unknown type name 'float16_t'`. Python interpreters such as miniconda's 3.12 (SDK 11.1) are one example. Benchmarks had fallen back to CPU, which is 30–40× slower.
+  - candle-metal-kernels is now vendored with the MSL version pinned (3.2 on macOS 15+, 3.1 on macOS 14).
+  - In that interpreter, decider-nano on Metal now takes 29 ms per decision, and its p differs from CPU by 3.7e-5.
+  - Rust Metal parity is unchanged: 0/10 flips at f32, q8 and bf16.
 - **Memory API: concurrent `remember`s on one topic no longer leave two current facts.**
   - A per-namespace version row (`kleos_mem_ns`) is asserted and bumped inside each write transaction, so the storage engine orders writers across threads and processes. A writer that lost the race plans again and supersedes the winner.
   - The schema version is now 2, and v1 stores get the table on first use.

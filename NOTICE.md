@@ -180,3 +180,11 @@ an open legal question. The maintainers decided (2026-10-23) to publish
 `nano-tune-v1` under MIT, with the training sources and their licences listed
 on the model card. A weights build without the CC BY-SA sources is possible by
 dropping them in `build_data.py`.
+
+### candle-metal-kernels (MIT OR Apache-2.0; vendored and patched)
+
+`third_party/candle-metal-kernels` is `candle-metal-kernels` 0.11.0 from
+Hugging Face [candle](https://github.com/huggingface/candle), dual-licensed MIT
+OR Apache-2.0, applied with `[patch.crates-io]`. kleos changes one function so
+the Metal Shading Language version is pinned rather than inherited from the
+host executable's SDK. See `third_party/candle-metal-kernels/KLEOS_PATCH.md`.
