@@ -13,7 +13,7 @@ Tests:
 - `kleos-core/tests/memory.rs`: fake decider and embedder, plus one `#[ignore]` real-model test;
 - `kleos-lib-python/tests/test_memory_api.py`.
 
-Scenario: `scripts/memory-api/life_stream.py` and `kleos-core/examples/memory_scenario.rs`.
+Scenario: `scripts/memory-api/life_stream.py` and `kleos-core/examples/memory_scenario.rs`. Claims on LongMemEval knowledge-update questions: `scripts/memory-api/claims_ku.py`.
 
 ## Goal
 
@@ -151,7 +151,7 @@ A text that yields one claim is stored exactly as before: the trimmed text, unde
 
 ##### Results (LongMemEval knowledge-update, native API)
 
-Each user turn of the oracle haystack goes to `remember` whole (`split: 'auto'`, no splitting in Python), with the session date as `at` and the session id as `source`; then `recall(question, k = 10)`. The metric is the prototype's: is the first hit from an answer session the latest answer session? decider-nano (nano-tune-v1) and EmbeddingGemma on Metal, from the Python wheel. Script: `.bench-data/claims-impl/claims_ku_native.py`; the prototype is `claims_ku_prototype.py` (Python-side sentences, questions dropped).
+Each user turn of the oracle haystack goes to `remember` whole (`split: 'auto'`, no splitting in Python), with the session date as `at` and the session id as `source`; then `recall(question, k = 10)`. The metric is the prototype's: is the first hit from an answer session the latest answer session? decider-nano (nano-tune-v1) and EmbeddingGemma on Metal, from the Python wheel. Script: `scripts/memory-api/claims_ku.py` (runs and logs in `.bench-data/claims-impl/runs/`); the prototype is `.bench-data/claims-impl/claims_ku_prototype.py` (Python-side sentences, questions dropped).
 
 The 23 held-out, non-abstention questions (`lme_ku_split()`):
 
