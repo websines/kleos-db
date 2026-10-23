@@ -340,6 +340,8 @@ Recalled memories, grouped by topic, oldest first. [date] is when a statement wa
 - **Budget.** Tokens are estimated as characters / 4. Items are added in rank order with their `previously` lines while they fit (a group heading counts too); then the `said in` lines, in rank order, while the budget lasts. Memories that did not fit are listed in `omitted`.
 - **Deterministic.** The same store and options give the same text byte for byte.
 
+**Measured** (docs/benchmarks/memory.md, "After"): on 301 LoCoMo questions with the same reader and judge, the context block scored 0.807, against 0.708 for a dated list of hit texts and 0.814 for the whole conversation; on 119 LongMemEval questions it scored 0.681 against 0.647. With the default statement cap, a reader that sees only each hit's `text` (one sentence of a message) does worse than before (0.671 on LoCoMo). Show `context` (the statement) or use this format.
+
 `::memory recall '…' {format: 'context', budget: 800}` returns one row with the columns `text, tokens, budget, ids, omitted`; HTTP `POST /memory/recall {"query": …, "format": "context"}` returns the object.
 
 #### Ranking (E4, C6)
