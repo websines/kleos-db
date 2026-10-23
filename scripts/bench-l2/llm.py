@@ -58,7 +58,8 @@ def _key(name):
 
 
 class Client:
-    def __init__(self, endpoint=None, model=None, thinking=False, max_tokens=None, cache_dir=None):
+    def __init__(self, endpoint=None, model=None, thinking=False, max_tokens=None, cache_dir=None, extra_params=None,
+                 retries=8, retry_cap=60.0):
         self.endpoint = endpoint or os.environ.get("KLEOS_BENCH_LLM", "synthetic")
         base, default_model = ENDPOINTS[self.endpoint]
         self.base = base
@@ -67,12 +68,15 @@ class Client:
         self.max_tokens = max_tokens or (2500 if thinking else 400)
         self.cache = Path(cache_dir or C.bench_dir() / "llm-cache")
         self.cache.mkdir(parents=True, exist_ok=True)
+        self.retries, self.retry_cap = retries, retry_cap  # 429/5xx: attempts, longest wait (s)
+        self.extra_params = extra_params or {}  # e.g. response_format; part of the cache key only when set
         self.stats = {"calls": 0, "cached": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0}
 
     def _params(self):
         p = {"temperature": 0, "max_tokens": self.max_tokens}
         if not self.thinking and self.endpoint == "synthetic":
             p["reasoning_effort"] = "none"
+        p.update(self.extra_params)
         return p
 
     def chat(self, messages):
@@ -91,7 +95,7 @@ class Client:
             headers["Authorization"] = "Bearer " + k
         delay = 2.0
         last = None
-        for attempt in range(8):
+        for attempt in range(self.retries):
             try:
                 req = urllib.request.Request(self.base + "/chat/completions", data=body, headers=headers)
                 with urllib.request.urlopen(req, timeout=600) as r:
@@ -99,7 +103,8 @@ class Client:
                 content = (d["choices"][0]["message"].get("content") or "").strip()
                 if not content:
                     raise ValueError("empty content")
-                out = {"content": content, "model": d.get("model"), "usage": d.get("usage")}
+                out = {"content": content, "model": d.get("model"), "usage": d.get("usage"),
+                       "finish_reason": d["choices"][0].get("finish_reason")}
                 f.parent.mkdir(exist_ok=True)
                 tmp = f.with_suffix(".tmp")
                 tmp.write_text(json.dumps({"request": {"model": self.model, "messages": messages, **params},
@@ -120,7 +125,7 @@ class Client:
             with _lock:
                 self.stats["retries"] += 1
             time.sleep(delay + random.random())
-            delay = min(delay * 2, 60)
+            delay = min(delay * 2, self.retry_cap)
         raise RuntimeError(f"LLM call failed after retries: {last}")
 
 
