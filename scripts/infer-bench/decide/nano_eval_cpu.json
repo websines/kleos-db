@@ -1,0 +1,167 @@
+{
+ "device": "cpu",
+ "model": "tasksource/tasksource-decider-nano (main/v4)",
+ "dtype": "f32",
+ "supersedes": {
+  "auroc": 0.938,
+  "auroc_ci95": [
+   0.843,
+   1.0
+  ],
+  "adapt_auroc": 0.894,
+  "thr_from_adapt": 0.155,
+  "acc@thr": 0.833,
+  "acc@thr_ci95": [
+   0.714,
+   0.929
+  ],
+  "auto_on_eval(tau from adapt, alpha=.02)": {
+   "tau_auto": 1.01,
+   "coverage": 0.0,
+   "false_auto": 0,
+   "auto_n": 0,
+   "recall_auto": 0.0
+  },
+  "eval_split": {
+   "vs_compatible": 0.875,
+   "vs_duplicate": 1.0
+  }
+ },
+ "contradicts(gold=update|contradiction)": {
+  "auroc": 0.944,
+  "auroc_ci95": [
+   0.868,
+   0.998
+  ],
+  "adapt_auroc": 0.946,
+  "thr_from_adapt": 0.5,
+  "acc@thr": 0.881,
+  "acc@thr_ci95": [
+   0.762,
+   0.976
+  ],
+  "auto_on_eval(tau from adapt, alpha=.02)": {
+   "tau_auto": 1.01,
+   "coverage": 0.0,
+   "false_auto": 0,
+   "auto_n": 0,
+   "recall_auto": 0.0
+  }
+ },
+ "duplicate": {
+  "auroc": 0.997,
+  "auroc_ci95": [
+   0.983,
+   1.0
+  ],
+  "adapt_auroc": 1.0,
+  "thr_from_adapt": 0.5,
+  "acc@thr": 0.976,
+  "acc@thr_ci95": [
+   0.929,
+   1.0
+  ],
+  "auto_on_eval(tau from adapt, alpha=.02)": {
+   "tau_auto": 0.539,
+   "coverage": 0.262,
+   "false_auto": 0,
+   "auto_n": 11,
+   "recall_auto": 0.917
+  }
+ },
+ "same_entity(no adapt set)": {
+  "auroc": 0.924,
+  "auroc_ci95": [
+   0.771,
+   1.0
+  ],
+  "acc@0.5": 0.75
+ },
+ "relation3": {
+  "acc": 0.69,
+  "adapt_acc": 0.583,
+  "bias(adapt)": [
+   0.0,
+   0.0,
+   -0.5
+  ],
+  "acc_bias": 0.905,
+  "acc_bias_ci95": [
+   0.81,
+   0.976
+  ],
+  "counts_bias": {
+   "duplicate": 12,
+   "update": 16,
+   "compatible": 14
+  }
+ },
+ "probe_supersedes(nli feats)": {
+  "C": 0.003,
+  "adapt_cv_auroc": 1.0,
+  "auroc": 0.993,
+  "auroc_ci95": [
+   0.972,
+   1.0
+  ],
+  "adapt_auroc": 1.0,
+  "thr_from_adapt": 0.629,
+  "acc@thr": 0.929,
+  "acc@thr_ci95": [
+   0.857,
+   1.0
+  ],
+  "auto_on_eval(tau from adapt, alpha=.02)": {
+   "tau_auto": 0.6295,
+   "coverage": 0.357,
+   "false_auto": 0,
+   "auto_n": 15,
+   "recall_auto": 0.833
+  },
+  "eval_split": {
+   "vs_compatible": 0.986,
+   "vs_duplicate": 1.0
+  }
+ },
+ "probe_relation4(cnli feats)": {
+  "C": 1.0,
+  "adapt_cv_acc": 0.917,
+  "acc": 0.929,
+  "acc_ci95": [
+   0.857,
+   1.0
+  ]
+ },
+ "probe_relation3(cnli feats)": {
+  "C": 0.01,
+  "adapt_cv_acc": 0.95,
+  "acc": 0.929,
+  "acc_ci95": [
+   0.857,
+   1.0
+  ]
+ },
+ "vitaminc300_supersedes": {
+  "auroc": 0.679,
+  "auroc_ci95": [
+   0.618,
+   0.742
+  ],
+  "vs_supports": 0.741,
+  "vs_nei": 0.617,
+  "acc@adapt_thr": 0.57,
+  "auto_at_adapt_tau": {
+   "tau_auto": 1.01,
+   "coverage": 0.0,
+   "false_auto": 0,
+   "auto_n": 0,
+   "recall_auto": 0.0
+  }
+ },
+ "latency_ms": {
+  "b1_p50": 168.0,
+  "b1_p90": 210.6,
+  "batched16_per_decision": 117.75
+ },
+ "max_rss_mb": 1649.0
+}

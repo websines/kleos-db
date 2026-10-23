@@ -1109,6 +1109,10 @@ lazy_static! {
                 Arc::<Box<dyn FixedRule>>::new(Box::new(ReciprocalRankFusion)),
             ),
             (
+                "Decide".to_string(),
+                Arc::<Box<dyn FixedRule>>::new(Box::new(Decide)),
+            ),
+            (
                 "WeightedFusion".to_string(),
                 Arc::<Box<dyn FixedRule>>::new(Box::new(WeightedFusion)),
             ),

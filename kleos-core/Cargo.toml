@@ -102,6 +102,9 @@ cypher = []
 infer = ["dep:kleos-infer"]
 ## `infer` plus Apple-GPU (Metal) kernels.
 infer-metal = ["infer", "kleos-infer/metal"]
+## `infer` plus Apple Accelerate BLAS for CPU matmuls (macOS; 3-5x faster
+## decider-nano on CPU; no f16 on CPU).
+infer-accelerate = ["infer", "kleos-infer/accelerate"]
 
 #! # Recommendation for features to enable
 #!

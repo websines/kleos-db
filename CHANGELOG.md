@@ -11,6 +11,33 @@ to kleos.
 
 ### Added
 
+- `decide()`: small decision models attached to the database (UPGRADE_PLAN D5,
+  docs/specs/decide.md).
+  - Fixed, versioned question templates per decision and per backend: `supersedes`,
+    `same_entity`, `duplicate`, `contradicts`, `relation` (update / contradiction /
+    compatible / duplicate) and `important`. Callers never write the prompt.
+  - Symmetric templates score both orders and average.
+  - Calibration: per-option log-bias, a label threshold and a risk-controlled
+    auto threshold. Each decision returns `{label, p, band: auto|tentative|none,
+    confident}`, with defaults fitted on a held-out adapt set.
+  - `::decider fit <name> <template> <relation>` fits an L2 logistic probe on the
+    backend's decision features. It is stored in `kleos_decider_fits`, reloaded on
+    open and used automatically.
+  - CozoScript: `::decider list | enable | disable | fit | fitted | forget`;
+    `decide_p/label/band(model, template, a, b)`, `decide_supersedes`,
+    `decide_same_entity`, `decide_duplicate`, `decide_contradicts`,
+    `decide_important`, `decide_relation`; the batched fixed rule
+    `Decide(rel[id, a, b], model:, template:)`, which outputs
+    `[id, label, p, band, decided_by]`.
+  - Built-in backend: `tasksource/tasksource-decider-nano` (150M, Apache-2.0), a
+    candle port in `kleos-infer` that matches the PyTorch reference to about 1e-5.
+    The `infer-accelerate` feature adds Apple BLAS for CPU.
+  - Third backends can register their own template family (`register_family`).
+  - Rust (`Db`/`DbInstance::enable_decider`, `decide`, `decide_batch`,
+    `fit_decider`) and Python (`db.enable_decider`, `db.decide`, `db.fit_decider`)
+    APIs.
+  - `examples/decide_eval.rs` evaluation harness.
+
 - `examples/vecbench.rs`: a vector-search benchmark harness. It loads an `.npy`
   matrix, builds an HNSW index, runs held-out queries over an `ef` sweep and a
   filter-selectivity sweep, and reports build time, recall@k against cached exact

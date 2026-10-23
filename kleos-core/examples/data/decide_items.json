@@ -1,0 +1,639 @@
+{
+"source": "scripts/infer-bench/d1/eval_set.py (eval) and eval_set_adapt.py (adapt); hand-written, kleos authors",
+"adapt": [
+[
+"Nadia works as a barista at a cafe downtown.",
+"Nadia quit the cafe and is now a junior accountant at Deloitte.",
+"update"
+],
+[
+"Hugo lives in Toronto.",
+"Hugo relocated to Vancouver last autumn.",
+"update"
+],
+[
+"Owen is dating Clara.",
+"Owen and Clara broke up in the spring.",
+"update"
+],
+[
+"The user's dentist is Dr. Rossi.",
+"The user switched to a new dentist, Dr. Abebe, after moving.",
+"update"
+],
+[
+"Fatima rides a road bike to work.",
+"Fatima now takes the train to work since her bike was stolen.",
+"update"
+],
+[
+"The user's preferred editor is VS Code.",
+"The user has moved over to Neovim as their main editor.",
+"update"
+],
+[
+"Greta drinks coffee every morning.",
+"Greta gave up coffee and only drinks green tea now.",
+"update"
+],
+[
+"The launch is scheduled for March 1.",
+"The launch has been delayed to April 20.",
+"update"
+],
+[
+"Diego is married to Lucia.",
+"Diego and Lucia divorced last year.",
+"update"
+],
+[
+"The user's email is pat@oldmail.com.",
+"The user now uses pat@newmail.io; the oldmail address was closed.",
+"update"
+],
+[
+"Yuki is a junior designer.",
+"Yuki was promoted to lead designer in January.",
+"update"
+],
+[
+"The company hosts its website on Heroku.",
+"The company moved its website hosting from Heroku to Fly.io.",
+"update"
+],
+[
+"Ben's favourite sport is tennis.",
+"Ben says he is mostly into padel these days, not tennis.",
+"update"
+],
+[
+"Aisha owns a gray cat named Smokey.",
+"Smokey passed away and Aisha has no pets now.",
+"update"
+],
+[
+"The user works the night shift.",
+"The user moved to the day shift last week.",
+"update"
+],
+[
+"Leo's gym membership is at FitLife.",
+"Leo cancelled FitLife and joined a climbing gym instead.",
+"update"
+],
+[
+"The weekly meeting is on Tuesdays.",
+"The weekly meeting moved to Thursdays starting this month.",
+"update"
+],
+[
+"Ines is training for a half marathon.",
+"Ines stopped training after a knee injury and dropped the race.",
+"update"
+],
+[
+"Victor's anniversary is on October 12.",
+"Correction: Victor's anniversary is October 21, I mixed up the digits.",
+"contradiction"
+],
+[
+"The user's car is blue.",
+"The user's car is red.",
+"contradiction"
+],
+[
+"Sofia speaks three languages.",
+"Sofia actually speaks five languages.",
+"contradiction"
+],
+[
+"The server runs Ubuntu 20.04.",
+"The server is running Debian 12, not Ubuntu.",
+"contradiction"
+],
+[
+"Kenji is lactose intolerant.",
+"Kenji said he is not lactose intolerant; he just dislikes milk.",
+"contradiction"
+],
+[
+"The apartment rent is $1,800 per month.",
+"The apartment rent is $2,100 per month.",
+"contradiction"
+],
+[
+"Nadia works as a barista at a cafe downtown.",
+"Nadia is taking an evening pottery class.",
+"compatible"
+],
+[
+"Hugo lives in Toronto.",
+"Hugo has a younger brother named Felix.",
+"compatible"
+],
+[
+"Owen is dating Clara.",
+"Owen and Clara are planning a trip to Japan.",
+"compatible"
+],
+[
+"The user's preferred editor is VS Code.",
+"The user writes most of their code in Go.",
+"compatible"
+],
+[
+"Greta drinks coffee every morning.",
+"Greta takes her coffee with oat milk.",
+"compatible"
+],
+[
+"Fatima rides a road bike to work.",
+"Fatima's office is about 12 kilometres from her home.",
+"compatible"
+],
+[
+"Diego is married to Lucia.",
+"Diego and Lucia have two daughters.",
+"compatible"
+],
+[
+"Yuki is a junior designer.",
+"Yuki mostly works on the mobile app's onboarding screens.",
+"compatible"
+],
+[
+"The company hosts its website on Heroku.",
+"The company's website gets about 50k visitors a month.",
+"compatible"
+],
+[
+"Ben's favourite sport is tennis.",
+"Ben plays chess online in the evenings.",
+"compatible"
+],
+[
+"Aisha owns a gray cat named Smokey.",
+"Aisha works from home three days a week.",
+"compatible"
+],
+[
+"The user works the night shift.",
+"The user is saving up for a new laptop.",
+"compatible"
+],
+[
+"Leo's gym membership is at FitLife.",
+"Leo goes to the gym before work, around 6 am.",
+"compatible"
+],
+[
+"The weekly meeting is on Tuesdays.",
+"The weekly meeting is usually run by Priscilla.",
+"compatible"
+],
+[
+"Victor's anniversary is on October 12.",
+"Victor is planning a surprise dinner for his anniversary.",
+"compatible"
+],
+[
+"Sofia speaks three languages.",
+"Sofia is learning to play the guitar.",
+"compatible"
+],
+[
+"The server runs Ubuntu 20.04.",
+"The server has 64 GB of RAM.",
+"compatible"
+],
+[
+"Kenji is lactose intolerant.",
+"Kenji loves spicy ramen.",
+"compatible"
+],
+[
+"Nadia works as a barista at a cafe downtown.",
+"Nadia makes coffee at a downtown cafe for a living.",
+"duplicate"
+],
+[
+"Hugo lives in Toronto.",
+"Hugo's home is in Toronto, Canada.",
+"duplicate"
+],
+[
+"Owen is dating Clara.",
+"Clara is Owen's girlfriend.",
+"duplicate"
+],
+[
+"The user's dentist is Dr. Rossi.",
+"Dr. Rossi is the dentist the user sees.",
+"duplicate"
+],
+[
+"Fatima rides a road bike to work.",
+"Fatima commutes to her job on a road bicycle.",
+"duplicate"
+],
+[
+"The user's preferred editor is VS Code.",
+"The user likes Visual Studio Code best for editing.",
+"duplicate"
+],
+[
+"Greta drinks coffee every morning.",
+"Every morning Greta has a cup of coffee.",
+"duplicate"
+],
+[
+"The launch is scheduled for March 1.",
+"The launch date is the first of March.",
+"duplicate"
+],
+[
+"Diego is married to Lucia.",
+"Lucia is Diego's wife.",
+"duplicate"
+],
+[
+"Yuki is a junior designer.",
+"Yuki works as a designer at a junior level.",
+"duplicate"
+],
+[
+"The company hosts its website on Heroku.",
+"Our site is deployed on Heroku.",
+"duplicate"
+],
+[
+"Ben's favourite sport is tennis.",
+"Tennis is the sport Ben likes most.",
+"duplicate"
+],
+[
+"Aisha owns a gray cat named Smokey.",
+"Aisha has a grey cat called Smokey.",
+"duplicate"
+],
+[
+"The weekly meeting is on Tuesdays.",
+"We meet every Tuesday for the weekly sync.",
+"duplicate"
+],
+[
+"Victor's anniversary is on October 12.",
+"Victor celebrates his wedding anniversary on the 12th of October.",
+"duplicate"
+],
+[
+"The user's car is blue.",
+"The user drives a blue car.",
+"duplicate"
+],
+[
+"Sofia speaks three languages.",
+"Sofia is trilingual.",
+"duplicate"
+],
+[
+"The apartment rent is $1,800 per month.",
+"Monthly rent for the apartment is 1800 dollars.",
+"duplicate"
+]
+],
+"eval": [
+[
+"Maya works as a nurse at St. Mary's Hospital.",
+"Maya started a new job as a data analyst at Stripe last month.",
+"update"
+],
+[
+"Tom lives in Berlin.",
+"Tom moved to Lisbon in March and has settled in there.",
+"update"
+],
+[
+"Priya is engaged to Arjun.",
+"Priya and Arjun called off their engagement.",
+"update"
+],
+[
+"The user's manager is Karen Liu.",
+"The user now reports to David Okafor after the reorg.",
+"update"
+],
+[
+"Sam drives a 2015 Honda Civic.",
+"Sam sold the Civic and bought a Tesla Model 3.",
+"update"
+],
+[
+"The user prefers Python for scripting.",
+"The user says they have switched to Rust for all their scripting now.",
+"update"
+],
+[
+"Lena is a vegetarian.",
+"Lena started eating meat again this year.",
+"update"
+],
+[
+"The project deadline is June 30.",
+"The project deadline was pushed to August 15.",
+"update"
+],
+[
+"Carlos is single.",
+"Carlos got married to Ana in September.",
+"update"
+],
+[
+"The user's phone number is 555-0134.",
+"The user's new phone number is 555-0199; the old one is disconnected.",
+"update"
+],
+[
+"Jin is a student at MIT.",
+"Jin graduated from MIT and now works at a startup in Boston.",
+"update"
+],
+[
+"The team uses Jira for issue tracking.",
+"The team migrated from Jira to Linear in Q2.",
+"update"
+],
+[
+"Ravi's favourite band is Coldplay.",
+"Ravi says his favourite band these days is Radiohead.",
+"update"
+],
+[
+"Emma rents an apartment in Brooklyn.",
+"Emma bought a house in New Jersey and moved out of Brooklyn.",
+"update"
+],
+[
+"Alice's birthday is May 3.",
+"Correction: Alice's birthday is actually June 3, not May 3.",
+"contradiction"
+],
+[
+"The office is on the 4th floor.",
+"The office is on the 7th floor.",
+"contradiction"
+],
+[
+"The user has two children.",
+"The user mentioned they have three kids.",
+"contradiction"
+],
+[
+"Mark is allergic to peanuts.",
+"Mark clarified he is not allergic to peanuts; it was shellfish all along.",
+"contradiction"
+],
+[
+"Maya works as a nurse at St. Mary's Hospital.",
+"Maya volunteers at an animal shelter on weekends.",
+"compatible"
+],
+[
+"Tom lives in Berlin.",
+"Tom is learning to play the cello.",
+"compatible"
+],
+[
+"Priya is engaged to Arjun.",
+"Priya and Arjun adopted a dog named Biscuit.",
+"compatible"
+],
+[
+"The user prefers Python for scripting.",
+"The user also uses TypeScript for frontend work.",
+"compatible"
+],
+[
+"Lena is a vegetarian.",
+"Lena loves Italian food, especially risotto.",
+"compatible"
+],
+[
+"Sam drives a 2015 Honda Civic.",
+"Sam commutes 40 minutes to work each day.",
+"compatible"
+],
+[
+"Carlos is single.",
+"Carlos enjoys rock climbing.",
+"compatible"
+],
+[
+"Jin is a student at MIT.",
+"Jin is majoring in mechanical engineering.",
+"compatible"
+],
+[
+"The team uses Jira for issue tracking.",
+"The team holds stand-ups every morning at 9:30.",
+"compatible"
+],
+[
+"Emma rents an apartment in Brooklyn.",
+"Emma's apartment has a small balcony with plants.",
+"compatible"
+],
+[
+"The user's manager is Karen Liu.",
+"Karen Liu also manages the design team.",
+"compatible"
+],
+[
+"Ravi's favourite band is Coldplay.",
+"Ravi went to a Coldplay concert in London last year.",
+"compatible"
+],
+[
+"Maya works as a nurse at St. Mary's Hospital.",
+"Maya is employed at St. Mary's Hospital as a nurse.",
+"duplicate"
+],
+[
+"Tom lives in Berlin.",
+"Tom's home is in Berlin, Germany.",
+"duplicate"
+],
+[
+"Priya is engaged to Arjun.",
+"Arjun and Priya are engaged to be married.",
+"duplicate"
+],
+[
+"The user prefers Python for scripting.",
+"For scripts, the user likes to use Python.",
+"duplicate"
+],
+[
+"Lena is a vegetarian.",
+"Lena doesn't eat meat.",
+"duplicate"
+],
+[
+"The project deadline is June 30.",
+"The project is due at the end of June.",
+"duplicate"
+],
+[
+"Sam drives a 2015 Honda Civic.",
+"Sam's car is a Honda Civic from 2015.",
+"duplicate"
+],
+[
+"Jin is a student at MIT.",
+"Jin studies at the Massachusetts Institute of Technology.",
+"duplicate"
+],
+[
+"The team uses Jira for issue tracking.",
+"Issues on the team are tracked in Jira.",
+"duplicate"
+],
+[
+"Alice's birthday is May 3.",
+"Alice was born on the 3rd of May.",
+"duplicate"
+],
+[
+"The office is on the 4th floor.",
+"Our office is located on floor four.",
+"duplicate"
+],
+[
+"Mark is allergic to peanuts.",
+"Mark has a peanut allergy.",
+"duplicate"
+]
+],
+"entity": [
+[
+"Bob Smith, a backend engineer at Acme, mentioned the outage.",
+"Robert Smith from Acme's backend team fixed the database.",
+"same"
+],
+[
+"Dr. Elena Garcia is the user's cardiologist.",
+"The user's heart doctor, Elena Garcia, ordered an ECG.",
+"same"
+],
+[
+"NYC is where the conference takes place.",
+"The conference venue is in New York City.",
+"same"
+],
+[
+"The user's sister Kate lives in Denver.",
+"Katherine, the user's younger sister, visited from Denver.",
+"same"
+],
+[
+"Microsoft announced new Copilot features.",
+"MSFT shares rose after the Copilot launch.",
+"same"
+],
+[
+"Liz from accounting approved the invoice.",
+"Elizabeth Moore in accounting signed off on the invoice.",
+"same"
+],
+[
+"The user's dog, Max, is a golden retriever.",
+"Max the retriever needs his vet appointment on Friday.",
+"same"
+],
+[
+"JFK airport had delays this morning.",
+"John F. Kennedy International Airport reported long delays.",
+"same"
+],
+[
+"Prof. Chen teaches the user's ML course.",
+"Wei Chen, the machine learning professor, posted the grades.",
+"same"
+],
+[
+"The user's employer, Globex Corp, is hiring.",
+"Globex Corporation, where the user works, opened new roles.",
+"same"
+],
+[
+"Mom called about Sunday dinner.",
+"The user's mother, Linda, is hosting dinner on Sunday.",
+"same"
+],
+[
+"The repo kleos-db had a new release.",
+"kleos (the database repository) shipped version 0.18.",
+"same"
+],
+[
+"Paris is the capital of France.",
+"Paris Hilton launched a new fragrance.",
+"different"
+],
+[
+"Apple released a new iPhone.",
+"The user ate an apple for breakfast.",
+"different"
+],
+[
+"John Smith, the user's dentist, is in Seattle.",
+"John Smith, the user's college roommate, lives in Austin.",
+"different"
+],
+[
+"Jordan, the user's coworker, is on vacation.",
+"The user wants to travel to Jordan to see Petra.",
+"different"
+],
+[
+"Amazon delivered the package late.",
+"The Amazon rainforest is losing tree cover.",
+"different"
+],
+[
+"The user's son Alex plays soccer.",
+"Alex, the user's landlord, raised the rent.",
+"different"
+],
+[
+"Mercury is the closest planet to the Sun.",
+"Freddie Mercury was the lead singer of Queen.",
+"different"
+],
+[
+"Kate, the user's sister, lives in Denver.",
+"Kate, the user's manager, lives in Chicago.",
+"different"
+],
+[
+"Python is the user's main programming language.",
+"A python escaped from the city zoo.",
+"different"
+],
+[
+"Washington state has strict hiking permits.",
+"George Washington was the first US president.",
+"different"
+],
+[
+"Dr. Patel is the user's dermatologist.",
+"Dr. Patel, the user's PhD advisor, reviewed the thesis.",
+"different"
+],
+[
+"The user's cat Luna is sick.",
+"Luna, the user's niece, turned five today.",
+"different"
+]
+]
+}

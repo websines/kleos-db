@@ -103,6 +103,124 @@ pub enum SysOp {
     /// kleos fork: `::embedder list | enable | disable | backfill`
     /// (docs/specs/embedder-toggle.md). Process-wide, like the registry.
     Embedder(EmbedderOp),
+    /// kleos fork: `::decider list | enable | disable | fit | fitted |
+    /// forget` (docs/specs/decide.md).
+    Decider(DeciderOp),
+}
+
+/// `::decider ...` (kleos fork).
+#[derive(Debug)]
+pub(crate) enum DeciderOp {
+    /// One row per enabled or disabled decider.
+    List,
+    /// One row per installed probe or calibration.
+    Fitted,
+    /// Name and spec.
+    Enable(String, crate::decide::DeciderSpec),
+    /// Name.
+    Disable(String),
+    /// Fit a probe (or calibration) for decider `name` and `template` on a
+    /// labelled relation.
+    Fit {
+        name: String,
+        template: String,
+        relation: Symbol,
+        opts: FitOpts,
+    },
+    /// Remove the fitted probe/calibration of decider `name` and `template`.
+    Forget(String, String),
+}
+
+/// Options of `::decider fit`.
+#[derive(Debug, Clone)]
+pub(crate) struct FitOpts {
+    pub(crate) probe: bool,
+    pub(crate) alpha: f64,
+    pub(crate) wilson: bool,
+}
+
+fn parse_decider_op(
+    inner: crate::parse::Pair<'_>,
+    param_pool: &BTreeMap<String, DataValue>,
+) -> Result<DeciderOp> {
+    let inner = inner.into_inner().next().unwrap();
+    let op_rule = inner.as_rule();
+    Ok(match op_rule {
+        Rule::decider_list => DeciderOp::List,
+        Rule::decider_fitted => DeciderOp::Fitted,
+        Rule::decider_disable => {
+            DeciderOp::Disable(embedder_name(inner.into_inner().next().unwrap())?)
+        }
+        Rule::decider_forget => {
+            let mut parts = inner.into_inner();
+            let name = embedder_name(parts.next().unwrap())?;
+            let template = embedder_name(parts.next().unwrap())?;
+            DeciderOp::Forget(name, template)
+        }
+        Rule::decider_enable | Rule::decider_fit => {
+            let mut parts = inner.into_inner();
+            let name = embedder_name(parts.next().unwrap())?;
+            let mut fit = None;
+            if op_rule == Rule::decider_fit {
+                let template = embedder_name(parts.next().unwrap())?;
+                let rel = parts.next().unwrap();
+                fit = Some((template, Symbol::new(rel.as_str(), rel.extract_span())));
+            }
+            let mut spec = crate::decide::DeciderSpec::default();
+            let mut opts = FitOpts {
+                probe: true,
+                alpha: 0.02,
+                wilson: false,
+            };
+            let op = if fit.is_some() { "fit" } else { "enable" };
+            for opt in parts {
+                let mut o = opt.into_inner();
+                let key = o.next().unwrap().as_str();
+                let val = build_expr(o.next().unwrap(), param_pool)?.eval_to_const()?;
+                let as_str = |v: &DataValue| -> Result<String> {
+                    match v {
+                        DataValue::Str(s) => Ok(s.to_string()),
+                        v => bail!("`::decider {op}` option '{key}' must be a string, got {v:?}"),
+                    }
+                };
+                let as_bool = |v: &DataValue| -> Result<bool> {
+                    match v {
+                        DataValue::Bool(b) => Ok(*b),
+                        v => bail!("`::decider {op}` option '{key}' must be a boolean, got {v:?}"),
+                    }
+                };
+                match (op, key) {
+                    ("enable", "model") => spec.model = Some(as_str(&val)?),
+                    ("enable", "precision") => spec.precision = Some(as_str(&val)?),
+                    ("enable", "device") => spec.device = Some(as_str(&val)?),
+                    ("fit", "probe") => opts.probe = as_bool(&val)?,
+                    ("fit", "wilson") => opts.wilson = as_bool(&val)?,
+                    ("fit", "alpha") => {
+                        opts.alpha = match val.get_float() {
+                            Some(a) if a > 0.0 && a < 1.0 => a,
+                            _ => bail!("`::decider fit` option 'alpha' must be a number in (0, 1), got {val:?}"),
+                        }
+                    }
+                    ("enable", other) => bail!(
+                        "unknown option '{other}' for `::decider enable`: expected model, precision or device"
+                    ),
+                    (_, other) => bail!(
+                        "unknown option '{other}' for `::decider fit`: expected probe, alpha or wilson"
+                    ),
+                }
+            }
+            match fit {
+                Some((template, relation)) => DeciderOp::Fit {
+                    name,
+                    template,
+                    relation,
+                    opts,
+                },
+                None => DeciderOp::Enable(name, spec),
+            }
+        }
+        r => unreachable!("{:?}", r),
+    })
 }
 
 /// `::embedder ...` (kleos fork).
@@ -296,6 +414,7 @@ pub(crate) fn parse_sys(
             inner, param_pool, cur_vld,
         )?),
         Rule::embedder_op => SysOp::Embedder(parse_embedder_op(inner, param_pool)?),
+        Rule::decider_op => SysOp::Decider(parse_decider_op(inner, param_pool)?),
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,

@@ -89,3 +89,23 @@ RotorQuant (<https://github.com/scrya-com/rotorquant>, MIT) block rotations
 blocks) were evaluated against the Hadamard rotation but are not shipped; no
 RotorQuant code is included. The `turbo-quant` crate (MIT OR Apache-2.0) was
 reviewed and not used.
+
+### tasksource-decider-nano (Apache-2.0; model weights, not shipped)
+
+`kleos-infer/src/decider_nano.rs` runs
+[`tasksource/tasksource-decider-nano`](https://huggingface.co/tasksource/tasksource-decider-nano)
+(150M ModernBERT/Ettin cross-encoder, by tasksource / Damien Sileo), licensed
+Apache-2.0 per its model card. kleos ships no weights: they are read from the
+user's Hugging Face cache. The inference code is a Rust port written for
+kleos from the model card and the repository's `decider.py` (Apache-2.0); the
+input layout (shared state, tree attention, option pooling) follows that
+reference. Its base model is `cross-encoder/ettin-reranker-150m-v1`.
+
+### Evaluation data (not shipped in the library)
+
+`scripts/infer-bench/decide/` and `kleos-core/examples/decide_eval.rs` can
+evaluate on a sample of [VitaminC](https://huggingface.co/datasets/tals/vitaminc)
+(Schuster et al., 2021; Wikipedia-derived, CC BY-SA 3.0). The sample is
+written to `.bench-data/` at run time and is not committed. The memory items
+in `kleos-core/examples/data/decide_items.json` are hand-written by the kleos
+authors.

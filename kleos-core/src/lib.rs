@@ -92,6 +92,7 @@ pub use graph::prelude::{DirectedCsrGraph, DirectedNeighbors, DirectedNeighborsW
 pub use runtime::columnar::{ColumnarFileFormat, ColumnarImportOptions, ColumnarImportReport};
 pub use runtime::db::Db;
 pub use runtime::db::NamedRows;
+pub use runtime::decider::FitReport;
 pub use runtime::diagnostics::QueryWarning;
 pub use runtime::live::{LiveStats, SubscribeOptions, Subscription, SubscriptionEvent};
 #[cfg(feature = "graph-algo")]
@@ -145,6 +146,10 @@ pub use crate::runtime::governed_transaction::{
     GovernedTransactionWorker,
 };
 pub use crate::runtime::relation::AccessLevel;
+pub use decide::{
+    deciders, disable_decider, enable_decider, register_decider, Band, DecideAnswer,
+    DecideRequest, Decider, DeciderSpec, DeciderStatus, Decision, Family, Template,
+};
 pub use embed::{
     disable_embedder, embedders, enable_embedder, register_embedder, Embedder, EmbedderSpec,
     EmbedderStatus,
@@ -153,6 +158,7 @@ pub use embed::{
 #[cfg(feature = "cypher")]
 pub mod cypher;
 pub mod data;
+pub mod decide;
 pub mod embed;
 pub(crate) mod fixed_rule;
 pub(crate) mod fts;
@@ -1261,6 +1267,61 @@ impl DbInstance {
     /// Every enabled and disabled embedder (process-wide).
     pub fn embedders(&self) -> Vec<EmbedderStatus> {
         embed::embedders()
+    }
+    /// Turn a built-in decider on under `name` (or re-enable a disabled one
+    /// with an empty spec). Process-wide: see [crate::decide::enable_decider].
+    pub fn enable_decider(&self, name: &str, spec: DeciderSpec) -> Result<()> {
+        decide::enable_decider(name, spec)
+    }
+    /// Turn the decider `name` off. Process-wide.
+    pub fn disable_decider(&self, name: &str) -> Result<bool> {
+        decide::disable_decider(name)
+    }
+    /// Every enabled and disabled decider (process-wide).
+    pub fn deciders(&self) -> Vec<DeciderStatus> {
+        decide::deciders()
+    }
+    /// Decide one pair with decider `name` and a fixed template
+    /// (`supersedes`, `same_entity`, `duplicate`, `contradicts`, `relation`,
+    /// `important`; `b` is ignored by `important`).
+    pub fn decide(&self, name: &str, template: &str, a: &str, b: &str) -> Result<Decision> {
+        decide::decide_one(name, Template::parse(template)?, a, b)
+    }
+    /// Decide many pairs in batches.
+    pub fn decide_batch(&self, name: &str, template: &str, items: &[(&str, &str)]) -> Result<Vec<Decision>> {
+        decide::decide(name, Template::parse(template)?, items)
+    }
+    /// Dispatcher method. See [crate::Db::fit_decider].
+    pub fn fit_decider(&self, name: &str, template: &str, relation: &str, probe: bool, alpha: f64) -> Result<FitReport> {
+        match self {
+            DbInstance::Mem(db) => db.fit_decider(name, template, relation, probe, alpha),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.fit_decider(name, template, relation, probe, alpha),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.fit_decider(name, template, relation, probe, alpha),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.fit_decider(name, template, relation, probe, alpha),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.fit_decider(name, template, relation, probe, alpha),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.fit_decider(name, template, relation, probe, alpha),
+        }
+    }
+    /// Dispatcher method. See [crate::Db::forget_decider_fit].
+    pub fn forget_decider_fit(&self, name: &str, template: &str) -> Result<bool> {
+        match self {
+            DbInstance::Mem(db) => db.forget_decider_fit(name, template),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.forget_decider_fit(name, template),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.forget_decider_fit(name, template),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.forget_decider_fit(name, template),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.forget_decider_fit(name, template),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.forget_decider_fit(name, template),
+        }
     }
     /// Dispatcher method. See [crate::Db::backfill_embeddings].
     pub fn backfill_embeddings(&self, relation: &str) -> Result<NamedRows> {

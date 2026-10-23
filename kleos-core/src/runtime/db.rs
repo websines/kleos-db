@@ -469,6 +469,8 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// Must be called after creation of the database to initialize the runtime state.
     pub fn initialize(&'s self) -> Result<()> {
         self.load_last_ids()?;
+        // kleos fork: fitted decide() probes/calibrations persisted here
+        self.load_decider_fits();
         Ok(())
     }
 
@@ -2765,6 +2767,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             // kleos fork: embedder on/off switch (process-wide state, no tx)
             SysOp::Embedder(op) => self.run_embedder_op(op, read_only, true),
+            SysOp::Decider(op) => self.run_decider_op(op, read_only, true),
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3545,6 +3548,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             // kleos fork: the embedder registry is process state; backfill
             // runs its own scripts (docs/specs/embedder-toggle.md)
             SysOp::Embedder(op) => return self.run_embedder_op(op, read_only, false),
+            SysOp::Decider(op) => return self.run_decider_op(op, read_only, false),
             SysOp::KillRunning(id) => {
                 let queries = self.running_queries.lock().unwrap();
                 return Ok(match queries.get(id) {
