@@ -112,6 +112,8 @@ pub enum SysOp {
     /// kleos fork: `::entity resolve | merge | split | history | pending |
     /// reject` (docs/specs/entity-resolution.md).
     Entity(EntityOp),
+    /// kleos fork: `::engram <verb> [model] {opts}` (docs/specs/engram-overlay.md).
+    Engram(EngramOp),
 }
 
 /// `::memory <verb> [arg] [{opts}]`: the positional argument is the text
@@ -234,6 +236,36 @@ fn parse_entity_op(
         Rule::entity_pending => EntityOp::Pending(rel),
         r => unreachable!("{:?}", r),
     })
+}
+
+/// `::engram ...` (kleos fork): the verb, the model name if given, and the
+/// options evaluated to constants. Interpreted in `engram.rs`.
+#[derive(Debug)]
+pub(crate) struct EngramOp {
+    pub(crate) verb: String,
+    pub(crate) model: Option<String>,
+    pub(crate) opts: BTreeMap<String, DataValue>,
+}
+
+fn parse_engram_op(
+    inner: crate::parse::Pair<'_>,
+    param_pool: &BTreeMap<String, DataValue>,
+) -> Result<EngramOp> {
+    let mut parts = inner.into_inner();
+    let verb = parts.next().unwrap().as_str().to_string();
+    let mut model = None;
+    let mut opts = BTreeMap::new();
+    for p in parts {
+        if p.as_rule() == Rule::index_opt_field {
+            let mut o = p.into_inner();
+            let key = o.next().unwrap().as_str().to_string();
+            let val = build_expr(o.next().unwrap(), param_pool)?.eval_to_const()?;
+            opts.insert(key, val);
+        } else {
+            model = Some(embedder_name(p)?);
+        }
+    }
+    Ok(EngramOp { verb, model, opts })
 }
 
 /// `::decider ...` (kleos fork).
@@ -546,6 +578,7 @@ pub(crate) fn parse_sys(
         Rule::decider_op => SysOp::Decider(parse_decider_op(inner, param_pool)?),
         Rule::mem_api_op => parse_mem_api_op(inner, param_pool)?,
         Rule::entity_op => SysOp::Entity(parse_entity_op(inner, param_pool)?),
+        Rule::engram_op => SysOp::Engram(parse_engram_op(inner, param_pool)?),
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,

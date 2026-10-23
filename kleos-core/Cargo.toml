@@ -101,6 +101,11 @@ cypher = []
 ## enabled (`HF_HUB_OFFLINE=1` to forbid). Off by default: the default build has no
 ## ML dependencies, and models are never bundled. candle 0.11 needs a newer toolchain than 1.90 (verified on 1.99).
 infer = ["dep:kleos-infer", "kleos-infer/download"]
+## Engram overlay store (kleos fork; docs/specs/engram-overlay.md): per-user
+## and per-agent row edits to a model's Engram tables, versioned with valid
+## time, provenance per fact, export as safetensors. Pulls in `kleos-engram`
+## (Engram addressing; `tokenizers`, no ML runtime). Off by default.
+engram = ["dep:kleos-engram"]
 ## `infer` plus Apple-GPU (Metal) kernels.
 infer-metal = ["infer", "kleos-infer/metal"]
 ## `infer` plus Apple Accelerate BLAS for CPU matmuls (macOS; 3-5x faster
@@ -211,6 +216,7 @@ ndarray = { version = "0.15.6", features = ["serde"] }
 half = "2.4.1"
 sha2 = "0.10.8"
 kleos-infer = { path = "../kleos-infer", version = "0.1.0", optional = true, default-features = false }
+kleos-engram = { path = "../kleos-engram", version = "0.1.0", optional = true }
 rustc-hash = "1.1.0"
 twox-hash = "1.6.3"
 quadrature = "0.1.2"
@@ -233,6 +239,14 @@ env_logger = "0.11.3"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # kleos fork perf baselines (stable, self-contained synthetic data).
+[[test]]
+name = "engram"
+required-features = ["engram"]
+
+[[example]]
+name = "engram_cli"
+required-features = ["engram"]
+
 [[example]]
 name = "embed_scifact"
 required-features = ["infer"]
