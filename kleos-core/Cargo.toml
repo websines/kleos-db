@@ -48,6 +48,9 @@ data-import = []
 ## CsvReader/JsonReader by itself; enable `data-import` as well, and only for
 ## trusted CozoScript callers.
 requests = ["dep:minreq"]
+## Lets durable-workflow `http` steps make outbound requests
+## (docs/specs/durable-workflows.md). Off by default.
+flow-http = ["requests"]
 ## Registers RdfReader (Turtle/N-Triples/N-Quads/TriG into a fixed 6-column
 ## relational shape) and enables `Db::export_relation_as_rdf`. Implies
 ## `data-import` — the reader is a script-controlled file reader and shares

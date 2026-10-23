@@ -611,6 +611,29 @@ struct CozoDbPy {
     subs: Mutex<BTreeSet<u64>>,
 }
 
+/// A running in-process flow worker (`CozoDbPy.flow_worker`).
+#[pyclass]
+struct FlowWorkerPy {
+    w: Mutex<Option<FlowWorker>>,
+}
+
+#[pymethods]
+impl FlowWorkerPy {
+    /// Wake the worker now.
+    fn wake(&self) {
+        if let Some(w) = self.w.lock().unwrap().as_ref() {
+            w.wake();
+        }
+    }
+    /// Stop the worker (waits for its current tick).
+    fn stop(&self, py: Python<'_>) {
+        let w = self.w.lock().unwrap().take();
+        if let Some(w) = w {
+            py.allow_threads(|| w.stop());
+        }
+    }
+}
+
 #[pyclass]
 struct CozoDbMulTx {
     tx: MultiTransaction,
@@ -1474,6 +1497,42 @@ impl CozoDbPy {
     pub fn remember(&self, py: Python<'_>, text: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "remember", vec![("text", json!(text))], opts)
     }
+    /// Durable workflows (kleos fork; docs/specs/durable-workflows.md): run
+    /// flow op `op` (`define`, `start`, `signal`, `cancel`, `status`,
+    /// `list`, `history`, `stats`, `schedule`, `claim`, `step`, `record`,
+    /// `suspend`, `complete`, `fail`, `heartbeat`, `tick`, ...) with `args`
+    /// (a dict). Returns the op's JSON result as Python objects. The Python
+    /// SDK (`kleos_flow`) speaks this protocol.
+    #[pyo3(signature = (op, args=None))]
+    pub fn flow_call(&self, py: Python<'_>, op: &str, args: Option<&PyAny>) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let a = match args {
+            None => serde_json::Value::Null,
+            Some(x) if x.is_none() => serde_json::Value::Null,
+            Some(x) => serde_json::Value::from(py_to_value(x)?),
+        };
+        let out = py.allow_threads(|| db.flow_call(op, a)).map_err(report2py)?;
+        Ok(json_to_py(out, py))
+    }
+    /// Start an in-process worker thread that runs due built-in workflows and
+    /// fires schedules; returns a handle whose `stop()` ends it.
+    #[pyo3(signature = (queues=None, poll_ms=1000, lease_ms=30000, worker=None))]
+    pub fn flow_worker(
+        &self,
+        queues: Option<Vec<String>>,
+        poll_ms: u64,
+        lease_ms: i64,
+        worker: Option<String>,
+    ) -> PyResult<FlowWorkerPy> {
+        let db = self.db_ref()?;
+        let w = db.flow_worker(FlowWorkerOpts {
+            queues: queues.unwrap_or_else(|| vec!["default".to_string()]),
+            poll_ms,
+            lease_ms,
+            worker,
+        });
+        Ok(FlowWorkerPy { w: Mutex::new(Some(w)) })
+    }
     /// Hybrid recall over current memories (or those valid at `as_of`).
     /// Options: `ns`, `k`, `kind`, `entity`, `as_of`, `vector_weight`,
     /// `hide_pending`, `include_archived`, `include_expired`, `record_access`,
@@ -1733,6 +1792,7 @@ fn py_disable_embedder(py: Python<'_>, name: &str) -> PyResult<bool> {
 fn kleos(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<CozoDbPy>()?;
     m.add_class::<CozoDbMulTx>()?;
+    m.add_class::<FlowWorkerPy>()?;
     m.add_function(wrap_pyfunction!(eval_expressions, m)?)?;
     m.add_function(wrap_pyfunction!(variables, m)?)?;
     m.add_function(wrap_pyfunction!(py_register_embedder, m)?)?;

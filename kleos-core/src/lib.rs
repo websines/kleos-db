@@ -170,6 +170,9 @@ pub mod memory_time;
 pub mod memory_engram;
 pub mod entity;
 pub mod engram;
+pub mod flow;
+pub(crate) mod flow_builtin;
+pub(crate) mod flow_cron;
 pub(crate) mod fixed_rule;
 pub(crate) mod fts;
 /// Test-support metric, not a public API: process-wide FTS posting-scan
@@ -1416,6 +1419,61 @@ impl DbInstance {
     pub fn memory_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
         dispatch_db!(self, db => db.memory_call(op, args))
     }
+    /// Durable workflows (docs/specs/durable-workflows.md). See [crate::Db::flow_call].
+    pub fn flow_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
+        dispatch_db!(self, db => db.flow_call(op, args))
+    }
+    /// Start an in-process worker thread that runs due built-in workflows
+    /// and fires due schedules (docs/specs/durable-workflows.md, "Waking").
+    /// It wakes on commits to `kleos_flow_task` in this process and polls
+    /// for the rest; it stops when the returned handle is stopped or dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn flow_worker(&self, opts: FlowWorkerOpts) -> FlowWorker {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (wake_tx, wake_rx) = bounded::<()>(1);
+        let db = self.clone();
+        let st = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("kleos-flow-worker".to_string())
+            .spawn(move || {
+                use std::sync::atomic::Ordering;
+                let (cb, changes) = db.register_callback(flow::FLOW_TASK, Some(64));
+                let queues = if opts.queues.is_empty() { vec!["default".to_string()] } else { opts.queues.clone() };
+                let args = json!({"worker": opts.worker, "queues": queues, "lease_ms": opts.lease_ms, "max": 64});
+                while !st.load(Ordering::SeqCst) {
+                    let busy = match db.flow_call("tick", args.clone()) {
+                        Ok(r) => {
+                            r.get("ran").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
+                                || r.get("fired").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
+                        }
+                        Err(e) => {
+                            eprintln!("kleos flow worker: {e}");
+                            false
+                        }
+                    };
+                    if busy {
+                        continue;
+                    }
+                    let now = flow::now_us();
+                    let mut wait_ms = opts.poll_ms.max(1);
+                    if let Ok(Some(due)) = dispatch_db!(&db, d => d.flow_next_due(&queues)) {
+                        wait_ms = wait_ms.min(((due - now).max(0) / 1000) as u64);
+                    }
+                    crossbeam::select! {
+                        recv(changes) -> _ => {}
+                        recv(wake_rx) -> _ => {}
+                        default(std::time::Duration::from_millis(wait_ms)) => {}
+                    }
+                }
+                db.unregister_callback(cb);
+            })
+            .expect("spawn the flow worker thread");
+        FlowWorker {
+            stop,
+            wake: wake_tx,
+            handle: Some(handle),
+        }
+    }
     /// Resolve entity mentions (docs/specs/entity-resolution.md). See [crate::Db::resolve_entities].
     pub fn resolve_entities(&self, cfg: &EntityConfig, mentions: &[Mention], opts: ResolveOptions) -> Result<Vec<Resolution>> {
         match self {
@@ -1618,6 +1676,62 @@ impl MultiTransaction {
             Ok(r) => r.map(|_| ()),
             Err(err) => bail!(err),
         }
+    }
+}
+
+/// Options of [`DbInstance::flow_worker`].
+#[derive(Debug, Clone)]
+pub struct FlowWorkerOpts {
+    /// Queues to run; default `default`.
+    pub queues: Vec<String>,
+    /// Longest sleep between checks for work from other processes (ms).
+    pub poll_ms: u64,
+    /// Lease of a claim (ms).
+    pub lease_ms: i64,
+    /// Worker name recorded on claims.
+    pub worker: Option<String>,
+}
+
+impl Default for FlowWorkerOpts {
+    fn default() -> Self {
+        Self {
+            queues: vec!["default".to_string()],
+            poll_ms: 1000,
+            lease_ms: flow::DEFAULT_LEASE_MS,
+            worker: None,
+        }
+    }
+}
+
+/// A running in-process flow worker; stops when dropped.
+pub struct FlowWorker {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    wake: Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FlowWorker {
+    /// Wake the worker now (it also wakes on its own for work committed in
+    /// this process).
+    pub fn wake(&self) {
+        let _ = self.wake.try_send(());
+    }
+    /// Stop the worker and wait for its current tick to end.
+    pub fn stop(mut self) {
+        self.halt();
+    }
+    fn halt(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.wake.try_send(());
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for FlowWorker {
+    fn drop(&mut self) {
+        self.halt();
     }
 }
 

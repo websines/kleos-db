@@ -2779,6 +2779,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 bail!("`::entity` must run as a script of its own, not inside an imperative block")
             }
             SysOp::Engram(op) => crate::engram::run_engram_op(self, op, read_only, true),
+            SysOp::Flow(op, _) => bail!("`::flow {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3579,6 +3580,16 @@ impl<'s, S: Storage<'s>> Db<S> {
             // kleos fork: entity resolution runs its own scripts
             SysOp::Entity(op) => return self.run_entity_op(op, read_only),
             SysOp::Engram(op) => return crate::engram::run_engram_op(self, &op, read_only, false),
+            // kleos fork: durable workflows run their own scripts
+            // (docs/specs/durable-workflows.md)
+            SysOp::Flow(op, args) => {
+                let reads = ["status", "list", "history", "stats", "schedules"];
+                if read_only && !reads.contains(&op.as_str()) {
+                    bail!("`::flow {op}` cannot run in read-only mode");
+                }
+                let out = self.flow_call(op, args.clone())?;
+                return Ok(crate::flow::flow_rows(out));
+            }
             SysOp::KillRunning(id) => {
                 let queries = self.running_queries.lock().unwrap();
                 return Ok(match queries.get(id) {

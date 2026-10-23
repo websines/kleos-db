@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kleos-flow"
+version = "0.1.0"
+description = "Durable workflows on kleos: Python functions replayed from a history stored in the database, with steps whose writes commit together with their checkpoint."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MPL-2.0" }
+keywords = ["kleos", "durable-execution", "workflows", "temporal", "agents"]
+dependencies = ["kleos>=0.18.0"]
+
+[project.urls]
+Homepage = "https://github.com/websines/kleos-db"
+Repository = "https://github.com/websines/kleos-db"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kleos_flow"]
