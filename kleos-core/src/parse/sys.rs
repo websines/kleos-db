@@ -106,6 +106,46 @@ pub enum SysOp {
     /// kleos fork: `::decider list | enable | disable | fit | fitted |
     /// forget` (docs/specs/decide.md).
     Decider(DeciderOp),
+    /// kleos fork: `::memory init | remember | recall | forget | reflect |
+    /// link` (docs/specs/memory-api.md): the op and its options as JSON.
+    MemApi(String, serde_json::Value),
+}
+
+/// `::memory <verb> [arg] [{opts}]`: the positional argument is the text
+/// (remember), the query (recall), the id or ids (forget) or the namespace
+/// (reflect); everything else is an option.
+fn parse_mem_api_op(
+    inner: crate::parse::Pair<'_>,
+    param_pool: &BTreeMap<String, DataValue>,
+) -> Result<SysOp> {
+    let mut parts = inner.into_inner();
+    let verb = parts.next().unwrap().as_str().to_string();
+    let mut args = serde_json::Map::new();
+    for p in parts {
+        match p.as_rule() {
+            Rule::mem_opts => {
+                for opt in p.into_inner() {
+                    let mut o = opt.into_inner();
+                    let key = o.next().unwrap().as_str().to_string();
+                    let val = build_expr(o.next().unwrap(), param_pool)?.eval_to_const()?;
+                    args.insert(key, serde_json::Value::from(val));
+                }
+            }
+            _ => {
+                let val = build_expr(p, param_pool)?.eval_to_const()?;
+                let key = match (verb.as_str(), &val) {
+                    ("remember", _) => "text",
+                    ("recall", _) => "query",
+                    ("forget", DataValue::List(_)) => "ids",
+                    ("forget", _) => "id",
+                    ("reflect", _) => "ns",
+                    (v, _) => bail!("`::memory {v}` takes no positional argument; pass options as {{key: value}}"),
+                };
+                args.insert(key.to_string(), serde_json::Value::from(val));
+            }
+        }
+    }
+    Ok(SysOp::MemApi(verb, serde_json::Value::Object(args)))
 }
 
 /// `::decider ...` (kleos fork).
@@ -416,6 +456,7 @@ pub(crate) fn parse_sys(
         )?),
         Rule::embedder_op => SysOp::Embedder(parse_embedder_op(inner, param_pool)?),
         Rule::decider_op => SysOp::Decider(parse_decider_op(inner, param_pool)?),
+        Rule::mem_api_op => parse_mem_api_op(inner, param_pool)?,
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,
