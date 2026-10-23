@@ -11,6 +11,34 @@ to kleos.
 
 ### Added
 
+- Engram overlay store, first milestone (docs/specs/engram-overlay.md).
+  - New crate `kleos-engram`: DeepSeek Engram addressing. It loads the lookup
+    spec from a model's `config.json` + `tokenizer.json` (V4.1-Flash, nanogpt
+    and demo layouts) and computes `(layer, row)` ids for text. Its addressing
+    fingerprint covers the token map, multipliers, primes, offsets, layers,
+    orders, heads and row dimension. It also defines the per-layer
+    safetensors overlay format. Parity is bit-exact against
+    DeepSeek-V4.1-Flash `engram.py`, `engram_demo_v1.py` and the nanogpt hash.
+    It ships with the `kleos-engram` CLI.
+  - kleos-core feature `engram`, off by default. It adds `::engram models |
+    register | write | supersede | materialize | export | erase | erase_plan |
+    erase_fact | facts | history | rows` and the matching `Db::engram_*` Rust
+    API.
+    - Row edits are stored as versioned data:
+      `(fingerprint, ns, layer, row, vt) → bf16 vec + facts`.
+    - Per-fact records hold the text, phrasings, rows touched, decided_by,
+      source and a replay payload.
+    - Valid-time supersession and `as_of` materialisation.
+    - org → user → agent layering.
+    - Exact namespace erase.
+    - Single-fact erase by provenance replay: only the rows the fact touched
+      are rewritten, and kleos refuses anything else.
+    - Every read and write that names a fingerprint refuses a mismatch.
+  - `scripts/engram/engramedit.py`: an EngramEdit-style write path (method
+    from EngramEdit, MIT) and the end-to-end evaluation on the 132M
+    engram-nanogpt model, including the comparison with the spike's naive
+    per-trigger training and with kleos FTS retrieval.
+
 - `decide()`: small decision models attached to the database (UPGRADE_PLAN D5,
   docs/specs/decide.md).
   - Fixed, versioned question templates per decision and per backend: `supersedes`,

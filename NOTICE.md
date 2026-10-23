@@ -108,6 +108,38 @@ changes; the repository also carries the base model's Apache-2.0 licence
 (`LICENSE-APACHE-base`). Like the base weights, it is read from the user's
 Hugging Face cache and is not bundled with the library.
 
+### EngramEdit (MIT; method, no code copied)
+
+`scripts/engram/engramedit.py` implements the editing method of EngramEdit
+(<https://github.com/ModalityDance/EngramEdit>, MIT; arXiv 2610.10533): targets
+computed across several phrasings of a fact, mapped to the N-gram memory rows
+they activate, and a joint ridge solve with a stronger penalty on frequently
+reused rows (its hyperparameter defaults are used). The code is a new
+implementation for the 132M nanogpt Engram model; none of EngramEdit's
+LongCat-specific code is included.
+
+### DeepSeek Engram and the Engram hashing references
+
+`kleos-engram` reproduces the Engram addressing of DeepSeek-V4.1-Flash
+`inference/engram.py` (MIT) and `engram_demo_v1.py` from
+<https://github.com/deepseek-ai/Engram> (Apache-2.0): tokenizer compression,
+multiplier generation (a port of NumPy's `SeedSequence`/PCG64 bounded draws)
+and prime-sized multi-head hashing. It is a Rust re-implementation checked
+bit-exactly against those references (`kleos-engram/tests/parity.rs`); the
+reference files themselves are not included.
+
+### engram-nanogpt-wikitext103 (Apache-2.0; model weights, not shipped)
+
+The milestone evaluation (`scripts/engram/engramedit.py`,
+`scripts/engram/wikitext_rowfreq.py`) runs
+[`littlemex/engram-nanogpt-wikitext103`](https://huggingface.co/littlemex/engram-nanogpt-wikitext103)
+(132M, Apache-2.0) through its loader in
+<https://github.com/littlemex/zenmai-lab> (Apache-2.0), imported from a local
+checkout at run time. Neither weights nor loader code are committed. Row
+frequencies are counted over WikiText-103
+(<https://huggingface.co/datasets/Salesforce/wikitext>, CC BY-SA 3.0) at run
+time into `.bench-data/`.
+
 ### Evaluation data (not shipped in the library)
 
 `scripts/infer-bench/decide/` and `kleos-core/examples/decide_eval.rs` can
