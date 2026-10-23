@@ -106,7 +106,8 @@ def sample(args):
                 {"ns": ns, "id": c["id"]}, True)
             ev = [{"text": r_[5], "start": iso(r_[1]), "end": iso(r_[2]), "granularity": r_[3], "kind": r_[4]}
                   for r_ in sorted(rows["rows"])]
-            out.append({"key": f"{bname}:{u['src']}:{c['id'].rsplit('.', 1)[-1]}", "bench": bname, "unit": unit,
+            tail = c["id"].rsplit(".", 1)[-1] if "." in c["id"] else "0"
+            out.append({"key": f"{bname}:{u['src']}:{tail}", "bench": bname, "unit": unit,
                         "text": c["text"], "at": u["at"], "said": iso(u["at"]), "parser": ev})
             got += 1
         db.close()
@@ -221,12 +222,11 @@ def score(args):
     res, errors = score_items(items, "silver")
     out = {"silver": res}
     if args.gold:
+        # hand labels: [{text, said, gold: [{text, start, end}]}], matched by claim text and date
         hand = json.loads(Path(args.gold).read_text())
-        by = {it["key"]: it for it in items}
-        sub = []
-        for k, g in hand.items():
-            if k in by:
-                sub.append({**by[k], "hand": g})
+        by = {(it["text"], it["said"]): it for it in items}
+        sub = [{**by[(h["text"], h["said"])], "hand": h["gold"]} for h in hand if (h["text"], h["said"]) in by]
+        print(f"hand labels: {len(sub)} of {len(hand)} matched")
         out["hand"], herr = score_items(sub, "hand")
         out["silver_on_hand_subset"], _ = score_items(sub, "silver")
         # how often the silver label agrees with the hand label (expressions and intervals)

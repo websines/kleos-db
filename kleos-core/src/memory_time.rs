@@ -624,19 +624,26 @@ impl Cx<'_> {
         }
     }
 
-    /// A month and day without a year: the nearest occurrence (ties to the
-    /// past), or the first on or after the anchor day with a future cue.
-    /// (The latest one before the anchor in a past-tense sentence was
-    /// tried: LongMemEval's session dates often precede the events their
-    /// messages report, and it moved 59 of its dates a year back.)
-    fn md_year(&self, m: u32, d: u32, future: bool) -> Option<NaiveDate> {
+    /// A month and day without a year: the first on or after the anchor
+    /// day with a future cue; the latest on or before it in a past-tense
+    /// sentence ("I rented a unit on March 1st", said in November); else
+    /// the nearest occurrence (ties to the past).
+    fn md_year(&self, m: u32, d: u32, future: bool, past: bool) -> Option<NaiveDate> {
         let ay = self.a.year();
         let opts: Vec<NaiveDate> = (ay - 1..=ay + 1).filter_map(|y| NaiveDate::from_ymd_opt(y, m, d)).collect();
         if future {
             return opts.into_iter().find(|x| *x >= self.a);
         }
+        if past {
+            return opts.into_iter().filter(|x| *x <= self.a).max();
+        }
         opts.into_iter()
             .min_by_key(|x| ((*x - self.a).num_days().abs(), (*x > self.a) as u8))
+    }
+
+    /// A past-tense verb in the sentence (and no future cue: see `future`).
+    fn past(&self, s: usize, e: usize) -> bool {
+        PAST_Q.is_match(self.sentence(s, e))
     }
 
     fn weekday(&self, w: Weekday, how: &str) -> NaiveDate {
@@ -704,7 +711,7 @@ fn h_month_day(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
     }
     let date = match y {
         Some(y) => NaiveDate::from_ymd_opt(y, m, d)?,
-        None => cx.md_year(m, d, cx.future(s, e))?,
+        None => cx.md_year(m, d, cx.future(s, e), cx.past(s, e))?,
     };
     Some(cand(s, e, (date, days(date, 1)), Granularity::Day, true))
 }
@@ -720,7 +727,7 @@ fn h_day_range(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
     }
     let a = match year_of(c, "y") {
         Some(y) => NaiveDate::from_ymd_opt(y, m, d1)?,
-        None => cx.md_year(m, d1, cx.future(s, e))?,
+        None => cx.md_year(m, d1, cx.future(s, e), cx.past(s, e))?,
     };
     let b = NaiveDate::from_ymd_opt(a.year(), m, d2)?;
     let mut x = cand(s, e, (a, days(b, 1)), Granularity::Day, true);
@@ -1416,15 +1423,17 @@ mod tests {
         // a capitalised name before a bare weekday is not a date
         none("For my \"Mental Health Monday\" series, I share tips.");
         none("We do Taco Tuesday at work.");
-        // a month and day without a year: the nearest one
+        // a month and day without a year: in a past-tense sentence the last
+        // one; with no tense cue the nearest one
         one_at(
             "I attended a charity golf tournament on July 17th.",
             at(2023, 2, 21),
             "July 17th",
-            "2023-07-17",
-            "2023-07-18",
+            "2022-07-17",
+            "2022-07-18",
             "day",
         );
+        one_at("The tournament is on July 17th.", at(2023, 2, 21), "July 17th", "2023-07-17", "2023-07-18", "day");
         one("Hey Sam, Monday was fun.", "Monday", "2023-05-01", "2023-05-02", "day");
         none("I last sat down here");
         // a Sunday anchor
