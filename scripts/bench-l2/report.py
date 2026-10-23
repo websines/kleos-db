@@ -33,8 +33,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common as C  # noqa: E402
 
-VARIANTS = ["fts", "hybrid", "sup"]
+VARIANTS = ["fts", "hybrid", "sup", "fts@q", "hybrid@q", "sup@q"]
 LME_CATS = ["single-session", "multi-session", "temporal-reasoning", "knowledge-update", "abstention"]
+SS_TYPES = ["single-session-user", "single-session-assistant", "single-session-preference"]
+
+
+def ss_groups(key="question_type"):
+    """single-session split by subtype (abstention questions excluded, as in the category rows)."""
+    return [("  " + t.replace("single-session-", "ss-"),
+             (lambda t: lambda r: r.get("category") == "single-session" and r.get(key) == t)(t)) for t in SS_TYPES]
 
 
 def load_dir(d):
@@ -128,6 +135,7 @@ def lme_section(md, summ, lme, keys, held, ku_train):
     for v, recs in lme.items():
         rows = []
         groups = [("all", lambda r: True)] + [(c, (lambda c: lambda r: r["category"] == c)(c)) for c in LME_CATS]
+        groups = groups[:2] + ss_groups() + groups[2:]
         groups += [("KU held-out", lambda r: r["question_id"] in held),
                    ("KU trained-on", lambda r: r["question_id"] in ku_train)]
         for name, pred in groups:
@@ -226,11 +234,14 @@ def main():
     md.append("## LoCoMo retrieval (one memory per dialog turn)\n")
     lkeys = ["R@5", "R@10", "Rall@5", "Rall@10", "NDCG@10"]
     lrows = []
-    for v in VARIANTS:
-        convs = load_dir(base / "locomo-turn" / v)
-        if not convs:
-            continue
-        qs = [q for c in convs.values() for q in c["questions"]]
+    allconvs = {v: load_dir(base / "locomo-turn" / v) for v in VARIANTS}
+    allconvs = {v: c for v, c in allconvs.items() if c}
+    shared = set.intersection(*[set(c) for c in allconvs.values()]) if allconvs else set()
+    if allconvs:
+        md.append(f"Paired: every variant on the same {len(shared)} of 10 conversations "
+                  f"({', '.join(f'{v} ran {len(c)}' for v, c in allconvs.items())}).\n")
+    for v, convs in allconvs.items():
+        qs = [q for cid, c in convs.items() if cid in shared for q in c["questions"]]
         for name, pred in [("cat 1–4", lambda q: q["category"] != 5)] + [
                 (f"{c} {C.LOCOMO_CATS[c]}", (lambda c: lambda q: q["category"] == c)(c)) for c in (1, 2, 3, 4, 5)]:
             ms = [m for m in (locomo_metrics(q) for q in qs if pred(q)) if m]
@@ -239,11 +250,30 @@ def main():
                 lrows.append([v, name, len(ms)] + [f2(a[k]) for k in lkeys])
                 summary["locomo"].setdefault(v, {})[name] = {"n": len(ms), "convs": len(convs), **a}
     md.append(table(lrows, ["variant", "split", "n"] + lkeys) + "\n")
+    if args.compare:
+        crow = []
+        for v in VARIANTS:
+            a = load_dir(C.bench_dir() / "results" / args.compare / "locomo-turn" / v)
+            b = load_dir(base / "locomo-turn" / v)
+            ids = set(a) & set(b)
+            if not ids:
+                continue
+            for name, pred in [("cat 1–4", lambda q: q["category"] != 5)] + [
+                    (f"{c} {C.LOCOMO_CATS[c]}", (lambda c: lambda q: q["category"] == c)(c)) for c in (1, 2, 3, 4, 5)]:
+                m0 = [m for m in (locomo_metrics(q) for i in ids for q in a[i]["questions"] if pred(q)) if m]
+                m1 = [m for m in (locomo_metrics(q) for i in ids for q in b[i]["questions"] if pred(q)) if m]
+                a0, a1 = agg(m0, lkeys), agg(m1, lkeys)
+                crow.append([v, name, len(m1)] + [f"{f2(a0[k])} → {f2(a1[k])}" for k in ("R@5", "R@10", "NDCG@10")])
+        if crow:
+            md.append(f"### LoCoMo: compare `{args.compare}` → `{args.tag}` (same conversations)\n")
+            md.append(table(crow, ["variant", "split", "n", "R@5", "R@10", "NDCG@10"]) + "\n")
 
     # ------------------------------------------------ throughput
     md.append("## Ingestion and recall throughput\n")
     trows = []
-    for bench, sub, unitname in (("LongMemEval_S", f"lme-{args.unit}", "question"), ("LoCoMo", "locomo-turn", "conversation")):
+    for bench, sub, unitname in (("LongMemEval_S", f"lme-{args.unit}", "question"),
+                                 ("LongMemEval oracle", f"lme-oracle-{args.unit}", "question"),
+                                 ("LoCoMo", "locomo-turn", "conversation")):
         for v in VARIANTS:
             recs = load_dir(base / sub / v)
             if not recs:
@@ -278,6 +308,7 @@ def main():
                       f"reader/judge {', '.join(sorted(m for m in models if m))})\n")
             if sub.startswith("lme"):
                 splits = [("all", lambda r: True)] + [(c, (lambda c: lambda r: r["category"] == c)(c)) for c in LME_CATS]
+                splits = splits[:2] + ss_groups() + splits[2:]
                 splits += [("KU held-out", lambda r: r["qid"] in held), ("KU trained-on", lambda r: r["qid"] in ku_train)]
             else:
                 splits = [("cat 1–4", lambda r: True)] + [

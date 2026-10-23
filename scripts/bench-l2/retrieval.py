@@ -17,6 +17,7 @@ Variants (all through `remember` / `recall`, nothing else):
   fts     no models: FTS-only recall, model-free write rules (exact duplicate, value rule)
   hybrid  EmbeddingGemma (int8) vectors + FTS, WeightedFusion; no decider (rules only)
   sup     hybrid + decider-nano supersession / duplicate decisions on every remember
+With --as-of question, recall reads at the question's date and results go to <variant>@q.
 
 Results go to <bench-dir>/results/<tag>/<bench>-<unit>/<variant>/. The tag
 defaults to the kleos git revision (`git rev-parse --short HEAD`).
@@ -121,12 +122,13 @@ def run_lme(args, outdir):
         t0 = time.perf_counter()
         owner, st, lat = ingest(db, ns, units)
         ingest_s = time.perf_counter() - t0
-        hits10, ms10 = recall(db, ns, x["question"], owner, 10)
-        hits5, ms5 = recall(db, ns, x["question"], owner, 5)
+        ro = {"as_of": C.lme_ts(x["question_date"])} if args.as_of == "question" else {}
+        hits10, ms10 = recall(db, ns, x["question"], owner, 10, **ro)
+        hits5, ms5 = recall(db, ns, x["question"], owner, 5, **ro)
         hp = {}
         if args.variant == "sup":  # the read policy that acts on pending supersedes
-            hp["hits10_hide_pending"], _ = recall(db, ns, x["question"], owner, 10, hide_pending=True)
-            hp["hits5_hide_pending"], _ = recall(db, ns, x["question"], owner, 5, hide_pending=True)
+            hp["hits10_hide_pending"], _ = recall(db, ns, x["question"], owner, 10, hide_pending=True, **ro)
+            hp["hits5_hide_pending"], _ = recall(db, ns, x["question"], owner, 5, hide_pending=True, **ro)
         db.close()
         sess_date = dict(zip(x["haystack_session_ids"], x["haystack_dates"]))
         rec = {
@@ -212,13 +214,18 @@ def main():
     ap.add_argument("--ids-from", default=None, help="'ku_heldout', 'ku' or a file of question ids")
     ap.add_argument("--seed", type=int, default=C.SEED)
     ap.add_argument("--shard", default="0/1")
-    ap.add_argument("--device", default=os.environ.get("KLEOS_BENCH_DEVICE", "cpu"),
-                    help="model device; Metal kernels fail to compile on macOS 27 with candle 0.11, so cpu")
+    ap.add_argument("--device", default=os.environ.get("KLEOS_BENCH_DEVICE", "metal"),
+                    help="model device. Builds before 6f9711f fail to compile candle's Metal kernels from a Python "
+                         "linked against an old macOS SDK (the 276f90f numbers are CPU); 6f9711f pins the MSL version")
+    ap.add_argument("--as-of", default="now", choices=["now", "question"],
+                    help="read time for recall: 'now' (default) or the question's date (LongMemEval), so the "
+                         "recency blend sees the age a live agent would")
     ap.add_argument("--tag", default=os.environ.get("KLEOS_BENCH_TAG") or C.git_rev())
     args = ap.parse_args()
     args.shard_i, args.shard_n = map(int, args.shard.split("/"))
     unit = args.unit if args.bench != "locomo" else "turn"
-    outdir = C.bench_dir() / "results" / args.tag / f"{args.bench}-{unit}" / args.variant
+    vdir = args.variant + ("@q" if args.as_of == "question" else "")
+    outdir = C.bench_dir() / "results" / args.tag / f"{args.bench}-{unit}" / vdir
     outdir.mkdir(parents=True, exist_ok=True)
     meta = outdir / "meta.json"
     if not meta.exists():
@@ -226,7 +233,7 @@ def main():
         meta.write_text(json.dumps({
             "tag": args.tag, "kleos_file": getattr(sys.modules["kleos"], "__file__", None),
             "lme": [C.LME_REPO, C.LME_REV], "locomo": [C.LOCOMO_REPO, C.LOCOMO_REV],
-            "device": args.device, "seed": args.seed, "unit": unit, "started": time.time(),
+            "device": args.device, "seed": args.seed, "unit": unit, "as_of": args.as_of, "started": time.time(),
         }, indent=1))
     print(f"-> {outdir}", flush=True)
     (run_locomo if args.bench == "locomo" else run_lme)(args, outdir)

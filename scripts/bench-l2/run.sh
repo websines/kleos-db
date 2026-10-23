@@ -9,9 +9,11 @@
 # run the L2 memory benchmarks and print the report (compared with a baseline tag).
 #
 #   scripts/bench-l2/run.sh                 # retrieval (all variants, the sampled sets) + report
+#   (about 1.5 h of CPU for the model variants on a quiet 16 GB Mac; the fts runs take minutes)
 #   QA=1 scripts/bench-l2/run.sh            # ... plus QA through the reader/judge LLM
 #   COMPARE=276f90f scripts/bench-l2/run.sh # compare with an earlier tag (default 276f90f)
 #   SKIP_BUILD=1 ...                        # reuse the installed wheel
+#   ENGINE_SRC=/path/to/kleos-checkout ...  # build and benchmark another checkout (tag = its last engine commit)
 #
 # Results: <bench-dir>/results/<git short rev>/; cached per question, so an
 # interrupted run resumes where it stopped. Everything stays on /Volumes/SSD01.
@@ -29,38 +31,46 @@ PY=$B/.venv/bin/python
 [[ -x $PY ]] || { uv venv --python 3.12 $B/.venv && uv pip install --python $PY maturin huggingface_hub numpy; }
 
 # tag = the last commit that changed the engine (harness/doc commits don't relabel results)
+# ENGINE_SRC: the kleos checkout to build and benchmark (default: this one), e.g. a detached
+# `git worktree add --detach .bench-data/bench-l2/engine-<rev> <rev>` of main
+ENGINE_SRC=${ENGINE_SRC:-$ROOT}
 ENGINE=(kleos-core kleos-infer kleos-lib-python Cargo.lock)
-TAG=$(git -C $ROOT log -1 --format=%h --abbrev=7 -- $ENGINE)
-[[ -n "$(git -C $ROOT status --porcelain -- $ENGINE)" ]] && TAG=$TAG-dirty
+TAG=$(git -C $ENGINE_SRC log -1 --format=%h --abbrev=7 -- $ENGINE)
+[[ -n "$(git -C $ENGINE_SRC status --porcelain -- $ENGINE)" ]] && TAG=$TAG-dirty
 export KLEOS_BENCH_TAG=${KLEOS_BENCH_TAG:-$TAG}
 COMPARE=${COMPARE:-276f90f}
 echo "tag $KLEOS_BENCH_TAG, compare with $COMPARE, data in $B"
 
 if [[ -z $SKIP_BUILD ]]; then
-  (cd $ROOT/kleos-lib-python && RUSTUP_TOOLCHAIN=1.99.0 $B/.venv/bin/maturin build --release \
-     --features infer-metal -i $PY -o $B/wheels/$KLEOS_BENCH_TAG) > $B/logs/build-$KLEOS_BENCH_TAG.log 2>&1
+  # maturin calls plain cargo, so RUSTUP_TOOLCHAIN is what selects rustc 1.99 (candle needs it)
+  (cd $ENGINE_SRC && RUSTUP_TOOLCHAIN=1.99.0 $B/.venv/bin/maturin build --release --features compact,infer-metal \
+     -m kleos-lib-python/Cargo.toml -i $PY -o $B/wheels/$KLEOS_BENCH_TAG) > $B/logs/build-$KLEOS_BENCH_TAG.log 2>&1
   uv pip install --python $PY --reinstall $B/wheels/$KLEOS_BENCH_TAG/kleos-*.whl
 fi
 $PY -I -c "import sys; sys.path.insert(0, '$HERE'); import common; common.fetch_data()"
 
 R="$PY $HERE/retrieval.py"
 cd $B/tmp
-# model-free: everything
+# 1. model-free: everything (minutes)
 $R --bench lme --variant fts | tail -1
 $R --bench lme-oracle --variant fts | tail -1
 $R --bench locomo --variant fts | tail -1
-# models (CPU: candle's Metal kernels do not compile on macOS 27): the sampled sets
+# 2. models on Metal (KLEOS_BENCH_DEVICE=cpu forces CPU; builds before 6f9711f need cpu from Python)
+$R --bench lme-oracle --variant hybrid --ids-from ku | tail -1          # oracle KU: old + new value both stored
+$R --bench lme-oracle --variant sup --ids-from ku_heldout | tail -1     # supersession on the 25 KU held out from decider training
 $R --bench lme --variant hybrid --ids-from ku_heldout | tail -1
-$R --bench lme --variant sup --ids-from ku_heldout | tail -1
 $R --bench locomo --variant hybrid | tail -1
-$R --bench lme --variant hybrid --n ${LME_N:-100} | tail -1
-[[ -n $SUP_LOCOMO ]] && $R --bench locomo --variant sup --n ${SUP_LOCOMO} | tail -1
+$R --bench lme --variant hybrid --n ${LME_N:-60} | tail -1             # stratified sample (seeded; n=60 is a prefix of n=100)
+[[ -n $SUP_S ]] && $R --bench lme --variant sup --ids-from ku_heldout | tail -1   # supersession in the full haystack
 
+# 3. QA (secondary): reader + judge through the LLM endpoint (KLEOS_BENCH_LLM, default synthetic);
+#    every request is cached by prompt hash, so re-runs only pay for prompts that changed
 if [[ -n $QA ]]; then
-  Q="$PY $HERE/qa.py --workers ${QA_WORKERS:-8}"
+  Q="$PY $HERE/qa.py --workers ${QA_WORKERS:-6}"
   $Q --bench lme --conditions none,oracle,kleos:fts | tail -2
-  $Q --bench lme --conditions kleos:fts,kleos:hybrid,kleos:sup --ids-variant sup | tail -2
-  $Q --bench lme --conditions kleos:fts,kleos:hybrid --ids-variant hybrid | tail -2
-  $Q --bench locomo --conditions none,kleos:fts,kleos:hybrid --n ${LOCOMO_QA_N:-0} | tail -2
+  $Q --bench lme --conditions full,none,oracle,kleos:fts --n 100 | tail -2
+  $Q --bench lme --conditions none,oracle,full,kleos:fts,kleos:hybrid --ids-variant hybrid | tail -2
+  $Q --bench lme-oracle --conditions oracle,kleos:fts,kleos:hybrid,kleos:sup,kleos:sup+hide_pending --ids-variant sup | tail -2
+  $Q --bench locomo --conditions none,kleos:fts,kleos:hybrid,oracle,full --n ${LOCOMO_QA_N:-300} | tail -2
 fi
 $PY $HERE/report.py --compare $COMPARE
