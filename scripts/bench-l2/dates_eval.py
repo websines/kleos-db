@@ -159,6 +159,19 @@ def _match(p, g):
     return bool(a) and bool(b) and (a in b or b in a)
 
 
+def _same_interval(p, g):
+    """Same [start, end); a label whose end is the last day (inclusive, a
+    frequent LLM slip despite the prompt) counts too."""
+    if p["start"] != g.get("start") or not g.get("end"):
+        return False
+    if p["end"] == g["end"]:
+        return True
+    try:
+        return to_us(p["end"]) - to_us(g["end"]) == 86_400_000_000
+    except ValueError:
+        return False
+
+
 def score_items(items, gold_key):
     tp = fp = fn = 0
     iv_ok = iv_match = 0
@@ -180,7 +193,7 @@ def score_items(items, gold_key):
             tp += 1
             iv_match += 1
             g = gold[j]
-            if p["start"] == g.get("start") and p["end"] == g.get("end"):
+            if _same_interval(p, g):
                 iv_ok += 1
             else:
                 errors.append(("iv", it["key"], it["said"], p["text"], f"{p['start']}..{p['end']} vs {g.get('start')}..{g.get('end')}",

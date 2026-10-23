@@ -410,6 +410,11 @@ static THE_BEFORE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\bthe\s+$"));
 static OF_AFTER: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)^\s+of\b"));
 static RANGE_WORD_BEFORE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?:or|to)\s*$|[-–]\s*$"));
 static NOT_A_DAY_BEFORE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?:good|black|cyber|girl|man)\s+$"));
+/// A capitalised word right before a bare weekday that is not a cue or a
+/// sentence start ("Mental Health Monday").
+static NAME_BEFORE: LazyLock<Regex> = LazyLock::new(|| {
+    re(r#"[a-z,;:]\s+["“']?(?:[A-Z][a-z]+\s+)*[A-Z][a-z]+\s+$"#)
+});
 static HABIT_AFTER: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)^\s+(?:morning|afternoon|evening|night)s\b"));
 static RATE_BEFORE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?:once|twice|times)\s+$"));
 static WRAP: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?P<w>ever\s+since|since|up\s+until|until|till|til|through|thru)\s+$"));
@@ -621,6 +626,9 @@ impl Cx<'_> {
 
     /// A month and day without a year: the nearest occurrence (ties to the
     /// past), or the first on or after the anchor day with a future cue.
+    /// (The latest one before the anchor in a past-tense sentence was
+    /// tried: LongMemEval's session dates often precede the events their
+    /// messages report, and it moved 59 of its dates a year back.)
     fn md_year(&self, m: u32, d: u32, future: bool) -> Option<NaiveDate> {
         let ay = self.a.year();
         let opts: Vec<NaiveDate> = (ay - 1..=ay + 1).filter_map(|y| NaiveDate::from_ymd_opt(y, m, d)).collect();
@@ -935,12 +943,19 @@ fn h_weekday(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
         Some("every" | "each" | "that" | "most") => return None,
         Some("last" | "this past") => (s0, "before"),
         Some("next" | "this coming") => (s0, "after"),
-        Some("this") => (s0, "this"),
+        // "this Saturday" said on a Sunday about a plan: the coming one
+        Some("this") => (
+            s0,
+            if cx.weekday(w, "this") < cx.a && !PAST_Q.is_match(cx.sentence(s0, e)) { "after" } else { "this" },
+        ),
         Some("since") => (wg.start(), "before"),
         Some("until" | "till" | "by") => (wg.start(), "after"),
         _ => {
             if NOT_A_DAY_BEFORE.is_match(cx.before(wg.start(), 8)) {
                 return None; // Good Friday, Black Friday
+            }
+            if pre.is_none() && NAME_BEFORE.is_match(cx.before(wg.start(), 24)) {
+                return None; // "Mental Health Monday", "Taco Tuesday": a name
             }
             let s = if pre.is_some() { wg.start() } else { s0 };
             (s, if cx.future(s0, e) { "after" } else { "before" })
@@ -1388,6 +1403,29 @@ mod tests {
         one("Does Saturday sound good?", "Saturday", "2023-05-13", "2023-05-14", "day");
         one("Did you go on Saturday?", "Saturday", "2023-05-06", "2023-05-07", "day");
         one("Saturday works for me!", "Saturday", "2023-05-13", "2023-05-14", "day");
+        // "this <weekday>" already past in the week, about a plan: the coming one
+        one_at(
+            "I'm thinking of doing a bike ride this Saturday.",
+            at(2023, 11, 5),
+            "this Saturday",
+            "2023-11-11",
+            "2023-11-12",
+            "day",
+        );
+        one_at("I went there this Saturday.", at(2023, 11, 5), "this Saturday", "2023-11-04", "2023-11-05", "day");
+        // a capitalised name before a bare weekday is not a date
+        none("For my \"Mental Health Monday\" series, I share tips.");
+        none("We do Taco Tuesday at work.");
+        // a month and day without a year: the nearest one
+        one_at(
+            "I attended a charity golf tournament on July 17th.",
+            at(2023, 2, 21),
+            "July 17th",
+            "2023-07-17",
+            "2023-07-18",
+            "day",
+        );
+        one("Hey Sam, Monday was fun.", "Monday", "2023-05-01", "2023-05-02", "day");
         none("I last sat down here");
         // a Sunday anchor
         one_at("last Sunday", at(2023, 5, 7), "last Sunday", "2023-04-30", "2023-05-01", "day");
