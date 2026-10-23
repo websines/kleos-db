@@ -197,6 +197,78 @@ fn words(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Function words: they carry no content of their own, so a sentence made
+/// only of them ("Yes, I did.", "That's so cool!") is not a claim by itself.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "after", "again", "all", "also", "am", "an", "and", "any", "are", "as", "at", "be", "been",
+    "before", "being", "but", "by", "can", "could", "d", "did", "do", "does", "doing", "don", "done", "for",
+    "from", "get", "got", "had", "has", "have", "having", "he", "her", "here", "hers", "him", "his", "how", "i",
+    "if", "in", "into", "is", "it", "its", "just", "ll", "m", "me", "might", "more", "most", "much", "must", "my",
+    "myself", "no", "not", "now", "of", "oh", "ok", "okay", "on", "one", "or", "our", "out", "re", "really", "s",
+    "so", "some", "still", "such", "sure", "t", "than", "that", "the", "their", "them", "then", "there", "these",
+    "they", "this", "those", "to", "too", "totally", "up", "us", "ve", "very", "was", "way", "we", "well",
+    "were", "what", "when", "where", "which", "who", "why", "will", "with", "would", "yeah", "yes", "yep", "you",
+    "your", "yours", "wow", "cool", "great", "awesome", "amazing", "nice", "thanks", "thank", "lol", "haha",
+    "hey", "hi", "hello", "glad", "good", "love", "like", "know", "think", "sounds", "sound", "lot", "thing",
+    "things", "go", "going", "make", "makes", "made", "say", "said", "see", "let", "let's", "even", "always",
+    "never", "maybe", "definitely", "absolutely", "kind", "pretty", "super", "though", "because",
+];
+
+/// Words of `s` that carry content (not function words).
+fn content_words(s: &str) -> usize {
+    words(s)
+        .iter()
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .count()
+}
+
+/// A speaker label at the start of a text ("Caroline: …", "Dr. Ann Lee:
+/// …"): one to three capitalised words, then a colon and a space. Returns
+/// (label with colon, rest).
+pub fn speaker_prefix(text: &str) -> Option<(&str, &str)> {
+    let t = text.trim_start();
+    let i = t.find(": ")?;
+    let label = &t[..i];
+    let ws: Vec<&str> = label.split(' ').collect();
+    if label.is_empty() || ws.len() > 3 || label.len() > 40 {
+        return None;
+    }
+    let ok = ws.iter().all(|w| {
+        w.chars().next().is_some_and(|c| c.is_uppercase())
+            && w.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '\'' | '-' | '’'))
+    });
+    ok.then(|| (&t[..i + 1], t[i + 2..].trim_start()))
+}
+
+/// How a text is split into claims.
+#[derive(Debug, Clone, Copy)]
+pub struct SplitRules {
+    /// A claim needs at least this many content words; a sentence with
+    /// fewer is joined to its neighbour (the next one, or the previous one
+    /// at the end).
+    pub min_content: usize,
+    /// A text with fewer words than this is not split at all.
+    pub min_words: usize,
+    /// A speaker label ("Name: ") at the start is repeated on every claim.
+    pub speaker: bool,
+}
+
+impl Default for SplitRules {
+    /// The rules `remember` uses (docs/specs/memory-api.md, "Claims"): a
+    /// claim needs two content words ("I live in Berlin" has two; "Yes, I
+    /// did.", "Cool!" and "I loved it." have none), and a speaker label is
+    /// repeated on every claim. Measured on LoCoMo, whose turns are
+    /// "Name: text", and on the held-out LongMemEval knowledge-update
+    /// questions.
+    fn default() -> Self {
+        SplitRules {
+            min_content: 2,
+            min_words: 0,
+            speaker: true,
+        }
+    }
+}
+
 /// Split `text` into claims: sentences, list items and lines. Handles
 /// abbreviations ("Dr.", "e.g.", "p.m."), initials, decimals, URLs and
 /// version numbers (a period not followed by a space never splits),
@@ -205,9 +277,29 @@ fn words(s: &str) -> Vec<String> {
 /// letter or digit are dropped, and a claim repeated in the same text is
 /// kept once. A single-sentence text comes back unchanged (trimmed).
 pub fn split_claims(text: &str) -> Vec<String> {
+    split_claims_with(text, SplitRules::default())
+}
+
+/// [`split_claims`] with explicit rules.
+pub fn split_claims_with(text: &str, rules: SplitRules) -> Vec<String> {
+    let whole = || {
+        let t = text.trim();
+        if t.is_empty() {
+            vec![]
+        } else {
+            vec![t.to_string()]
+        }
+    };
+    if rules.min_words > 0 && words(text).len() < rules.min_words {
+        return whole();
+    }
+    let (label, body) = match speaker_prefix(text) {
+        Some((l, b)) if rules.speaker => (Some(l), b),
+        _ => (None, text),
+    };
     let mut out: Vec<String> = vec![];
     let mut seen = std::collections::BTreeSet::new();
-    for b in blocks(text) {
+    for b in blocks(body) {
         for s in sentences(&b) {
             let key = words(&s).join(" ");
             if key.is_empty() || !seen.insert(key) {
@@ -216,15 +308,39 @@ pub fn split_claims(text: &str) -> Vec<String> {
             out.push(s);
         }
     }
+    if rules.min_content > 0 && out.len() > 1 {
+        // low-content sentences join their neighbour
+        let mut groups: Vec<String> = vec![];
+        let mut cur = String::new();
+        for s in out {
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(&s);
+            if content_words(&cur) >= rules.min_content {
+                groups.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            match groups.last_mut() {
+                Some(g) => {
+                    g.push(' ');
+                    g.push_str(&cur);
+                }
+                None => groups.push(cur),
+            }
+        }
+        out = groups;
+    }
     if out.len() <= 1 {
         // one claim: the text as given (only trimmed), so a single
         // statement is stored exactly as before claims existed
-        let t = text.trim();
-        return if t.is_empty() {
-            vec![]
-        } else {
-            vec![t.to_string()]
-        };
+        return whole();
+    }
+    if let Some(l) = label {
+        for c in out.iter_mut() {
+            *c = format!("{l} {c}");
+        }
     }
     out
 }
@@ -338,6 +454,18 @@ const COURTESY: &[&str] = &[
 /// greetings and thanks, and fragments of fewer than three words are not
 /// decided; they are still stored and recallable.
 pub fn is_declarative(claim: &str) -> bool {
+    let claim = speaker_prefix(claim).map_or(claim, |(_, rest)| rest);
+    // a claim of several sentences (a fragment joined to its neighbour, or
+    // a whole message) states something when any of its sentences does
+    let parts: Vec<String> = blocks(claim).iter().flat_map(|b| sentences(b)).collect();
+    if parts.len() > 1 {
+        return parts.iter().any(|p| sentence_is_declarative(p));
+    }
+    sentence_is_declarative(claim)
+}
+
+/// [`is_declarative`] for one sentence.
+fn sentence_is_declarative(claim: &str) -> bool {
     let t = claim.trim().trim_end_matches(CLOSERS).trim_end();
     if t.ends_with('?') || t.ends_with('？') {
         return false;
@@ -373,8 +501,9 @@ pub fn is_declarative(claim: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Sentence splitting alone (no joining, no speaker rule).
     fn sp(s: &str) -> Vec<String> {
-        split_claims(s)
+        split_claims_with(s, rules(0, 0, false))
     }
 
     #[test]
@@ -524,6 +653,70 @@ mod tests {
             sp("I live in Porto. I live in Porto! ... It is nice."),
             vec!["I live in Porto.", "It is nice."]
         );
+    }
+
+    fn rules(min_content: usize, min_words: usize, speaker: bool) -> SplitRules {
+        SplitRules { min_content, min_words, speaker }
+    }
+
+    #[test]
+    fn speaker_labels() {
+        assert_eq!(speaker_prefix("Caroline: Yes, I did."), Some(("Caroline:", "Yes, I did.")));
+        assert_eq!(speaker_prefix("Dr. Ann Lee: Hi."), Some(("Dr. Ann Lee:", "Hi.")));
+        assert_eq!(speaker_prefix("My plans: buy a bike"), None);
+        assert_eq!(speaker_prefix("I said: no"), None);
+        assert_eq!(speaker_prefix("Note this: it rained"), None);
+        assert!(!is_declarative("Melanie: How have you been?"));
+        assert!(!is_declarative("Melanie: Can you send me the photo."));
+        assert!(is_declarative("Melanie: I ran a charity race last Saturday."));
+    }
+
+    #[test]
+    fn low_content_sentences_join_a_neighbour() {
+        let r = rules(4, 0, true);
+        // "Yes, I did." has no content of its own: it joins the next sentence
+        assert_eq!(
+            split_claims_with("Caroline: Yes, I did. I researched adoption agencies last week. The agency staff were helpful and patient.", r),
+            vec![
+                "Caroline: Yes, I did. I researched adoption agencies last week.",
+                "Caroline: The agency staff were helpful and patient."
+            ]
+        );
+        // a trailing fragment joins the previous claim
+        assert_eq!(
+            split_claims_with("I moved to Lisbon last month with my dog. It is sunny there. Wow!", r),
+            vec!["I moved to Lisbon last month with my dog. It is sunny there. Wow!"]
+        );
+        // all fragments: one claim, the text unchanged
+        assert_eq!(split_claims_with("Caroline: Hey Mel! Good to see you!", r), vec!["Caroline: Hey Mel! Good to see you!"]);
+        // without a speaker rule the label stays on the first claim only
+        assert_eq!(
+            split_claims_with("Caroline: I painted a lake at sunrise. My sister bought the painting yesterday.", rules(0, 0, false)),
+            vec!["Caroline: I painted a lake at sunrise.", "My sister bought the painting yesterday."]
+        );
+        // short texts are not split under min_words
+        assert_eq!(
+            split_claims_with("I live in Porto. My rent is low.", rules(0, 10, false)),
+            vec!["I live in Porto. My rent is low."]
+        );
+    }
+
+    #[test]
+    fn default_rules() {
+        // a dialog turn: no content-free fragment, the speaker on each claim
+        assert_eq!(
+            split_claims("Caroline: Yes, I did. I researched adoption agencies. My sister helped me with the forms."),
+            vec![
+                "Caroline: Yes, I did. I researched adoption agencies.",
+                "Caroline: My sister helped me with the forms."
+            ]
+        );
+        assert_eq!(split_claims("Caroline: Cool! I loved it."), vec!["Caroline: Cool! I loved it."]);
+        // short facts stay claims of their own
+        assert_eq!(split_claims("I live in Berlin. I have a dog named Max."), vec!["I live in Berlin.", "I have a dog named Max."]);
+        // a question joined to a statement leaves the claim declarative
+        assert!(is_declarative("Can you recommend some? By the way, I switched to 1 tablespoon per 6 ounces."));
+        assert!(!is_declarative("Melanie: Wow, really? How was it?"));
     }
 
     #[test]

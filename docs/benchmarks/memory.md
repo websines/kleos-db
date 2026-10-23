@@ -287,6 +287,161 @@ QA_TABLES
 2. **Multi-hop evidence that the question does not mention** is still missed (LoCoMo multi-hop Rall@10 ≤ 0.11). Diversity cannot help it, and entity expansion did not help with crude entities.
 3. **Storing assistant turns** costs user-evidence turns in the top 10 (T@10 0.914 → 0.850; ss-user 0.969 → 0.906). The statement cap and `assistant_weight` 0.05 recover part of it. A higher weight, or `role: 'user'` for questions about the user, is untested.
 
+## Head-to-head: Mem0 (open source)
+
+Status: 2026-10-23, first run. Adapter: `scripts/bench-l2/mem0_adapter.py`. Raw results, logs, the LLM cache and the venv lock file are in `.bench-data/mem0-h2h/`.
+
+Published Mem0 numbers use other LLMs, prompts and judges (memory-decisions.md §2.3), so they cannot be set beside the tables above. Here Mem0 runs **through this harness**: the same questions, the same reader and judge (GLM-4.7-Flash with the prompts in `qa.py`), the same embedding model, and the same LLM for Mem0's own extraction step.
+
+### Setup
+
+| | kleos | Mem0 |
+|---|---|---|
+| Version | main `92ef789` (engine tag `1c1bf81`, claim-level `remember`), plus `6f9711f` (before claims) for reference | `mem0ai` **2.2.1** (PyPI, released 2026-09-25), the open-source `Memory` class, in its own venv |
+| Write path | `remember(text, ns, at, source)` for each LoCoMo turn or LongMemEval user message. No LLM. | `Memory.add(messages, user_id, metadata)`: Mem0's v3 pipeline. Per `add` it makes **one LLM extraction call** (ADD-only, deduplicated against the 10 nearest existing memories and the last 10 messages), then adds BM25 lemmas and spaCy entity links. |
+| LLM | none | Synthetic `syn:small:text` (GLM-4.7-Flash), thinking off, temperature 0, JSON response format, `max_tokens` 4000 (Mem0's default is 2000; see below). Called through `llm.Client`, so every call is cached by prompt hash. |
+| Embedder | EmbeddingGemma int8 (candle, Metal), 512 tokens | **The same model**, `google/embeddinggemma-300m`, in fp32 (sentence-transformers, MPS), 512 tokens, with the same query and document prompts |
+| Store | in-memory kleos DB, one per unit | Mem0's default Qdrant, in process and in memory, one per unit. SQLite history is also in memory. BM25 uses fastembed and entities use spaCy `en_core_web_sm`, as Mem0 ships them. |
+| Read | `recall(question, k=10)`, hybrid | `search(question, top_k=10)`: semantic, BM25 and entity boost, with Mem0's default threshold 0.1. `top_k=20` (Mem0's default) is also reported. |
+| Reader context | the top 10 memories in time order, each with its `valid_from` date | the top 10 (or 20) memories in time order, each with the session date Mem0 stored as `created_at` |
+
+**Adapter choices.** None of these changes Mem0's algorithm.
+
+- **Session time.**
+  - OSS `add()` rejects the platform-only `timestamp` argument.
+  - The adapter therefore puts the session date in the extraction prompt's own "Observation Date" slot, the one `generate_additive_extraction_prompt` already has. That is what the platform's `timestamp` does.
+  - The session time is also passed as `created_at` metadata, which Mem0 keeps.
+  - "Current Date" is pinned to the run date, so cached prompts stay valid.
+  - Without this, Mem0 would resolve "yesterday" against today's date.
+- **Provenance.**
+  - Mem0 does not record which turns a memory came from.
+  - The adapter passes the source turn ids as metadata on each `add`. Mem0 copies them onto every memory that call creates.
+  - This gives retrieval R@k at the granularity of one `add`.
+- **Speakers (LoCoMo).** As in Mem0's own evaluation code: speaker A is `user`, speaker B is `assistant`, and the content is `"Name: text"`. Mem0 v3 extracts from both roles and names the speakers.
+- **One store per conversation.** Mem0's own LoCoMo eval keeps one store per speaker and gives the reader 10 + 10 memories. Here there is one store per conversation; the `mem0_k20` column covers the 20-memory reading.
+- **Telemetry** is off (`MEM0_TELEMETRY=False`, checked at start), so there are no PostHog events and no remote notice config.
+
+**The deviation that matters: one `add()` per session, not per turn pair.**
+- **Why.** Mem0's LoCoMo protocol adds two messages at a time, about 2,950 LLM calls for LoCoMo, each with a prompt of about 9k tokens (the system prompt alone is about 5k).
+  - Synthetic answered `429 "Too many concurrent requests"`. The limit is account-wide and was shared with other jobs running at the same time.
+  - Throughput was 3–15 calls per minute, so the pair protocol did not fit in the time box. It is implemented (`--batch pair`) but was not run beyond a first aborted try.
+- **What ran instead.** One `add` per session: **272 calls for all 10 LoCoMo conversations**, and about 47 per LongMemEval question.
+- **How it might bias the result.** The direction is unknown.
+  - Mem0 sees a whole session at once, which gives it more context.
+  - It writes fewer, coarser memories: 1,788 for LoCoMo's 5,882 turns, about 7 per session.
+  - `max_tokens` was raised to 4000 so that no session's extraction is cut off; 0 were truncated.
+
+**What ran**
+- **LoCoMo:** all 10 conversations ingested.
+  - Retrieval on all 1,536 category 1–4 questions.
+  - QA on **the same stratified 301** as the tables above.
+- **LongMemEval_S:** a stratified **11** questions from the 119-question hybrid set (`--n 10`, which rounds to 11), with full haystacks of about 47 sessions and 490 messages each. The target was 40–60; the rate limit allowed 11 in the time box.
+  - At n = 11, one question moves accuracy by 9 points. **Treat the LongMemEval rows as anecdotal.**
+- **Errors.** No add failed. 388 + 729 HTTP 429 retries were absorbed by retrying.
+- **Determinism.** A one-worker re-run of conv-26 from the cache rebuilt the same 131 memories.
+
+### Results
+
+**LoCoMo QA, the same 301 questions** (GLM-4.7-Flash reader and judge, Mem0's LoCoMo prompts):
+
+| split | n | no memory | kleos hybrid, main `1c1bf81` | kleos hybrid, `6f9711f` | **Mem0, top 10** | Mem0, top 20 | full conversation | evidence turns |
+|---|---|---|---|---|---|---|---|---|
+| **cat 1–4** | 301 | 0.462 | 0.565 | 0.714 | **0.748** | 0.784 | 0.814 | 0.897 |
+| 1 multi-hop | 55 | 0.455 | 0.527 | 0.709 | 0.764 | 0.818 | 0.909 | 0.964 |
+| 2 temporal | 63 | 0.381 | 0.302 | 0.365 | **0.524** | 0.556 | 0.603 | 0.714 |
+| 3 open-domain | 19 | 0.474 | 0.579 | 0.526 | 0.737 | 0.684 | 0.737 | 0.789 |
+| 4 single-hop | 164 | 0.494 | 0.677 | 0.872 | 0.829 | 0.872 | 0.872 | 0.957 |
+
+**LoCoMo retrieval, categories 1–4, all 1,536 questions.**
+
+Mem0 memories come from whole sessions, so both systems are scored at **session level**: a hit counts if it comes from an evidence session. kleos is also shown at turn level.
+
+| system | R@5 | R@10 | Rall@10 |
+|---|---|---|---|
+| Mem0 (session level) | 0.880 | 0.930 | 0.841 |
+| kleos hybrid `6f9711f` (session level) | 0.887 | 0.938 | 0.834 |
+| kleos hybrid main `1c1bf81` (session level) | 0.708 | 0.787 | 0.662 |
+| kleos hybrid `6f9711f` (turn level) | 0.661 | 0.749 | 0.612 |
+| kleos hybrid main `1c1bf81` (turn level) | **0.423** | 0.479 | 0.368 |
+
+**LongMemEval_S, 11 questions** (anecdotal; LongMemEval's official judge):
+
+| split | n | no memory | kleos hybrid main | kleos hybrid `6f9711f` | Mem0, top 10 | full history | oracle sessions |
+|---|---|---|---|---|---|---|---|
+| all | 11 | 0.091 | 0.636 | 0.727 | **0.909** | 0.545 | 0.727 |
+
+- Session-level R@10 is 1.000 for both systems. Rall@10 is 1.000 for Mem0 and 0.909 for kleos.
+- **Where Mem0 won and kleos (main) lost:**
+  - 1 single-session-assistant question: kleos stores only user messages, so these are unanswerable by design (see Units).
+  - 1 single-session-user, 1 knowledge-update and 1 multi-session question.
+- **Where kleos won and Mem0 lost:** 1 multi-session question.
+
+### Cost and latency
+
+| | kleos (main, hybrid) | Mem0 |
+|---|---|---|
+| LLM calls at ingest | 0 | 272 for LoCoMo (one per session); 516 for 11 LongMemEval questions |
+| LLM tokens at ingest | 0 | LoCoMo: 2.51 M prompt + 0.10 M completion, **445 tokens per turn**. LongMemEval: 5.64 M + 0.24 M, **about 0.53 M per question**, 1,096 per message. |
+| Ingest wall time per turn | LoCoMo `remember` p50 56 ms, p95 151 ms (Metal, machine shared) | LoCoMo 1.18 s per turn; `add` p50 18.8 s, p95 66 s per session. Most of that is the LLM call, including waits for a free concurrency slot. |
+| Local (non-LLM) cost per `add`, one worker, from cache | – | p50 1.08 s, of which embedding is 0.87 s (torch MPS: messages, memories and entities) |
+| Search k = 10, one worker | recall p50 21 ms, p95 32 ms (conv-26) | p50 142 ms, p95 378 ms (conv-26), of which query and entity embedding is 109 ms |
+| Search k = 10 under the 6-worker run | recall p50 30 ms, p95 66 ms (all LoCoMo, machine shared) | p50 0.98 s, p95 2.75 s |
+
+- Mem0's search latency is mostly torch EmbeddingGemma on MPS. That cost belongs to this setup, not to Mem0's design: with an API embedder it would be a network round trip instead.
+- Without the embedding, Mem0's search is roughly 30 ms (spaCy, two Qdrant queries and scoring; p50 minus p50, so approximate). That is close to kleos.
+
+### Reading this honestly
+
+- **Mem0 beat kleos main on LoCoMo QA (0.748 vs 0.565), and narrowly beat the pre-claims build (0.714).** At n = 301 a 3.4-point gap is about 10 questions, within noise. The temporal row is a real gap (0.52 vs 0.30–0.37).
+  - Mem0's extraction writes resolved dates into each memory ("Caroline attended a LGBTQ support group on May 7, 2023").
+  - kleos stores the raw turn ("…yesterday…") and leaves the date arithmetic to the reader.
+- **kleos main regressed on LoCoMo.**
+  - Turn-level R@5 went from 0.661 (`6f9711f`) to 0.423, and QA from 0.714 to 0.565.
+  - Main's claim-level `remember` returns single sentence claims, for example "Caroline: I chose them 'cause they help LGBTQ+ folks with adoption." So the top 10 covers fewer turns and gives the reader less context.
+  - This is a kleos finding, not a Mem0 one. It needs a follow-up: returning the parent turn, or grouping claims by turn in `recall`.
+- **On retrieval the two are level.** At session level, Mem0's R@5 of 0.880 is the same as kleos `6f9711f`'s 0.887. Mem0 spends one LLM call per session to get there; kleos spends none.
+- **Cost is the decisive difference.**
+  - Mem0 needs an LLM call on every `add`: about 9–11k prompt tokens per call, even at session granularity.
+  - That is about 2.6 M tokens to ingest LoCoMo and about 0.5 M per LongMemEval question.
+  - Per-turn adds, Mem0's own protocol, would cost about 10 times more.
+  - kleos ingests with no LLM at 20–60 ms per memory.
+
+**What could disadvantage Mem0:**
+- **The small extraction LLM.** Mem0's paper used gpt-4o-mini; kleos uses no LLM at write time. A small LLM hurts Mem0 and cannot hurt kleos.
+- **Session batching instead of Mem0's turn-pair protocol.** The effect is unknown in either direction.
+- **One store per conversation instead of one per speaker.**
+- **Temperature 0** instead of Mem0's default 0.1, and `top_p` left unset.
+
+**What could favour Mem0:**
+- `max_tokens` 4000 instead of 2000.
+- An fp32 embedder against kleos's int8.
+- It ingests assistant messages, while kleos's LongMemEval unit stores user messages only. The single-session-assistant question in the sample is one of these.
+- Its provenance is per session (one `add`), so its session-level R@k compares like for like only with kleos at session level.
+
+**Neither way:** the reader, judge, prompts and question sets are identical.
+
+**Sanity check:** for kleos main on the 11 LongMemEval questions, this adapter's answers and the harness's own `qa.py` run of the same build agree on 8 of the 9 verdicts both runs have. GLM at temperature 0 is not fully deterministic.
+
+**Quota.** The weekly plan went from 91.5% remaining at the start to 87.3% at the end, about **4.1 points**. This is an account-wide reading that includes any other job using the key at the same time, so it is an upper bound for this work. The cap was 40%.
+
+### Reproduce
+
+```zsh
+export HF_HOME=/Volumes/SSD01/caches/huggingface FASTEMBED_CACHE_PATH=/Volumes/SSD01/caches/fastembed MEM0_MAX_TOKENS=4000
+M=.bench-data/mem0-h2h; uv venv --python 3.12 $M/.venv
+uv pip install --python $M/.venv/bin/python -r $M/requirements.lock   # mem0ai[nlp]==2.2.1, sentence-transformers, torch, fastembed, en_core_web_sm
+A=(scripts/bench-l2/mem0_adapter.py)
+$M/.venv/bin/python $A ingest --bench locomo --batch session --workers 6
+$M/.venv/bin/python $A ingest --bench lme --n 10 --workers 4
+$M/.venv/bin/python $A qa --bench locomo --mem0-k 10,20 --kleos hybrid --kleos-tag 1c1bf81
+$M/.venv/bin/python $A qa --bench lme --n 10
+$M/.venv/bin/python $A ingest --bench locomo --only conv-26 --workers 1 --suffix=-latency   # local latency, from cache
+$M/.venv/bin/python $A report          # -> $M/results/report.md, summary.json
+```
+
+- The kleos side reads the harness's recall results under `.bench-data/bench-l2/results/<tag>/` read-only. The adapter answers from them with exactly `qa.py`'s formatting.
+- Every LLM call is cached under `.bench-data/mem0-h2h/llm-cache/`, so re-running costs no quota.
+
 ## Method
 
 ### What is measured
