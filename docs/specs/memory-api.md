@@ -1,6 +1,6 @@
 # Memory API: remember, recall, forget, reflect, link
 
-Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring. Diverse recall, entity expansion, the context output, speaker roles and valid-from filters: wave3/recall. Statement text in list hits and write-time dates (event times): wave3/dates.
+Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Branches (fork, rewind, merge, diff, discard) are specified in [memory-branches.md](memory-branches.md) (wave4/fork). Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring. Diverse recall, entity expansion, the context output, speaker roles and valid-from filters: wave3/recall. Statement text in list hits and write-time dates (event times): wave3/dates.
 
 Code:
 - `kleos-core/src/memory.rs`: schema, the operations, entity resolution and the same-subject gate, scoring, the access buffer and the JSON entry point;
@@ -48,10 +48,11 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 | `kleos_mem_event` | `{ns, id, n => start, end, granularity, kind, expr}` | Event times: the temporal expressions in a memory's text ("yesterday", "last summer", "since 2019"), resolved against its `at` into `[start, end)` µs, one row per expression (see "Dates"). |
 | `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`, and `engram` when an Engram model is attached. It is created last, so its presence marks a complete schema. |
 | `kleos_engram_queue` | `{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}` | Only with an Engram model attached (feature `engram`): one job per memory change for the overlay worker. See "Engram attachment". |
+| `kleos_mem_branch`, `kleos_mem_copied`, `kleos_mem_merge` | see [memory-branches.md](memory-branches.md) | Branch rows, the copy-up log and the merge log (schema version 6). |
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
 
-The schema version is 5. A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`; a v4 store gains `kleos_mem_event`, filled from the stored memories (each text parsed against its first valid-from).
+The schema version is 6 (6 added the branch relations). A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`; a v4 store gains `kleos_mem_event`, filled from the stored memories (each text parsed against its first valid-from). A v5 store gains the branch relations, empty.
 
 **Why vectors live in a sibling relation.**
 - The dimension is unknown until an embedder is chosen. With a separate relation, a store created without one can gain vectors later: `::memory init {embedder: …}` creates the relation and backfills it.
@@ -348,7 +349,7 @@ Weeks run Monday to Sunday and seasons are northern meteorological ones. On 50 h
 
 **Use.**
 - **List hits** carry `events: [{start, end, granularity, kind, expr}]`, the memory's own.
-- **The context block** shows them inline (and its header then explains the `(≈ date, "words")` notation): `- [2023-05-08 (Mon)] Caroline: I went to a LGBTQ support group yesterday. (≈ 2023-05-07 (Sun), "yesterday")`. A claim's statement's other dates are added to its `said in` line when the expression is in the shown window. An expression that names a year ("May 7, 2023") is not repeated.
+- **The context block** shows them inline (and its header then explains the `(≈ date, "words")` notation): `- [2023-05-08 (Mon)] Caroline: I went to a LGBTQ support group yesterday. (≈ 2023-05-07 (Sun), "yesterday")`. Only a memory's own line carries notes: `said in` lines show the statement without them (dates there made the reader pick the older of two shown values on LongMemEval knowledge-update; docs/benchmarks/memory.md, "Knowledge-update dip"). An expression that names a year ("May 7, 2023") is not repeated.
 - **`recall {event_from, event_to}`** keeps memories whose event time overlaps `[event_from, event_to)`. A memory without events of its own counts by its statement's (the other claims of the same message), else by its valid-from. Post-filters on a 4× deeper fetch, like `from` / `to`.
 - **Question dates** (`event_weight`, default 0.03, the size of the recency weight; 0 turns it off): the dates in the query are resolved against `query_at` (default `as_of`, else now), and a memory whose event time (as for the filter) overlaps one of them gains the weight in the blend ("what did I do in May 2023?"). Not applied with `blend: false`. On LoCoMo it raised hybrid R@5 from 0.687 to 0.695 and temporal context QA from 0.813 to 0.822 (docs/benchmarks/memory.md, "Dates"). A question without a date is unaffected.
 
@@ -475,6 +476,10 @@ The hook is one function, `memory_engram::enqueue`, called from the write-script
 
 `forget` erase runs `::erase kleos_mem` as its own statement, after the transaction that cleans up and enqueues the Engram erase job. A crash between the two leaves the memory present and its overlay being erased. Repeating the `forget` completes it, since erase is idempotent. The opposite order could have left an erased memory whose Engram rows still answer.
 
+### Branches
+
+`fork`, `rewind`, `merge`, `diff`, `discard` and `branches` are memory ops too (`::memory fork {from, to}`, `Db::memory_fork`, Python `memory_fork`, `POST /memory/fork`, …). A branch is a copy-on-write view of its parent. Every op above works on a branch, with reads routed through the lineage and writes to inherited memories copied up. See [memory-branches.md](memory-branches.md).
+
 ### Entity resolution
 
 `remember` resolves the names in `entities` with E3's `resolve_entities` ([entity-resolution.md](entity-resolution.md)) over the memory schema's own entity relation, `kleos_mem_entity`, scoped to the namespace (`EntityConfig.scope = ("ns", ns)`). There is no NER: the names are the caller's.
@@ -579,7 +584,7 @@ A read-only principal may only use `recall` and `reflect`.
 - recall diversity, the statement and source caps, MMR and `diversity: false` (`recall_diversity_caps_and_mmr`); entity expansion with merges and the hub limit (`recall_entity_expansion`); the context block: groups, dates, `previously`, `said in`, the budget, `as_of`, determinism, and the JSON and CozoScript surfaces (`recall_context_current_previously_and_budget`); roles never decided, `assistant_weight`, the role filter, `from` / `to`, and erase (`remember_roles_and_time_filters`); the selection and window helpers are unit tests in `memory_recall.rs`;
 - claims: ids, provenance, `context`, `split: 'none'` and the CozoScript/JSON surfaces (`claims_split_store_and_recall_with_context`); a supersede that ends only the old claim, and the similarity floor (`claims_supersede_only_the_old_claim`); questions and requests never decided on either side (`claims_questions_are_not_decided`); `forget` / `set` of a statement id (`claims_forget_a_statement`); entities per claim and the per-claim gate (`claims_link_entities_per_claim`); two concurrent split statements (`concurrent_claim_remembers_never_leave_two_current`); `question_weight` (`claims_questions_rank_below_statements`); one Engram job per claim with consecutive qids (`claims_enqueue_one_job_each` in `tests/memory_engram.rs`). The splitter's hard cases are unit tests in `memory_claims.rs`.
 
-- list text and dates: a claim hit's `text` is its statement, `claim` the claim, `hit_text: 'claim'` and `text_chars` (`claims_split_store_and_recall_with_context`, `list_text_is_the_statement_by_default`); event rows written per claim, events on hits, the dates in the context block and on `said in`, `event_from` / `event_to` with the statement and valid-from fallbacks, the question-date boost, erase, and the v4 migration with backfill (`event_times_stored_shown_filtered_and_erased`); the parser's own unit tests (`memory_time::tests`: every rule with exact dates, 50+ negatives, overlaps, Unicode).
+- list text and dates: a claim hit's `text` is its statement, `claim` the claim, `hit_text: 'claim'` and `text_chars` (`claims_split_store_and_recall_with_context`, `list_text_is_the_statement_by_default`); event rows written per claim, events on hits, the dates in the context block (and none on `said in`), `event_from` / `event_to` with the statement and valid-from fallbacks, the question-date boost, erase, and the v4 migration with backfill (`event_times_stored_shown_filtered_and_erased`); the parser's own unit tests (`memory_time::tests`: every rule with exact dates, 50+ negatives, overlaps, Unicode).
 
 ### Real scenario
 

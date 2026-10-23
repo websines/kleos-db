@@ -450,10 +450,7 @@ For reference, on the same 301 LoCoMo questions: Mem0 top-10 0.748 (temporal 0.5
 **Quota.** The weekly plan went from 87.9% remaining to 86.9%, about 1 point, account-wide. The parser labels were 300 calls. Most list and `stmt` prompts were already in the recall-v5 cache.
 
 **Left.**
-- **The LongMemEval knowledge-update dip with dates** (−4 of 32). Things to try:
-  - leave notes off expressions that name a month and day, which only add a year;
-  - put the notes on their own line;
-  - test with a second reader.
+- ~~The LongMemEval knowledge-update dip with dates~~: fixed, see "Knowledge-update dip" below.
 - **Tense per clause**, for month-and-day dates without a year.
 - **Missing patterns:** "August last year", "on the 15th" after a month, decades, "the end of the summer".
 - **List readers get no resolved dates.** A dated list would need the notes in `text`, which `text` deliberately does not carry. Readers should use `format: 'context'` or `events`.
@@ -473,6 +470,47 @@ $PY $H/dates_eval.py sample --n 300 && $PY $H/dates_eval.py label && $PY $H/date
 ```
 
 Since `event_weight` defaults to 0.03, `default` in today's `CONFIGS` is the `qdate` column above, and `noqdate` is the old `default`.
+
+### Knowledge-update dip (wave3/ku-dip)
+
+Status: 2026-10-24, branch `wave3/ku-dip` (on main 0e4b586). **Fix: no date notes on `said in` lines.** A memory's own line keeps its notes.
+
+**What went wrong.** The KU flips (0.906 → 0.781 on 32 questions) had contexts that differed only by date notes; the reader took the older of two values that were both shown.
+- Example, `e66b632c` ("What was my previous personal best time for the charity 5K run?", gold 27:45): before, the reader answered 27:45 and noted the later 26:30. After, the 27:45 line carried `(≈ 2023-06-24 (Sat), "June 24th")` (a triathlon date) and three `said in` lines carried resolved dates ("yesterday", "last weekend"); the reader answered 26:30.
+- **Most of the reported 12.5-point dip was reader noise.** The reader at temperature 0 is not deterministic, so each context was re-asked with three extra seeds (`seed` changes the cache key; the judge is unchanged). Over four samples KU was 0.821 before and 0.771 after: a real but smaller dip, about 2 of 35 questions. Two of the four original flips (`0ddfec37`, `852ce960`) are wrong in 3 of 4 samples *before* dates too; the first run was a lucky one.
+- 105 of the 119 LongMemEval contexts had notes on `said in` lines (long user messages, many dates). LoCoMo turns are short; 30 of its 63 temporal contexts had them.
+
+**Candidates, tried by rewriting the stored `dates-v2` context blocks** (same recall, only the notes changed), mean accuracy over seeds (KU 35 questions × 4 seeds, LongMemEval temporal-reasoning 25 × 3, LoCoMo temporal 63 × 3):
+
+| context | LME knowledge-update | LME temporal-reasoning | LoCoMo temporal 63 |
+|---|---|---|---|
+| before (no dates) | 0.821 | 0.520 | 0.683 |
+| after (dates-v2) | 0.771 | 0.560 | 0.741 |
+| **no notes on `said in` lines (chosen)** | **0.821** | 0.533 | **0.741** |
+| notes only for relative words ("yesterday", "last week") | 0.829 | 0.547 | 0.735 |
+| no notes on month names without a relative word | 0.814 | 0.547 | 0.735 |
+| both of the last two plus no `said in` notes | 0.821 | 0.547 | 0.735 |
+
+All four recover KU; dropping `said in` notes is the only one that keeps LoCoMo temporal exactly, and the simplest. The temporal-reasoning differences are one question.
+
+**Confirmed with a real build** (tag `ku-dip`, shipped defaults, one fresh ingest; same reader and judge):
+
+| set | before (recall-v5) | dates (dates-v2, shipped) | **ku-dip** |
+|---|---|---|---|
+| LongMemEval 119, all | 0.681 | 0.655 | **0.672** |
+| LongMemEval 119, all, second sample (seed 1) | 0.661 | 0.647 | **0.681** |
+| LongMemEval knowledge-update (32) | 0.906 | 0.781 | **0.844** |
+| LongMemEval temporal-reasoning (25) | 0.520 | 0.560 | 0.520 |
+| LoCoMo 301, all | 0.807 | 0.814 | **0.821** |
+| LoCoMo 301, temporal (63) | 0.698 | 0.762 | **0.762** |
+| LoCoMo full temporal category (321) | 0.769 | 0.822 | 0.816 |
+
+- LongMemEval overall is back to the no-dates level (mean of two samples 0.676 against 0.671 before and 0.651 with dates). KU is 0.844 in the first sample, short of the lucky 0.906 but above the 0.821 four-sample mean of "before".
+- LoCoMo keeps the dates gain: 301 0.821 (full conversation 0.814), temporal 0.762. The full temporal category is 2 questions under dates-v2, within noise.
+- **Unchanged** (the fix only changes rendering): the 23 held-out KU questions (83% latest first, 91% with `hide_pending`) and the life stream (15 / 20, 19 / 20 with `hide_pending`, auto-supersede 12 right, 0 wrong), both re-run on this build.
+- **Not fixed:** month-and-day dates without a year still resolve to the nearest occurrence, so "got … on November 27th" said in September reads as the coming November (seen in `852ce960`). Dropping month-name notes did not change QA (table above), so this stays with "Tense per clause".
+- **Quota:** about 2,150 LLM calls, about 1.3 points of the weekly plan account-wide (other agents were running too).
+- Results: `.bench-data/dates/results/ku-dip/`; the seeded re-asks were a scratch script over the stored `ctx10` blocks.
 
 ## Head-to-head: Mem0 (open source)
 

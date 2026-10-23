@@ -823,17 +823,20 @@ async fn text_query(
 }
 
 /// Agent memory API (kleos fork; docs/specs/memory-api.md): `POST
-/// /memory/{init|remember|recall|forget|reflect|link|set|flush}` with the op's options
+/// /memory/{init|remember|recall|forget|reflect|link|set|flush}`, and the
+/// branch ops `fork|rewind|merge|diff|discard|branches`
+/// (docs/specs/memory-branches.md), with the op's options
 /// as a JSON object (`text` for remember, `query` for recall, `id`/`ids` for
-/// forget). Answers `{"ok": true, "result": ...}`. Only `recall` and
-/// `reflect` are allowed on a read-only (immutable) principal.
+/// forget). Answers `{"ok": true, "result": ...}`. Only `recall`,
+/// `reflect`, `diff` and `branches` are allowed on a read-only (immutable)
+/// principal.
 async fn memory_op(
     Extension(mutability): Extension<ScriptMutability>,
     State(st): State<DbState>,
     Path(op): Path<String>,
     Json(args): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if matches!(mutability, ScriptMutability::Immutable) && op != "recall" && op != "reflect" {
+    if matches!(mutability, ScriptMutability::Immutable) && !["recall", "reflect", "diff", "branches"].contains(&op.as_str()) {
         return (
             StatusCode::FORBIDDEN,
             json!({"ok": false, "message": format!("memory {op} needs write access")}).into(),

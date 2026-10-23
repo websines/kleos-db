@@ -107,8 +107,9 @@ pub enum SysOp {
     /// forget` (docs/specs/decide.md).
     Decider(DeciderOp),
     /// kleos fork: `::memory init | remember | recall | forget | reflect |
-    /// link | set | flush` (docs/specs/memory-api.md): the op and its
-    /// options as JSON.
+    /// link | set | flush` (docs/specs/memory-api.md) and the branch ops
+    /// `fork | rewind | merge | diff | discard | branches`
+    /// (docs/specs/memory-branches.md): the op and its options as JSON.
     MemApi(String, serde_json::Value),
     /// kleos fork: `::entity resolve | merge | split | history | pending |
     /// reject` (docs/specs/entity-resolution.md).
@@ -163,7 +164,9 @@ fn parse_mem_api_op(
                     ("recall", _) => "query",
                     ("forget" | "set", DataValue::List(_)) => "ids",
                     ("forget" | "set", _) => "id",
-                    ("reflect", _) => "ns",
+                    ("reflect" | "rewind" | "discard" | "branches", _) => "ns",
+                    ("fork", _) => "to",
+                    ("merge", _) => "from",
                     (v, _) => bail!("`::memory {v}` takes no positional argument; pass options as {{key: value}}"),
                 };
                 args.insert(key.to_string(), serde_json::Value::from(val));

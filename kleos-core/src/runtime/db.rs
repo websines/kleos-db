@@ -3564,7 +3564,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             // kleos fork: the memory API runs its own scripts
             // (docs/specs/memory-api.md)
             SysOp::MemApi(op, args) => {
-                if read_only && op != "recall" && op != "reflect" {
+                if read_only && !["recall", "reflect", "diff", "branches"].contains(&op.as_str()) {
                     bail!("`::memory {op}` cannot run in read-only mode");
                 }
                 let mut args = args.clone();

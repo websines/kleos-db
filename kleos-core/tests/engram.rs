@@ -311,3 +311,38 @@ fn cozoscript_surface() {
     // read-only mode refuses writes
     assert!(db.run_script("::engram erase {ns: 'u1'}", Default::default(), ScriptMutability::Immutable).is_err());
 }
+
+/// Memory branches (docs/specs/memory-branches.md, "Engram"): a branch
+/// serves its parent's overlay as of the fork, its own writes mask the
+/// inherited rows they change, and copy-up keeps the inherited history.
+#[test]
+fn branches_read_through_and_copy_up() {
+    let (db, fp) = db();
+    db.memory_init(kleos::memory::InitOpts::default()).unwrap();
+    two_facts(&db, &fp, 1_000);
+    db.memory_fork(kleos::memory::ForkOpts { from: Some("u1".into()), to: "br".into(), at: Some(2_000) })
+        .unwrap();
+    // the parent changes after the fork: not in the branch
+    write(&db, &fp, "u1", 3_000, vec![fact("c", "rye", &[(5, 30)])], vec![row(5, 30, 9.0, &["c"])], &[]);
+    let base = mat(&db, &["u1"], Some(2_000));
+    assert_eq!(base.len(), 4);
+    assert_eq!(mat(&db, &["br"], None), base);
+    // the branch supersedes a: a2 rewrites (1,10); (5,20) reverts; (1,11)
+    // (shared with b) is retracted for replay
+    let out = write(&db, &fp, "br", 4_000, vec![fact("a2", "milk", &[(1, 10)])], vec![row(1, 10, 7.0, &["a2"])], &["a"]);
+    assert!(out.contains(&vec!["fact".into(), "a".into(), "retracted".into()]), "{out:?}");
+    assert!(out.contains(&vec!["row".into(), "1:11".into(), "needs_replay".into()]), "{out:?}");
+    let now = mat(&db, &["br"], None);
+    assert_eq!(now.get(&(1, 10)), Some(&bf(7.0)));
+    assert!(!now.contains_key(&(1, 11)) && !now.contains_key(&(5, 20)), "{now:?}");
+    assert_eq!(now.get(&(5, 21)), Some(&bf(4.0)));
+    assert!(!now.contains_key(&(5, 30)));
+    // the parent is untouched
+    let parent = mat(&db, &["u1"], None);
+    assert_eq!(parent.get(&(5, 20)), Some(&bf(3.0)));
+    assert_eq!(parent.get(&(5, 30)), Some(&bf(9.0)));
+    // before its write the branch reads the inherited history (copy-up)
+    assert_eq!(mat(&db, &["br"], Some(3_500)), base);
+    let ids: Vec<String> = db.engram_facts("m", "br", None).unwrap().into_iter().map(|x| x.0).collect();
+    assert_eq!(ids, vec!["a2".to_string(), "b".to_string()]);
+}
