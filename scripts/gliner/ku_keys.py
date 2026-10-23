@@ -213,7 +213,7 @@ def run(model, variant, split, device="cpu"):
     summ = {"model": model, "variant": variant, "split": split, "pairs": n, "questions": len({p['qid'] for p in pairs}),
             "key_hit": hit / n, "same_key_any_value": same_key / n, "no_fact_on_a_side": no_fact / n,
             "unrelated_pairs": tot, "false_key_matches": fk, "false_key_rate": fk / tot if tot else 0,
-            "false_key_per_question": fk / max(1, len(pool)),
+            "false_key_per_question": fk / max(1, sum(1 for q in pool if not q.endswith("_abs"))),
             "claims": len(texts), "ms_per_claim": 1000 * dt / len(texts)}
     (C.GDIR / f"keys_{model}_{variant}_{split}.json").write_text(json.dumps({"summary": summ, "rows": rows, "false_examples": examples}, indent=1))
     print(json.dumps(summ))

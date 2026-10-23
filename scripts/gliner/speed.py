@@ -6,13 +6,13 @@
 """Speed and memory of one checkpoint on one device (run one process per
 model x device so RSS is clean): ms per claim for the entity schema, the
 combined schema (entities + type) and the fact-key JSON schema, batch 1 and
-batch 8, on the first N sample claims; RSS after load and peak.
+batch 8, on the first N sample claims (fastest of 3 repetitions: the
+machine is shared); RSS after load and peak.
 
     python speed.py small|base|multi|decide cpu|mps [N]
 """
 import json
 import resource
-import statistics
 import sys
 import time
 
@@ -21,6 +21,9 @@ import psutil
 import common as C
 from eval_entities import ENT_DESC, TYPE_DESC
 import ku_keys as K
+
+
+REPS = 3
 
 
 def rss():
@@ -55,22 +58,13 @@ def main(name, device, n=120):
         fn(8)  # warm-up
         sync()
         for b in (1, 8):
-            t = time.perf_counter()
-            fn(b)
-            sync()
-            out[f"{jn}_b{b}_ms_per_claim"] = 1000 * (time.perf_counter() - t) / n
-    if device == "cpu":
-        # single-claim latency distribution, entities+type (what remember would pay per turn claim)
-        f = jobs.get("entities+type") or jobs["classify"]
-        lat = []
-        for x in texts[:40]:
-            t = time.perf_counter()
-            if name == "decide":
-                m.classify_text(x, tasks)
-            else:
-                m.extract(x, comb)
-            lat.append(1000 * (time.perf_counter() - t))
-        out["single_p50_ms"] = statistics.median(lat)
+            best = float("inf")
+            for _ in range(REPS):  # the machine is shared: keep the fastest repetition
+                t = time.perf_counter()
+                fn(b)
+                sync()
+                best = min(best, time.perf_counter() - t)
+            out[f"{jn}_b{b}_ms_per_claim"] = 1000 * best / n
     out["rss_end_MB"] = rss()
     out["ru_maxrss_MB"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20
     if device == "mps":
