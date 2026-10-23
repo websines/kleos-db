@@ -69,3 +69,7 @@ pyo3 = { version = "0.21.2", features = ["extension-module", "abi3", "abi3-py37"
 miette = "5.10.0"
 serde_json = "1.0.116"
 rayon = "1.10.0"
+
+# Same patch as the workspace root (built outside the workspace).
+[patch.crates-io]
+candle-metal-kernels = { path = "../third_party/candle-metal-kernels" }

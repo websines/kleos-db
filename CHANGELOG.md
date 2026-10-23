@@ -10,6 +10,10 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Metal works from the Python bindings.** Inside a host linked against an old macOS SDK, Metal compiled candle's kernels as pre-3.1 MSL, so every Metal model call failed with `unknown type name 'float16_t'`. Python interpreters such as miniconda's 3.12 (SDK 11.1) are one example. Benchmarks had fallen back to CPU, which is 30–40× slower.
+  - candle-metal-kernels is now vendored with the MSL version pinned (3.2 on macOS 15+, 3.1 on macOS 14).
+  - In that interpreter, decider-nano on Metal now takes 29 ms per decision, and its p differs from CPU by 3.7e-5.
+  - Rust Metal parity is unchanged: 0/10 flips at f32, q8 and bf16.
 - **Memory API: entity resolution in `remember` (E3) and memory scoring (E4, C6).** See docs/specs/memory-api.md.
   - `remember {entities}` now resolves names with `resolve_entities` over `kleos_mem_entity`, scoped to the namespace (new `EntityConfig.scope`). Auto links the existing entity (a new name form gets its own row, merged into it), Tentative makes a new entity with a review link, None a new entity. Merges stay non-transitive and splittable. Resolution is read while planning and written in the `remember` transaction, under the namespace version. The result gains `entity_links`.
   - **Same-subject gate:** when both statements have entities, `supersedes` acts only if they share one (sharing only a possible match caps it at pending). Otherwise the question is not asked, and the candidate is listed in `gated`. On the life stream, false pending supersedes went from 6 to 2, with auto-supersedes unchanged (12 right, 0 wrong).

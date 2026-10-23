@@ -28,6 +28,7 @@ exclude = [
     "kleos-lib-swift",
     "kleos-lib-python",
     "kleos-lib-nodejs",
+    "third_party/candle-metal-kernels",
 ]
 
 [profile.bench]
@@ -36,3 +37,9 @@ debug = true
 
 [profile.dev.package."kleos-rocks"]
 opt-level = 3
+
+# kleos patch of candle's Metal kernels: pins the Metal Shading Language
+# version so the kernels compile inside hosts linked against an old SDK (e.g.
+# Python interpreters). See third_party/candle-metal-kernels/KLEOS_PATCH.md.
+[patch.crates-io]
+candle-metal-kernels = { path = "third_party/candle-metal-kernels" }
