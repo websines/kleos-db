@@ -156,8 +156,11 @@ const EXPAND_MAX_NEW: usize = 30;
 /// the statement around the claim as their `text` (`recall {hit_text,
 /// text_chars}`); 98% of LongMemEval's and all of LoCoMo's statements fit.
 const DEFAULT_TEXT_CHARS: usize = 1000;
-/// Default weight of the question-date boost (`recall {event_weight}`): off.
-const DEFAULT_EVENT_WEIGHT: f64 = 0.0;
+/// Default weight of the question-date boost (`recall {event_weight}`), the
+/// size of the recency weight: on LoCoMo it raised hybrid R@5 0.687 -> 0.695
+/// and temporal context QA 0.813 -> 0.822 (docs/benchmarks/memory.md,
+/// "Dates").
+const DEFAULT_EVENT_WEIGHT: f64 = 0.03;
 /// Default token budget of `recall {format: 'context'}`.
 const DEFAULT_CONTEXT_BUDGET: usize = 2000;
 /// Roles `remember` accepts.
@@ -683,9 +686,10 @@ pub struct RecallOpts {
     pub event_from: Option<i64>,
     /// See `event_from`.
     pub event_to: Option<i64>,
-    /// Added to the score of a memory whose event time (else valid-from)
-    /// overlaps a date in the query, resolved against `as_of` or now
-    /// (default 0: off).
+    /// Added to the blended score of a memory whose event time (else
+    /// valid-from) overlaps a date in the query, resolved against
+    /// `query_at` (default 0.03; 0 turns it off; not applied with `blend:
+    /// false`).
     pub event_weight: Option<f64>,
     /// The time the query's dates are resolved against (µs); default
     /// `as_of`, else now.
@@ -2731,7 +2735,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             fetch *= 4;
         }
         // dates in the query, for the event boost
-        let qdates: Vec<(i64, i64)> = if wev > 0.0 {
+        let qdates: Vec<(i64, i64)> = if blend && wev > 0.0 {
             memory_time::parse_times(query, opts.query_at.or(opts.as_of).unwrap_or(read_at))
                 .into_iter()
                 .map(|e| (e.start, e.end))

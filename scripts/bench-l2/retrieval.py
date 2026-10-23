@@ -63,15 +63,19 @@ def open_db(variant, device):
 # (the top k by score); the others are measured against it.
 CONFIGS = {
     # main's recall before diversity, shown as before: the top k by score, each
-    # claim's own text (builds before wave3/dates take {"diversity": False})
-    "base": {"diversity": False, "hit_text": "claim"},
-    # recall's defaults: diversity, and a claim hit's text is its statement
+    # claim's own text, no question-date boost (builds before wave3/dates take
+    # {"diversity": False})
+    "base": {"diversity": False, "hit_text": "claim", "event_weight": 0.0},
+    # recall's defaults: diversity, a claim hit's text is its statement, and the
+    # question-date boost (0.03 since wave3/dates; the question's dates are
+    # resolved at the question date, LongMemEval, or the last session date, LoCoMo)
     "default": {},
+    # the defaults without the question-date boost
+    "noqdate": {"event_weight": 0.0},
     # the defaults with claim texts (the list output before wave3/dates)
     "claimtext": {"hit_text": "claim"},
-    # question-date boost: dates in the question (resolved at the question
-    # date, LongMemEval; the last session date, LoCoMo) raise memories whose
-    # event time overlaps them
+    # question-date boost: dates in the question raise memories whose event
+    # time overlaps them (the default since wave3/dates)
     "qdate": {"event_weight": 0.03},
     "qdate10": {"event_weight": 0.1},
     "stmt1": {"max_per_statement": 1, "max_per_source": 0, "mmr_weight": 0.0},
@@ -192,7 +196,7 @@ def run_lme(args, outdir):
         per = {}
         for cname, copts in configs.items():
             ro = {**ro0, **copts}
-            if "event_weight" in ro and "as_of" not in ro:
+            if "as_of" not in ro:  # dates in the question are relative to when it was asked
                 ro["query_at"] = C.lme_ts(x["question_date"])
             hits10, ms10 = recall(db, ns, x["question"], owner, 10, **ro)
             hits5, ms5 = recall(db, ns, x["question"], owner, 5, **ro)
@@ -259,8 +263,7 @@ def run_locomo(args, outdir):
         last_at = max(u["at"] for u in units)
         for qi, q in enumerate(conv["qa"]):
             for cname, copts in configs.items():
-                if "event_weight" in copts:
-                    copts = {**copts, "query_at": last_at}
+                copts = {**copts, "query_at": last_at}  # the question is asked after the last session
                 h10, ms10 = recall(db, ns, q["question"], owner, 10, **copts)
                 h5, ms5 = recall(db, ns, q["question"], owner, 5, **copts)
                 hp = {}

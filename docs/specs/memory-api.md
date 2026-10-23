@@ -270,7 +270,7 @@ Options:
 - `from`, `to` (µs): only memories whose validity starts in `[from, to)` (see "Valid-from filters");
 - `format`: `list` (the default) or `context`, with `budget` (tokens, default 2000) and `show_source` (default false): see "Context output";
 - `hit_text` (`statement`, the default, or `claim`) and `text_chars` (default 1000): what a list hit's `text` is (see "List text");
-- `event_from`, `event_to` (µs): only memories whose event time overlaps `[event_from, event_to)`; `event_weight` (default 0) and `query_at`: the question-date boost (see "Dates").
+- `event_from`, `event_to` (µs): only memories whose event time overlaps `[event_from, event_to)`; `event_weight` (default 0.03) and `query_at`: the question-date boost (see "Dates").
 
 It is one script:
 - The vector leg is HNSW over `kleos_mem_vec`, filtered to the namespace (and `current` unless `as_of` is set). Its score is −distance.
@@ -350,7 +350,7 @@ Weeks run Monday to Sunday and seasons are northern meteorological ones. The par
 - **List hits** carry `events: [{start, end, granularity, kind, expr}]`, the memory's own.
 - **The context block** shows them inline (and its header then explains the `(≈ date, "words")` notation): `- [2023-05-08 (Mon)] Caroline: I went to a LGBTQ support group yesterday. (≈ 2023-05-07 (Sun), "yesterday")`. A claim's statement's other dates are added to its `said in` line when the expression is in the shown window. An expression that names a year ("May 7, 2023") is not repeated.
 - **`recall {event_from, event_to}`** keeps memories whose event time overlaps `[event_from, event_to)`. A memory without events of its own counts by its statement's (the other claims of the same message), else by its valid-from. Post-filters on a 4× deeper fetch, like `from` / `to`.
-- **Question dates** (`event_weight`, default 0): with a weight, the dates in the query are resolved against `query_at` (default `as_of`, else now), and a memory whose event time (as for the filter) overlaps one of them gains the weight. It is off by default: on the benchmarks below it changed nothing measurable (docs/benchmarks/memory.md).
+- **Question dates** (`event_weight`, default 0.03, the size of the recency weight; 0 turns it off): the dates in the query are resolved against `query_at` (default `as_of`, else now), and a memory whose event time (as for the filter) overlaps one of them gains the weight in the blend ("what did I do in May 2023?"). Not applied with `blend: false`. On LoCoMo it raised hybrid R@5 from 0.687 to 0.695 and temporal context QA from 0.813 to 0.822 (docs/benchmarks/memory.md, "Dates"). A question without a date is unaffected.
 
 #### Context output
 

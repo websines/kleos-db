@@ -1707,7 +1707,7 @@ fn event_times_stored_shown_filtered_and_erased() {
     // the said-on day of the support group is not its event time
     assert!(ids(RecallOpts { event_from: Some(d(7)), event_to: Some(d(8)), ..ropts("u", 10) }).is_empty());
 
-    // the question-date boost: off by default; with a weight, memories whose
+    // the question-date boost (default 0.03; 0 is off): memories whose
     // event time overlaps a date in the query (resolved at query_at) gain it
     let q = "what did I do yesterday";
     let score = |w: Option<f64>, id: &str| -> f64 {
@@ -1718,8 +1718,9 @@ fn event_times_stored_shown_filtered_and_erased() {
             .unwrap()
             .score
     };
-    assert!((score(Some(0.5), &c1) - score(None, &c1) - 0.5).abs() < 1e-6);
-    assert!((score(Some(0.5), &cat) - score(None, &cat)).abs() < 1e-6);
+    assert!((score(Some(0.5), &c1) - score(Some(0.0), &c1) - 0.5).abs() < 1e-6);
+    assert!((score(None, &c1) - score(Some(0.0), &c1) - 0.03).abs() < 1e-6);
+    assert!((score(Some(0.5), &cat) - score(Some(0.0), &cat)).abs() < 1e-6);
     assert!(db.recall(q, RecallOpts { event_weight: Some(-1.0), ..ropts("u", 2) }).is_err());
 
     // CozoScript and JSON surfaces return the events
