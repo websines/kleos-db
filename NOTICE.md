@@ -180,3 +180,19 @@ an open legal question. The maintainers decided (2026-10-23) to publish
 `nano-tune-v1` under MIT, with the training sources and their licences listed
 on the model card. A weights build without the CC BY-SA sources is possible by
 dropping them in `build_data.py`.
+
+### Memory benchmark datasets (evaluation only; downloaded at run time, never committed)
+
+The L2 benchmark harness (`scripts/bench-l2/`, results in
+`docs/benchmarks/memory.md`) reads these datasets from `.bench-data/bench-l2/`
+and the Hugging Face cache. Neither is redistributed, and kleos ships no
+weights or data derived from them.
+
+| Dataset | Revision | Licence | Use |
+|---|---|---|---|
+| [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned) cleaned (Wu et al., 2024, "LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory") | HF `98d7416c24c778c2fee6e6f3006e7a073259d48f` (`longmemeval_s_cleaned.json`, `longmemeval_oracle.json`) | MIT | retrieval and QA evaluation |
+| [LoCoMo](https://github.com/snap-research/locomo) (Maharana et al., 2024, "Evaluating Very Long-Term Conversational Memory of LLM Agents") | GitHub `3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376` (`data/locomo10.json`) | **CC BY-NC 4.0** (non-commercial) | retrieval and QA evaluation only; never used for training |
+
+The QA judge prompts in `scripts/bench-l2/qa.py` follow LongMemEval's
+`evaluate_qa.py` (MIT) and the LoCoMo evaluation prompts published with Mem0's
+evaluation code (Apache-2.0).

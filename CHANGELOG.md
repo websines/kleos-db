@@ -10,6 +10,7 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Memory benchmark harness (UPGRADE_PLAN L2):** `scripts/bench-l2/` runs LongMemEval_S and LoCoMo through the public `remember` / `recall` API (Python bindings) and reports LLM-free retrieval (recall@5/10, NDCG@10 per question type, a knowledge-update supersession view), ingestion and recall latency, and secondary QA accuracy with a pluggable reader/judge. Resumable, seeded, pinned dataset revisions; `scripts/bench-l2/run.sh` re-runs everything against the current build. First numbers in [`docs/benchmarks/memory.md`](docs/benchmarks/memory.md).
 - **Memory API: concurrent `remember`s on one topic no longer leave two current facts.**
   - A per-namespace version row (`kleos_mem_ns`) is asserted and bumped inside each write transaction, so the storage engine orders writers across threads and processes. A writer that lost the race plans again and supersedes the winner.
   - The schema version is now 2, and v1 stores get the table on first use.
