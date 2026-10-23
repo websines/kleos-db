@@ -318,7 +318,7 @@ It is skipped when recall already filters by `entity`. It only does something wh
 
 #### List text
 
-With claims and the default statement cap, each hit is one sentence of a message. A reader that shows only each hit's `text` then loses the rest of the message: who is speaking (LoCoMo's "Caroline:" is on the first claim only), what "it" refers to, and the date words in the next sentence. On the 301 LoCoMo questions that reader scored 0.671 against 0.708 for the old top-k list (docs/benchmarks/memory.md, "Dates and list text").
+With claims and the default statement cap, each hit is one sentence of a message. A reader that shows only each hit's `text` then loses the rest of the message: who is speaking (LoCoMo's "Caroline:" is on the first claim only), what "it" refers to, and the date words in the next sentence. On the 301 LoCoMo questions that reader scored 0.671 against 0.708 for the old top-k list. With the statement as `text` it scores 0.751, and 0.672 against 0.647 on 119 LongMemEval questions (docs/benchmarks/memory.md, "Dates and list text").
 
 So by default (`hit_text: 'statement'`) a claim hit's `text` is its statement: the whole statement when it has at most `text_chars` characters (default 1000; 98% of LongMemEval's and all of LoCoMo's statements), else a window of that many characters around the claim, cut at word boundaries with "…". The claim itself is in `claim`, and the whole statement stays in `context`. A memory that is not a claim (one sentence, `split: 'none'`) is unchanged and has no `claim`.
 
@@ -342,7 +342,7 @@ A memory's valid-from is when it was said. What it talks about often happened at
 - relative weeks, months, years and seasons ("last week", "earlier this month", "last summer", "in March");
 - spans ("since 2019", "until June", "for the past three weeks") and ranges ("from May 3 to May 7", "between 2019 and 2021").
 
-Weeks run Monday to Sunday and seasons are northern meteorological ones. The parser is conservative: a missed date is better than a wrong one. "may" the modal, "march" the verb, "second" as an ordinal, names like "June", vague times ("recently", "a few days ago", "the other day") and habits ("every Monday") are not dates. The rules for ambiguous cases are in the module's documentation.
+Weeks run Monday to Sunday and seasons are northern meteorological ones. On 50 hand-labelled date-bearing claims from LoCoMo and LongMemEval, expression precision is 1.00 and recall 0.96, and interval precision 0.96 and recall 0.92 (docs/benchmarks/memory.md, "Dates"). The parser is conservative: a missed date is better than a wrong one. "may" the modal, "march" the verb, "second" as an ordinal, names like "June", vague times ("recently", "a few days ago", "the other day") and habits ("every Monday") are not dates. The rules for ambiguous cases are in the module's documentation.
 
 **Storage.** `remember` parses each claim it adds, against the statement's `at`, and writes one `kleos_mem_event` row per expression in its single transaction. A duplicate adds no rows (the existing memory has its own). Retraction leaves them (history); `forget {mode: 'erase'}` removes them.
 
@@ -376,7 +376,10 @@ Recalled memories, grouped by topic, oldest first. [date] is when a statement wa
 - **Budget.** Tokens are estimated as characters / 4. Items are added in rank order with their `previously` lines while they fit (a group heading counts too); then the `said in` lines, in rank order, while the budget lasts. Memories that did not fit are listed in `omitted`.
 - **Deterministic.** The same store and options give the same text byte for byte.
 
-**Measured** (docs/benchmarks/memory.md, "After"): on 301 LoCoMo questions with the same reader and judge, the context block scored 0.807, against 0.708 for a dated list of hit texts and 0.814 for the whole conversation; on 119 LongMemEval questions it scored 0.681 against 0.647. With the default statement cap, a reader that sees only each hit's `text` (one sentence of a message) does worse than before (0.671 on LoCoMo). Show `context` (the statement) or use this format.
+**Measured** (docs/benchmarks/memory.md, "After" and "Dates and list text"):
+- **LoCoMo, 301 questions, same reader and judge:** the context block scored 0.807 without dates and 0.814 with dates and question dates. The whole conversation scores 0.814. On the full temporal category (321 questions) it went from 0.769 to 0.822.
+- **LongMemEval, 119 questions:** 0.681 without dates and 0.655 with them. All of the drop is four knowledge-update questions where the reader picked the older value; temporal-reasoning rose by one question.
+- **The list output:** with the statement as `text` (the default since wave3/dates), it scores 0.751 on LoCoMo and 0.672 on LongMemEval, against 0.711 and 0.647 for main's top-k claim list.
 
 `::memory recall '…' {format: 'context', budget: 800}` returns one row with the columns `text, tokens, budget, ids, omitted`; HTTP `POST /memory/recall {"query": …, "format": "context"}` returns the object.
 
@@ -575,6 +578,8 @@ A read-only principal may only use `recall` and `reflect`.
 - TTL and the archive tier: exclusion, `as_of` before expiry, no duplicate into an expired memory, archiving expired memories, archive and restore by id, TTL set and removed later (`ttl_expiry_and_archive_tier`);
 - recall diversity, the statement and source caps, MMR and `diversity: false` (`recall_diversity_caps_and_mmr`); entity expansion with merges and the hub limit (`recall_entity_expansion`); the context block: groups, dates, `previously`, `said in`, the budget, `as_of`, determinism, and the JSON and CozoScript surfaces (`recall_context_current_previously_and_budget`); roles never decided, `assistant_weight`, the role filter, `from` / `to`, and erase (`remember_roles_and_time_filters`); the selection and window helpers are unit tests in `memory_recall.rs`;
 - claims: ids, provenance, `context`, `split: 'none'` and the CozoScript/JSON surfaces (`claims_split_store_and_recall_with_context`); a supersede that ends only the old claim, and the similarity floor (`claims_supersede_only_the_old_claim`); questions and requests never decided on either side (`claims_questions_are_not_decided`); `forget` / `set` of a statement id (`claims_forget_a_statement`); entities per claim and the per-claim gate (`claims_link_entities_per_claim`); two concurrent split statements (`concurrent_claim_remembers_never_leave_two_current`); `question_weight` (`claims_questions_rank_below_statements`); one Engram job per claim with consecutive qids (`claims_enqueue_one_job_each` in `tests/memory_engram.rs`). The splitter's hard cases are unit tests in `memory_claims.rs`.
+
+- list text and dates: a claim hit's `text` is its statement, `claim` the claim, `hit_text: 'claim'` and `text_chars` (`claims_split_store_and_recall_with_context`, `list_text_is_the_statement_by_default`); event rows written per claim, events on hits, the dates in the context block and on `said in`, `event_from` / `event_to` with the statement and valid-from fallbacks, the question-date boost, erase, and the v4 migration with backfill (`event_times_stored_shown_filtered_and_erased`); the parser's own unit tests (`memory_time::tests`: every rule with exact dates, 50+ negatives, overlaps, Unicode).
 
 ### Real scenario
 

@@ -312,10 +312,167 @@ The reader and judge are GLM-4.7-Flash with thinking off, with Mem0's LoCoMo pro
 ### Weaknesses after this work
 
 1. **LoCoMo multi-hop Rall@10 is 0.26.** The second hop rarely shares words or meaning with the question. Diversity helps a little, and entity expansion with crude entities did not.
-2. **Claim-text lists hide the statement cap's gain.** Callers that show only `text` should switch to `context` or `format: 'context'` (see QA).
+2. **Claim-text lists hide the statement cap's gain.** Callers that show only `text` should switch to `context` or `format: 'context'` (see QA). Fixed in wave3/dates: `text` is now the statement (see "Dates and list text").
 3. **Storing assistant turns** costs user-evidence turns in the top 10 (T@10 0.914 → 0.850). A higher `assistant_weight`, or `role: 'user'` for questions about the user, is untested.
 4. **Not re-run after the claims fix:** assistant turns, entity expansion, and the context QA with relevance-ordered groups (above, marked 92ef789).
 
+
+## Dates and list text (wave3/dates)
+
+Status: 2026-10-23, branch `wave3/dates` (on main 2a8b59c). Two changes, described in [memory-api.md](../specs/memory-api.md) under "List text" and "Dates":
+- **List text.** A claim hit's `text` is now its statement (up to 1000 characters around the claim). The claim itself is in `claim`.
+- **Dates.** A rule-based parser resolves the temporal expressions of every claim at write time, against when it was said, into `kleos_mem_event`. List hits carry these `events`. The context block shows them inline, e.g. `(≈ 2023-05-07 (Sun), "yesterday")`. `recall {event_from, event_to}` filters on them, and dates in the question get a small boost (`event_weight`, default 0.03).
+
+**How it was measured.**
+- One build (tag `dates-v2`, Metal) and one ingest per question or conversation, with several recall configs on the same store, as in "After".
+- **Configs:**
+  - `base` is main's recall exactly: `diversity: false`, claim text, no date boost.
+  - `default` is diversity with statement text, and no date boost.
+  - `qdate` adds `event_weight: 0.03` and is **the shipped default**. The question's dates are resolved at the question date on LongMemEval and at the last session date on LoCoMo.
+- **"Before"** is main 2a8b59c (`recall-v5`, the "After" section above). Its LLM answers were reused from the cache, keyed by prompt hash.
+- **Same set-up as before:** the same reader and judge (GLM-4.7-Flash, thinking off), the same 301 LoCoMo and 119 LongMemEval questions, and context budgets of 1500 and 3000 tokens.
+- **Parser versions.** The final parser is the one `dates-v2` ran. A sentence-level tense rule was tried after it (`dates-v3`) and reverted (below).
+- **Results:** `.bench-data/dates/results/dates-v2/`. The parser evaluation is in `.bench-data/dates/dates-eval/`.
+
+### List text
+
+**LoCoMo, 301 questions:**
+
+| output | all | 1 multi-hop (55) | 2 temporal (63) | 3 open-domain (19) | 4 single-hop (164) |
+|---|---|---|---|---|---|
+| list `base` (main's recall, claim text) | 0.711 | 0.745 | 0.492 | 0.632 | 0.793 |
+| list `default` before: claim text (recall-v5) | 0.671 | 0.745 | 0.460 | 0.632 | 0.732 |
+| **list `default` now: statement text** | **0.751** | 0.836 | 0.413 | 0.684 | 0.860 |
+| `stmt` (each claim replaced by its whole statement) | 0.751 | 0.836 | 0.413 | 0.684 | 0.860 |
+| `context` (with dates) | 0.811 | 0.836 | 0.746 | 0.684 | 0.841 |
+
+**LongMemEval_S, 119 questions:**
+
+| output | all | single-session (30) | multi-session (24) | temporal (25) | knowledge-update (32) | abstention (8) |
+|---|---|---|---|---|---|---|
+| list `base` | 0.647 | 0.567 | 0.583 | 0.480 | 0.875 | 0.750 |
+| list `default` before: claim text (recall-v5) | 0.588 | 0.467 | 0.417 | 0.600 | 0.812 | 0.625 |
+| **list `default` now: statement text** | **0.672** | 0.633 | 0.542 | 0.600 | 0.781 | 1.000 |
+| `stmt` | 0.664 | 0.633 | 0.542 | 0.520 | 0.812 | 1.000 |
+| `context` (with dates) | 0.655 | 0.633 | 0.583 | 0.560 | 0.781 | 0.750 |
+
+**What the list QA says.**
+- **The trap is gone.** The default list now scores above `base`:
+  - LoCoMo 0.751 against 0.711 (+12 questions);
+  - LongMemEval 0.672 against 0.647 (+3).
+- **It is at least `stmt`.** On LoCoMo it equals `stmt` exactly (all LoCoMo statements fit in 1000 characters). On LongMemEval it is one question above.
+- **The harness's `kleos:` condition now shows what the API returns** (`text`). The `base` config asks for `hit_text: 'claim'` so that it stays main's list.
+- **One weak spot: LoCoMo temporal questions in the list format** (0.413 against 0.492 for `base`).
+  - On the full temporal category (321 questions, below), the same list scores 0.523 against 0.502 for `base`, so the 63-question split is noisy.
+  - A list of whole statements gives the reader no resolved dates. The context block does: 0.746 on the same 63.
+
+### Dates
+
+**Parser accuracy.**
+- **Sample:** 300 claims, 150 from LoCoMo turns and 150 from LongMemEval user messages.
+  - The claims are what `remember` stores.
+  - They were picked with a broad temporal word list that is independent of the parser, so the sample also holds claims the parser misses.
+  - Each claim is anchored at its session date.
+- **Silver labels:** GLM-4.7-Flash given the same conventions (Monday-to-Sunday weeks, meteorological seasons, end-exclusive intervals). A label with an end-inclusive interval also counts as a match.
+- **Hand check:** 50 random claims (26 date expressions), labelled by hand.
+- **Matching:** an expression matches when one text contains the other. An interval is correct when its start and end match.
+
+| labels | claims | expressions | expression precision | expression recall | interval precision | interval recall |
+|---|---|---|---|---|---|---|
+| hand, parser as first written | 50 | 26 | 0.96 | 0.96 | 0.88 | 0.88 |
+| hand, final parser | 50 | 26 | **1.00** | **0.96** | **0.96** | **0.92** |
+| silver (GLM) | 300 | 225 | 0.94 | 0.67 | 0.68 | 0.48 |
+
+- **The hand labels are the reliable ones.**
+  - The silver labels agree with the hand labels on only 25 of the 50 claims.
+  - Of the 74 silver expressions the parser "missed", 22 are unanchored ("since we last talked", "last time") and about 25 are vague durations or other non-dates ("for years", "lately", "British Museum").
+  - Most of the 44 silver interval disagreements are GLM ignoring its own conventions: "last week" as the current week (11 cases), "last weekend" as a whole week.
+- **Real misses:**
+  - a day of the month alone ("on the 15th", after "last month");
+  - "August last year";
+  - "circa 1930" and decades ("the 1920s");
+  - "the end of the summer";
+  - durations with a filler ("for about 3 years now").
+- **The hand check found three bugs, fixed in the final parser.** Because the fixes were found on these 50 claims, the first row is the unbiased estimate.
+  - "this Saturday" said on a Sunday about a plan (now the coming one, unless the sentence is in the past tense);
+  - "Mental Health Monday" (a capitalised name before a bare weekday is not a date; this also drops "Ash Wednesday" and "Maundy Thursday" in LongMemEval);
+  - a month and day without a year in a past-tense sentence ("attended … on July 17th", said in February). This one stays open, see below.
+- **Reverted: a sentence-level tense rule** for month-and-day dates (the latest one before the anchor in a past-tense sentence).
+  - It fixed July 17th, but misdated "I'm training for a sprint triathlon on June 24th and I've recently completed a charity 5K", said in April, to the June before.
+  - It moved 30 LongMemEval dates a year back, many of them because LongMemEval's session dates precede the events their messages report.
+  - Tense needs the clause, not the sentence.
+- **Speed:** all 5,882 LoCoMo turns parse in about 0.03 s, about 5 µs a turn.
+  - `remember` p50 per LoCoMo conversation was 28–61 ms (Metal), against 18–47 ms in the recall-v5 run.
+  - That is one run each on a shared machine. The parse itself is too small to explain the difference, and the extra event rows were not timed separately.
+
+**QA before and after, context output** (before: recall-v5 context, no dates; after: the same recall with dates):
+
+| set | n | context before | **context after** | context after + question dates (shipped default) | list before (claim text) | list after (statement text) | list `base` |
+|---|---|---|---|---|---|---|---|
+| LoCoMo 301, all | 301 | 0.807 | 0.811 | **0.814** | 0.671 | 0.751 | 0.711 |
+| LoCoMo 301, temporal | 63 | 0.698 | 0.746 | **0.762** | 0.460 | 0.413 | 0.492 |
+| **LoCoMo temporal, full category** | 321 | 0.769 | 0.813 | **0.822** | 0.474 | 0.523 | 0.502 |
+| LongMemEval 119, all | 119 | **0.681** | 0.655 | 0.655 | 0.588 | 0.672 | 0.647 |
+| LongMemEval 119, temporal-reasoning | 25 | 0.520 | 0.560 | 0.560 | 0.600 | 0.600 | 0.480 |
+| LongMemEval 119, knowledge-update | 32 | **0.906** | 0.781 | 0.781 | 0.812 | 0.781 | 0.875 |
+
+For reference, on the same 301 LoCoMo questions: Mem0 top-10 0.748 (temporal 0.524), top-20 0.784 (temporal 0.556), full conversation 0.814 (temporal 0.603).
+
+**What the dates QA says.**
+- **LoCoMo temporal improves clearly.**
+  - Full category (321 questions): 0.769 → 0.813 with dates, 0.822 with question dates as well. That is +17 questions over 321, outside the noise.
+  - On the 301: temporal 0.698 → 0.762. That is above the full conversation (0.603) and Mem0 (0.524), and overall 0.814 equals the full conversation.
+- **LongMemEval temporal-reasoning** goes 0.52 → 0.56 (+1 question).
+- **LongMemEval overall falls 0.681 → 0.655** (−3 questions net). All of it is knowledge-update (−4).
+  - In those four the context differs only by date notes on other lines.
+  - The reader picks the older value (for example $350,000 instead of $400,000) although both values are shown with their dates.
+  - At n = 32, 4 questions is within the reader's sensitivity to any prompt change. But the direction is consistent, so it is listed under "Left" below rather than called noise.
+- The question-date boost changed no LongMemEval answer and helped LoCoMo.
+
+**Retrieval** (the same ingest; R@5 / R@10):
+
+| | LoCoMo cat 1–4 (1,536) | LoCoMo temporal (321) | LongMemEval 119 R@10 | Rall@10 |
+|---|---|---|---|---|
+| main (recall-v5) `base` | 0.678 / 0.763 | 0.745 / – | 0.992 | 0.950 |
+| main (recall-v5) `default` | 0.686 / 0.771 | 0.751 / – | 0.992 | 0.966 |
+| `base` | 0.678 / 0.766 | 0.751 / 0.832 | 0.992 | 0.950 |
+| `default` (no date boost) | 0.687 / 0.775 | 0.757 / 0.838 | 0.992 | 0.966 |
+| **`qdate` (shipped default)** | **0.695 / 0.782** | **0.769 / 0.850** | **1.000** | 0.966 |
+
+- Without the boost, retrieval is the same as main within run-to-run noise (±0.004 between two identical runs).
+- The question-date boost raises LoCoMo R@5 by 0.008 (temporal by 0.012) and LongMemEval temporal R@10 from 0.96 to 1.00. Nothing fell.
+- 220 of the 1,540 LoCoMo questions carry a date ("What did Caroline do in August 2023?"). A memory said in that period, or about it, gains 0.03.
+
+**Unchanged:**
+- **The life stream:** 15 / 20 current fact first, 19 / 20 with `hide_pending`; auto-supersede 12 right, 0 wrong; duplicates 4 right, 0 wrong; 2 false pending supersedes.
+- **The 23 held-out LongMemEval knowledge-update questions** (`claims_ku.py`): latest answer first 83%, stale first 17%, and 91% with `hide_pending`.
+
+**Quota.** The weekly plan went from 87.9% remaining to 86.9%, about 1 point, account-wide. The parser labels were 300 calls. Most list and `stmt` prompts were already in the recall-v5 cache.
+
+**Left.**
+- **The LongMemEval knowledge-update dip with dates** (−4 of 32). Things to try:
+  - leave notes off expressions that name a month and day, which only add a year;
+  - put the notes on their own line;
+  - test with a second reader.
+- **Tense per clause**, for month-and-day dates without a year.
+- **Missing patterns:** "August last year", "on the 15th" after a month, decades, "the end of the summer".
+- **List readers get no resolved dates.** A dated list would need the notes in `text`, which `text` deliberately does not carry. Readers should use `format: 'context'` or `events`.
+
+### Reproduce
+
+```zsh
+source .bench-data/dates/env.sh          # KLEOS_BENCH_DIR=.bench-data/dates; llm-cache -> the recall cache
+CFG=base,default,qdate
+$PY $H/retrieval.py --bench locomo --variant hybrid --configs $CFG --context-budget 1500
+$PY $H/retrieval.py --bench lme --variant hybrid --ids-from $D/lme119.txt --configs $CFG --context-budget 3000
+C=kleos:hybrid+base,kleos:hybrid+default,stmt:hybrid+default,ctx:hybrid+default,kleos:hybrid+qdate,ctx:hybrid+qdate
+$PY $H/qa.py --bench locomo --conditions $C --n 300
+$PY $H/qa.py --bench lme --conditions $C --ids-variant hybrid+default
+$PY $H/qa.py --bench locomo --conditions kleos:hybrid+default,ctx:hybrid+default,ctx:hybrid+qdate --types 2   # full temporal category
+$PY $H/dates_eval.py sample --n 300 && $PY $H/dates_eval.py label && $PY $H/dates_eval.py score --gold $D/dates-eval/hand50.json
+```
+
+Since `event_weight` defaults to 0.03, `default` in today's `CONFIGS` is the `qdate` column above, and `noqdate` is the old `default`.
 
 ## Head-to-head: Mem0 (open source)
 

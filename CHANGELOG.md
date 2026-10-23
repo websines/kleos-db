@@ -10,6 +10,25 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Memory API: write-time dates (event times).** See "Dates" in docs/specs/memory-api.md; results in docs/benchmarks/memory.md ("Dates and list text").
+  - **Parser.** `memory_time::parse_times(text, at)` is a rule-based English temporal-expression parser (regex and chrono, no model). It covers absolute dates in the usual formats, relative days and parts of days, offsets ("two days ago"), weekdays and weekends, relative weeks, months, years and seasons, "since" / "until" / "for the past N weeks", and ranges. Each match resolves against when it was said to `[start, end)` with a granularity and a kind. It is conservative: "may" the modal, "march" the verb, ordinals, names, vague times and habits are not dates. On 50 hand-labelled LoCoMo and LongMemEval claims it scores expression precision 1.00 and recall 0.96, interval precision 0.96 and recall 0.92 (0.96 / 0.96 / 0.88 / 0.88 before the three fixes the hand check found).
+  - **Storage.** A new relation `kleos_mem_event {ns, id, n => start, end, granularity, kind, expr}` (schema version 5) holds one row per expression of each added claim, written in `remember`'s transaction. A v4 store gains it on first use, filled from the stored texts. Erase removes the rows.
+  - **Use.**
+    - List hits carry `events`.
+    - The context block shows dates inline: `(≈ 2023-05-07 (Sun), "yesterday")`, and a statement's other dates on its `said in` line.
+    - `recall {event_from, event_to}` filters on event time, falling back to the statement's events and then to valid-from.
+    - `recall {event_weight}` (default 0.03, blend only) boosts memories whose event time overlaps a date in the question, resolved at `query_at` (default `as_of` or now).
+  - **Results** (same reader and judge):
+    - LoCoMo temporal context QA went from 0.769 to 0.822 on the full category (321 questions), and from 0.698 to 0.762 on the Mem0 head-to-head's 63. Mem0 top-10 scores 0.524 there and the whole conversation 0.603. All 301: 0.807 → 0.814.
+    - LongMemEval (119 questions): temporal-reasoning rose 0.52 → 0.56, but overall fell 0.681 → 0.655, from four knowledge-update answers (listed as open).
+    - Retrieval with the question-date boost: LoCoMo hybrid R@5 0.687 → 0.695, LongMemEval R@10 0.992 → 1.000.
+    - Unchanged: the life stream, and the held-out knowledge-update set (83% latest first).
+- **Memory API (changed default): a list hit of a claim shows its statement.** With claims and one hit per statement, a reader that showed only each hit's `text` saw one sentence of each message, and lost the speaker, the referents and the date words. That scored 0.671 against 0.708 for main's top-k list on 301 LoCoMo questions.
+  - Now `recall`'s `text` for a claim of a longer statement is the statement: the whole of it up to `text_chars` (default 1000), else a window around the claim.
+  - The claim is in the new `claim` field (Rust `RecallHit::memory_text()`), and `context` still holds the whole statement.
+  - `hit_text: 'claim'` restores the old `text`.
+  - The default list now scores 0.751 on LoCoMo (main's list 0.711, statements 0.751, context 0.814) and 0.672 on LongMemEval (0.647, 0.664, 0.655).
+  - The bench harness's `kleos:` condition shows `text` as the API returns it, and its `base` config asks for claim text.
 - **Memory API: diverse recall, entity expansion, a context output for LLM readers, speaker roles and valid-from filters.** See "Diversity", "Entity expansion", "Context output", "Speaker roles" and "Valid-from filters" in docs/specs/memory-api.md; results in docs/benchmarks/memory.md ("Recall diversity and context output").
   - **Diversity** (on by default; `diversity: false` is the old top k exactly): recall chooses k hits from a deeper window of the same index fetch (max(3k, k + 10)) with caps per statement (`max_per_statement`, default 1: one claim per message, the others only fill up to k) and per source group (`max_per_source`, default 0; the group is `source` up to its first `#`), and an MMR-style penalty on similarity to the hits already chosen (`mmr_weight`, default 0; cosine of the vectors, else word overlap). Deterministic.
   - **Entity expansion** (`expand: true`, default off): other current memories about the entities of the 3 most relevant hits (merges followed; entities with more than 25 memories skipped) join the pool at `expand_weight` (0.5) × the seed's relevance, flagged `expanded`.
