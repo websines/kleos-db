@@ -31,6 +31,7 @@ to kleos.
   - Python bindings: new `engram` feature pass-through.
   - End to end on the 132M model (`scripts/engram/remember_e2e.py`): top-1 recall of 10 remembered facts 0/10 → 9/10 (unseen rephrasings 1/18 → 9/18); a superseding `remember` flips the answer and `as_of` before it restores the old overlay bit for bit; erasing one memory keeps 128 untouched rows bit-identical; erasing the namespace gives logits bit-identical to the base model; jobs survive a worker crash and a `kill -9` with one version per fact. `remember` costs about 1 ms more on SQLite when attached.
 
+- **Memory benchmark harness (UPGRADE_PLAN L2):** `scripts/bench-l2/` runs LongMemEval_S and LoCoMo through the public `remember` / `recall` API (Python bindings) and reports LLM-free retrieval (recall@5/10, NDCG@10 per question type, a knowledge-update supersession view), ingestion and recall latency, and secondary QA accuracy with a pluggable reader/judge. Resumable, seeded, pinned dataset revisions; `scripts/bench-l2/run.sh` re-runs everything against the current build. First numbers in [`docs/benchmarks/memory.md`](docs/benchmarks/memory.md).
 - **Memory API: concurrent `remember`s on one topic no longer leave two current facts.**
   - A per-namespace version row (`kleos_mem_ns`) is asserted and bumped inside each write transaction, so the storage engine orders writers across threads and processes. A writer that lost the race plans again and supersedes the winner.
   - The schema version is now 2, and v1 stores get the table on first use.
