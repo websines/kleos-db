@@ -203,3 +203,8 @@ weights or data derived from them.
 The QA judge prompts in `scripts/bench-l2/qa.py` follow LongMemEval's
 `evaluate_qa.py` (MIT) and the LoCoMo evaluation prompts published with Mem0's
 evaluation code (Apache-2.0).
+
+The Mem0 head-to-head (`scripts/bench-l2/mem0_adapter.py`) imports the
+open-source [`mem0ai`](https://pypi.org/project/mem0ai/) 2.2.1 package
+(Apache-2.0) at run time from a separate virtual environment under
+`.bench-data/mem0-h2h/`. No Mem0 code is vendored or redistributed.
