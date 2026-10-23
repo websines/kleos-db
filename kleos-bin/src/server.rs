@@ -558,6 +558,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
 
     let app = Router::new()
         .route("/text-query", post(text_query))
+        .route("/memory/:op", post(memory_op))
         .route("/export/:relations", get(export_relations))
         .route("/import", put(import_relations))
         .route("/backup", post(backup))
@@ -803,6 +804,34 @@ async fn text_query(
     .await;
     match result {
         Ok(res) => wrap_json(res),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Agent memory API (kleos fork; docs/specs/memory-api.md): `POST
+/// /memory/{init|remember|recall|forget|reflect|link}` with the op's options
+/// as a JSON object (`text` for remember, `query` for recall, `id`/`ids` for
+/// forget). Answers `{"ok": true, "result": ...}`. Only `recall` and
+/// `reflect` are allowed on a read-only (immutable) principal.
+async fn memory_op(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if matches!(mutability, ScriptMutability::Immutable) && op != "recall" && op != "reflect" {
+        return (
+            StatusCode::FORBIDDEN,
+            json!({"ok": false, "message": format!("memory {op} needs write access")}).into(),
+        );
+    }
+    let result = spawn_blocking(move || st.db.memory_call(&op, args)).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "message": err.to_string()}).into(),
+        ),
         Err(err) => internal_error(err),
     }
 }

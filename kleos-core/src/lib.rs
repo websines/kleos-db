@@ -160,6 +160,7 @@ pub mod cypher;
 pub mod data;
 pub mod decide;
 pub mod embed;
+pub mod memory;
 pub(crate) mod fixed_rule;
 pub(crate) mod fts;
 /// Test-support metric, not a public API: process-wide FTS posting-scan
@@ -207,6 +208,25 @@ impl Default for DbInstance {
     fn default() -> Self {
         Self::new("mem", "", Default::default()).unwrap()
     }
+}
+
+/// Run `$body` with `$db` bound to the inner [`Db`] of a [`DbInstance`].
+macro_rules! dispatch_db {
+    ($inst:expr, $db:ident => $body:expr) => {
+        match $inst {
+            DbInstance::Mem($db) => $body,
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite($db) => $body,
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb($db) => $body,
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb($db) => $body,
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled($db) => $body,
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv($db) => $body,
+        }
+    };
 }
 
 impl DbInstance {
@@ -1322,6 +1342,34 @@ impl DbInstance {
             #[cfg(feature = "storage-tikv")]
             DbInstance::TiKv(db) => db.forget_decider_fit(name, template),
         }
+    }
+    /// Dispatcher method. See [crate::Db::memory_init].
+    pub fn memory_init(&self, opts: memory::InitOpts) -> Result<memory::MemConfig> {
+        dispatch_db!(self, db => db.memory_init(opts))
+    }
+    /// Dispatcher method. See [crate::Db::remember].
+    pub fn remember(&self, text: &str, opts: memory::RememberOpts) -> Result<memory::RememberResult> {
+        dispatch_db!(self, db => db.remember(text, opts))
+    }
+    /// Dispatcher method. See [crate::Db::recall].
+    pub fn recall(&self, query: &str, opts: memory::RecallOpts) -> Result<Vec<memory::RecallHit>> {
+        dispatch_db!(self, db => db.recall(query, opts))
+    }
+    /// Dispatcher method. See [crate::Db::forget].
+    pub fn forget(&self, opts: memory::ForgetOpts) -> Result<memory::ForgetResult> {
+        dispatch_db!(self, db => db.forget(opts))
+    }
+    /// Dispatcher method. See [crate::Db::reflect].
+    pub fn reflect(&self, opts: memory::ReflectOpts) -> Result<memory::ReflectResult> {
+        dispatch_db!(self, db => db.reflect(opts))
+    }
+    /// Dispatcher method. See [crate::Db::link].
+    pub fn link(&self, opts: memory::LinkOpts) -> Result<JsonValue> {
+        dispatch_db!(self, db => db.link(opts))
+    }
+    /// Dispatcher method. See [crate::Db::memory_call].
+    pub fn memory_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
+        dispatch_db!(self, db => db.memory_call(op, args))
     }
     /// Dispatcher method. See [crate::Db::backfill_embeddings].
     pub fn backfill_embeddings(&self, relation: &str) -> Result<NamedRows> {

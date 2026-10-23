@@ -619,6 +619,30 @@ struct CozoDbMulTx {
 const DB_CLOSED_MSG: &str = r##"{"ok":false,"message":"database closed"}"##;
 
 impl CozoDbPy {
+    /// Run a memory-API op (kleos fork) with keyword options as JSON.
+    fn memory_op(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        extra: Vec<(&str, serde_json::Value)>,
+        opts: Option<&PyDict>,
+    ) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let mut args = serde_json::Map::new();
+        if let Some(o) = opts {
+            for (k, v) in o {
+                let k: String = k.extract()?;
+                args.insert(k, serde_json::Value::from(py_to_value(v)?));
+            }
+        }
+        for (k, v) in extra {
+            args.insert(k.to_string(), v);
+        }
+        let out = py
+            .allow_threads(|| db.memory_call(op, serde_json::Value::Object(args)))
+            .map_err(report2py)?;
+        Ok(json_to_py(out, py))
+    }
     /// Clone the Arc-backed [`DbInstance`] out of a momentary read guard and
     /// drop the guard before returning, so callers never hold the lock across
     /// the blocking engine call they run under `py.allow_threads`. Returns a
@@ -1284,6 +1308,54 @@ impl CozoDbPy {
         out.set_item("tau_auto", r.tau_auto)?;
         out.set_item("coverage", r.coverage)?;
         Ok(out.into())
+    }
+    /// Create the agent memory schema (kleos fork; docs/specs/memory-api.md)
+    /// or update it: `embedder=` attaches an embedder and backfills vectors,
+    /// `decider=` sets the default decider. Returns the configuration.
+    #[pyo3(signature = (**opts))]
+    pub fn memory_init(&self, py: Python<'_>, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "init", vec![], opts)
+    }
+    /// Store a memory. Options: `ns`, `kind`, `source`, `importance`,
+    /// `entities` (names), `at` (valid-from µs), `k`, `decider`, `embedder`.
+    /// Returns `{action, id, superseded, duplicate_of, tentative, decisions,
+    /// entities, embedded, decider, ns}`; decisions carry `decided_by`.
+    #[pyo3(signature = (text, **opts))]
+    pub fn remember(&self, py: Python<'_>, text: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "remember", vec![("text", json!(text))], opts)
+    }
+    /// Hybrid recall over current memories (or those valid at `as_of`).
+    /// Options: `ns`, `k`, `kind`, `entity`, `as_of`, `vector_weight`.
+    /// Returns a list of `{id, text, score, kind, valid_from, valid_to, ...}`.
+    #[pyo3(signature = (query, **opts))]
+    pub fn recall(&self, py: Python<'_>, query: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "recall", vec![("query", json!(query))], opts)
+    }
+    /// Forget a memory (`id`) or a filter (`ids`, `kind`, `entity`,
+    /// `all=True`). `mode='retract'` (default) ends validity; `mode='erase'`
+    /// deletes every version (GDPR).
+    #[pyo3(signature = (id=None, **opts))]
+    pub fn forget(&self, py: Python<'_>, id: Option<&str>, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        let extra = id.map(|i| vec![("id", json!(i))]).unwrap_or_default();
+        self.memory_op(py, "forget", extra, opts)
+    }
+    /// Pending tentative decisions, recent changes and contradiction
+    /// candidates of a namespace (model-free). Options: `since`, `limit`.
+    #[pyo3(signature = (ns=None, **opts))]
+    pub fn reflect(&self, py: Python<'_>, ns: Option<&str>, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        let extra = ns.map(|n| vec![("ns", json!(n))]).unwrap_or_default();
+        self.memory_op(py, "reflect", extra, opts)
+    }
+    /// Typed link `a -[rel]-> b` between memories or entities. Options:
+    /// `ns`, `p`.
+    #[pyo3(signature = (a, b, rel, **opts))]
+    pub fn link(&self, py: Python<'_>, a: &str, b: &str, rel: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(
+            py,
+            "link",
+            vec![("from", json!(a)), ("to", json!(b)), ("rel", json!(rel))],
+            opts,
+        )
     }
     pub fn multi_transact(&self, write: bool) -> PyResult<CozoDbMulTx> {
         let db = self.db_ref()?;
