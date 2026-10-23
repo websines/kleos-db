@@ -148,7 +148,7 @@ db.entity_history("person", Some(&id))?; db.entity_pending("person")?;
 db.reject_entity_link("person", &a, &b)?; db.canonical_entity("person", &id)?;
 ```
 
-The memory API (`memory.rs`, built in parallel) calls `resolve_entities` with the mentions it extracts, and stores the returned canonical ids.
+The memory API (`memory.rs`) calls `resolve_entities` without commit on the names passed to `remember`, over `kleos_mem_entity` with `cfg.scope = ("ns", namespace)`, and writes the resulting rows, merges and review links in its own transaction (memory-api.md, "Entity resolution"). `EntityConfig.scope` (Rust only) restricts a resolution to the rows whose scope column equals the value: the snapshot reads only those rows, index hits outside them are dropped, and committed rows get the scope column as the first key column.
 
 ```
 ::entity resolve person ['Alice Smith', ['A. Smith', 'person', 'my manager'],

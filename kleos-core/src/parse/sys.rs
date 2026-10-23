@@ -107,7 +107,8 @@ pub enum SysOp {
     /// forget` (docs/specs/decide.md).
     Decider(DeciderOp),
     /// kleos fork: `::memory init | remember | recall | forget | reflect |
-    /// link` (docs/specs/memory-api.md): the op and its options as JSON.
+    /// link | set | flush` (docs/specs/memory-api.md): the op and its
+    /// options as JSON.
     MemApi(String, serde_json::Value),
     /// kleos fork: `::entity resolve | merge | split | history | pending |
     /// reject` (docs/specs/entity-resolution.md).
@@ -141,8 +142,8 @@ fn parse_mem_api_op(
                 let key = match (verb.as_str(), &val) {
                     ("remember", _) => "text",
                     ("recall", _) => "query",
-                    ("forget", DataValue::List(_)) => "ids",
-                    ("forget", _) => "id",
+                    ("forget" | "set", DataValue::List(_)) => "ids",
+                    ("forget" | "set", _) => "id",
                     ("reflect", _) => "ns",
                     (v, _) => bail!("`::memory {v}` takes no positional argument; pass options as {{key: value}}"),
                 };

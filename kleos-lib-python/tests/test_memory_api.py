@@ -100,3 +100,34 @@ def test_errors_and_cozoscript(db):
     assert res["rows"][0][res["headers"].index("action")] == "added"
     res = db.run_script("::memory recall 'Berlin' {ns: 'u'}", {}, True)
     assert res["rows"][0][1] == "I live in Berlin."
+
+
+def test_entities_gate_scoring_ttl_and_archive(db):
+    # the user and the sister are different subjects: the value rule would
+    # supersede the user's rent with the sister's, but the gate stops it
+    a = db.remember("My rent is $1,800 per month.", ns="u", at=d(1), entities=["user"])
+    s = db.remember("My rent is $2,100 per month.", ns="u", at=d(2), entities=["Anna"])
+    assert s["superseded"] == [] and s["gated"] == [a["id"]]
+    b = db.remember("My rent is $2,400 per month.", ns="u", at=d(3), entities=["User"])
+    assert b["superseded"] == [a["id"]]
+    assert b["entity_links"][0]["outcome"] == "match"
+
+    # ranking signals and the blend switch
+    hits = db.recall("rent", ns="u", k=5)
+    assert {"relevance", "recency", "access_count", "archived"} <= set(hits[0])
+    off = db.recall("rent", ns="u", k=5, blend=False)
+    assert all(h["score"] == h["relevance"] for h in off)
+    db.memory_set(s["id"], ns="u", importance=1.0)
+    top = db.recall("rent", ns="u", k=5, importance_weight=5.0, record_access=False)[0]
+    assert top["id"] == s["id"] and top["importance"] == 1.0
+    assert db.memory_flush()["flushed"] >= 0
+
+    # TTL and the archive tier
+    t = db.remember("The gate code is 1234.", ns="u", at=d(1), ttl=DAY)
+    assert all(h["id"] != t["id"] for h in db.recall("gate code", ns="u"))
+    assert any(h["id"] == t["id"] for h in db.recall("gate code", ns="u", include_expired=True))
+    arch = db.forget(ns="u", expired=True, mode="archive")
+    assert arch["ids"] == [t["id"]]
+    db.memory_set(b["id"], ns="u", archived=True)
+    assert all(h["id"] != b["id"] for h in db.recall("rent", ns="u"))
+    assert any(h["id"] == b["id"] and h["archived"] for h in db.recall("rent", ns="u", include_archived=True))

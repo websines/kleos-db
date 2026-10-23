@@ -17,11 +17,17 @@
 //! decisions. With no embedder or decider enabled it degrades to add-only
 //! plus FTS (and the model-free value rules); it never errors because ML is
 //! off.
+//!
+//! Entity names passed to `remember` are resolved with `entity.rs` (E3) over
+//! the namespace's own entities and gate supersession to statements about a
+//! shared subject. Recall ranks by a configurable blend of relevance,
+//! recency, importance and access counts (E4, C6), with TTL expiry and an
+//! archive tier.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use itertools::Itertools;
 use miette::{IntoDiagnostic, Result};
@@ -29,9 +35,10 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::bail;
-use crate::data::value::DataValue;
+use crate::data::value::{DataValue, Validity};
 use crate::decide::{self, rules, Band, Decision, Template};
 use crate::embed;
+use crate::entity::{EntityConfig, Mention, Outcome, ResolveOptions, ENTITY_LINKS, ENTITY_MERGES};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
 
@@ -56,8 +63,16 @@ pub const MEM_CONFIG: &str = "kleos_mem_config";
 /// and bumps it; so does `forget`. The storage engine's transaction
 /// isolation then orders concurrent writers, in one process or several.
 pub const MEM_NS: &str = "kleos_mem_ns";
-/// Current schema version (2 added `kleos_mem_ns`).
-const SCHEMA_VERSION: i64 = 2;
+/// Access counts: `{ns, id => n, last}`. Written by batched flushes of the
+/// counts `recall` buffers, in their own small transactions (never under the
+/// namespace version).
+pub const MEM_ACCESS: &str = "kleos_mem_access";
+/// Expiry and archive tier: `{ns, id => expires, archived}` (µs; null when
+/// unset). Only memories with a TTL or in the archive have a row.
+pub const MEM_LIFE: &str = "kleos_mem_life";
+/// Current schema version (2 added `kleos_mem_ns`; 3 added `kleos_mem_access`
+/// and `kleos_mem_life`, and entity merges / review links).
+const SCHEMA_VERSION: i64 = 3;
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
@@ -75,6 +90,93 @@ const OPTIMISTIC_ATTEMPTS: usize = 2;
 /// Attempts of a `remember` in all, counting the ones that lost a race with
 /// another process; after that it reports the namespace as busy.
 const COMMIT_ATTEMPTS: usize = 8;
+
+/// Recall blend defaults (docs/specs/memory-api.md, "Ranking"): final score
+/// = relevance + w_r · 2^(−age / half-life) + w_i · (importance − 0.5)
+/// + w_a · min(1, ln(1 + accesses) / ln(1 + 100)). Access counts are
+/// recorded but weigh 0 by default: every returned hit counts, so filler
+/// hits of unrelated queries gain rank (on the life stream a 0.05 weight
+/// flipped a near-tie the wrong way). Recency and importance are small
+/// because the fused relevance of the top hits is compressed (EmbeddingGemma
+/// near-ties differ by 0.01 or less): on the life stream read at its own
+/// "now", recency 0.1 / 30 days lost 3 of 20 answers, 0.03 / 90 days none.
+const DEFAULT_RECENCY_WEIGHT: f64 = 0.03;
+const DEFAULT_HALF_LIFE_DAYS: f64 = 90.0;
+const DEFAULT_IMPORTANCE_WEIGHT: f64 = 0.1;
+const DEFAULT_ACCESS_WEIGHT: f64 = 0.0;
+/// Accesses at which the access signal saturates (reaches 1).
+const ACCESS_SATURATION: f64 = 100.0;
+/// Buffered access counts are flushed once this many memories are pending,
+/// or this long after the last flush, by the `recall` that notices.
+const ACCESS_FLUSH_KEYS: usize = 64;
+const ACCESS_FLUSH_EVERY: Duration = Duration::from_secs(1);
+/// At most this many memories are buffered when flushes keep failing (a
+/// read-only store): the counts are approximate, never unbounded.
+const ACCESS_BUFFER_CAP: usize = 100_000;
+const MICROS_PER_DAY: f64 = 86_400_000_000.0;
+
+/// Access counts `recall` has not written yet, per database. Recording an
+/// access is a map update; the counts are written in batches by
+/// [`Db::memory_flush`] in a transaction of their own, which never touches
+/// the namespace version, so reads do not contend with `remember`. Counts
+/// still in the buffer when the process exits are lost: access counts are a
+/// ranking signal, not an audit log.
+#[derive(Default)]
+pub(crate) struct AccessBuf {
+    inner: Mutex<AccessPending>,
+}
+
+#[derive(Default)]
+struct AccessPending {
+    /// (ns, id) → (accesses, last access µs)
+    counts: HashMap<(String, String), (i64, i64)>,
+    last_flush: Option<Instant>,
+}
+
+impl AccessBuf {
+    fn lock(&self) -> MutexGuard<'_, AccessPending> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Count one access of each id; returns whether a flush is due.
+    fn add(&self, ns: &str, ids: &[String], at: i64) -> bool {
+        let mut g = self.lock();
+        for id in ids {
+            if g.counts.len() >= ACCESS_BUFFER_CAP && !g.counts.contains_key(&(ns.to_string(), id.clone())) {
+                break;
+            }
+            let e = g.counts.entry((ns.to_string(), id.clone())).or_insert((0, at));
+            e.0 += 1;
+            e.1 = e.1.max(at);
+        }
+        let due = g.last_flush.is_none_or(|t| t.elapsed() >= ACCESS_FLUSH_EVERY);
+        !g.counts.is_empty() && (g.counts.len() >= ACCESS_FLUSH_KEYS || due)
+    }
+    /// Buffered (accesses, last access) of one memory.
+    fn get(&self, ns: &str, id: &str) -> Option<(i64, i64)> {
+        self.lock().counts.get(&(ns.to_string(), id.to_string())).copied()
+    }
+    fn take(&self) -> HashMap<(String, String), (i64, i64)> {
+        let mut g = self.lock();
+        g.last_flush = Some(Instant::now());
+        std::mem::take(&mut g.counts)
+    }
+    /// Put back counts whose flush failed.
+    fn restore(&self, m: HashMap<(String, String), (i64, i64)>) {
+        let mut g = self.lock();
+        for (k, (n, l)) in m {
+            let e = g.counts.entry(k).or_insert((0, l));
+            e.0 += n;
+            e.1 = e.1.max(l);
+        }
+    }
+    /// Drop buffered counts of erased memories.
+    fn forget(&self, ns: &str, ids: &[String]) {
+        let mut g = self.lock();
+        for id in ids {
+            g.counts.remove(&(ns.to_string(), id.clone()));
+        }
+    }
+}
 
 /// In-process commit gate of one namespace. Correctness comes from the
 /// `MEM_NS` version row checked inside the write transaction, which also
@@ -155,6 +257,7 @@ struct Plan {
     supersede: Vec<usize>,
     duplicate: Option<(usize, f64)>,
     audit: Vec<MemDecision>,
+    ents: EntityPlan,
     res: RememberResult,
 }
 
@@ -256,10 +359,19 @@ pub struct RememberOpts {
     pub source: Option<String>,
     /// Importance in [0, 1], if the caller knows it.
     pub importance: Option<f64>,
-    /// Entity names mentioned (exact normalised-name linking for now).
+    /// Entity names the statement is about (resolved with entity
+    /// resolution against the namespace's entities). Include the subject,
+    /// e.g. `user` for first-person statements: supersession only acts
+    /// between statements that share an entity when both have some.
     pub entities: Vec<String>,
     /// Valid-from time in µs since the epoch; default now.
     pub at: Option<i64>,
+    /// Time to live in µs from `at`: past it, recall leaves the memory out
+    /// unless asked (`include_expired`), and `forget {mode: 'archive',
+    /// expired: true}` moves it to the archive.
+    pub ttl: Option<i64>,
+    /// Absolute expiry (µs); the alternative to `ttl`.
+    pub expires: Option<i64>,
     /// Candidates to score; default 5.
     pub k: Option<usize>,
     /// Decider name; default the store's, else the first enabled one.
@@ -288,6 +400,48 @@ pub struct RecallOpts {
     /// superseded (a pending `supersedes` decision); default false: return
     /// them, flagged in `pending_superseded_by`.
     pub hide_pending: bool,
+    /// Rank by the blend of relevance, recency, importance and access count
+    /// (default true); false ranks by relevance alone, as before E4.
+    pub blend: Option<bool>,
+    /// Blend weight of recency (default 0.03).
+    pub recency_weight: Option<f64>,
+    /// Recency half-life in days (default 90).
+    pub half_life_days: Option<f64>,
+    /// Blend weight of importance (default 0.1).
+    pub importance_weight: Option<f64>,
+    /// Blend weight of the access count (default 0: recorded, not ranked).
+    pub access_weight: Option<f64>,
+    /// Also return archived memories (default false).
+    pub include_archived: bool,
+    /// Also return memories past their TTL (default false).
+    pub include_expired: bool,
+    /// Count this recall as an access of the memories it returns (default
+    /// true; false in read-only scripts).
+    pub record_access: Option<bool>,
+}
+
+/// Options of [`Db::memory_set`]: change a memory's importance, expiry or
+/// archive state. These are scoring metadata: the memory's text and validity
+/// are untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SetOpts {
+    /// Namespace; default `default`.
+    pub ns: Option<String>,
+    /// One memory id.
+    pub id: Option<String>,
+    /// Several memory ids.
+    pub ids: Vec<String>,
+    /// New importance in [0, 1].
+    pub importance: Option<f64>,
+    /// Expire this long (µs) after now.
+    pub ttl: Option<i64>,
+    /// Expire at this time (µs).
+    pub expires: Option<i64>,
+    /// Remove the expiry.
+    pub no_ttl: bool,
+    /// Move to (true) or out of (false) the archive.
+    pub archived: Option<bool>,
 }
 
 /// Options of [`Db::forget`].
@@ -304,9 +458,13 @@ pub struct ForgetOpts {
     pub kind: Option<String>,
     /// Filter: every current memory mentioning this entity.
     pub entity: Option<String>,
+    /// Filter: every current memory past its TTL (not yet archived).
+    pub expired: bool,
     /// Required to forget a whole namespace with no other filter.
     pub all: bool,
-    /// `retract` (end validity; default) or `erase` (GDPR hard delete).
+    /// `retract` (end validity; default), `erase` (GDPR hard delete) or
+    /// `archive` (move to the archive tier; still valid, hidden from recall
+    /// by default).
     pub mode: Option<String>,
     /// Valid time of the retraction (µs); default now.
     pub at: Option<i64>,
@@ -365,6 +523,26 @@ pub struct MemDecision {
     pub action: String,
 }
 
+/// How a name passed in `entities` was resolved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityLink {
+    /// The name as passed.
+    pub name: String,
+    /// Entity row the memory mentions.
+    pub eid: String,
+    /// Its canonical entity (after merges).
+    pub canonical: String,
+    /// `match` (an existing entity), `possible` (a new entity with review
+    /// links to the likely matches) or `new`.
+    pub outcome: String,
+    /// Whether this call created the entity row.
+    pub created: bool,
+    /// Decision provenance (`rule|exact`, `model|same_entity@v2|...`).
+    pub decided_by: String,
+    /// P(same entity) of the match, when matched or possible.
+    pub p: f64,
+}
+
 /// What [`Db::remember`] did.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RememberResult {
@@ -384,6 +562,11 @@ pub struct RememberResult {
     pub decisions: Vec<MemDecision>,
     /// Linked entity ids.
     pub entities: Vec<String>,
+    /// How each entity name was resolved.
+    pub entity_links: Vec<EntityLink>,
+    /// Candidates whose `supersedes` check was skipped: both statements
+    /// have entities and share none (different subjects).
+    pub gated: Vec<String>,
     /// Whether the text was embedded.
     pub embedded: bool,
     /// Decider used (`None`: model-free rules only).
@@ -397,8 +580,22 @@ pub struct RecallHit {
     pub id: String,
     /// Text.
     pub text: String,
-    /// Fused score (higher is better).
+    /// Final score (higher is better): the blend, or the relevance when the
+    /// blend is off.
     pub score: f64,
+    /// Hybrid relevance (the fused vector + text score).
+    pub relevance: f64,
+    /// Recency signal 2^(−age / half-life), age from `valid_from` to the read
+    /// time.
+    pub recency: f64,
+    /// Times recalled (including counts not yet flushed).
+    pub access_count: i64,
+    /// Last recall (µs).
+    pub last_access: Option<i64>,
+    /// Expiry (µs).
+    pub expires: Option<i64>,
+    /// Whether the memory is in the archive tier.
+    pub archived: bool,
     /// Kind.
     pub kind: String,
     /// Source of the first statement.
@@ -519,91 +716,70 @@ pub struct MemConfig {
 
 // ------------------------------------------------------------------ entity hook
 
-/// Link `names` to memory `mem_id`: resolve each to an entity of `ns` and
-/// record a mention. **The single entity-resolution hook** of the memory API:
-/// for now an exact match on the normalised name ([`norm_name`]), creating
-/// the entity when there is none. Entity resolution proper (E3,
-/// `entity.rs`) replaces the body of this function; `text` is passed so it
-/// can extract mentions itself.
-pub fn link_entities<'s, S: Storage<'s>>(
-    db: &'s Db<S>,
-    ns: &str,
-    mem_id: &str,
-    _text: &str,
-    names: &[String],
-) -> Result<Vec<LinkedEntity>> {
-    let mut wanted: BTreeMap<String, String> = BTreeMap::new();
-    for n in names {
-        let k = norm_name(n);
-        if !k.is_empty() {
-            wanted.entry(k).or_insert_with(|| n.trim().to_string());
-        }
-    }
-    if wanted.is_empty() {
-        return Ok(vec![]);
-    }
-    let norms: Vec<String> = wanted.keys().cloned().collect();
-    let found = db.run_script(
-        &format!("?[norm, eid, name] := *{MEM_ENTITY}:by_norm{{ns: $ns, norm, eid}}, norm in $norms, *{MEM_ENTITY}{{ns: $ns, eid, name}}"),
-        params(vec![("ns", s(ns)), ("norms", str_list(&norms))]),
-        ScriptMutability::Immutable,
-    )?;
-    let mut have: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for r in found.rows {
-        if let (Some(n), Some(e), Some(name)) = (cell_str(&r[0]), cell_str(&r[1]), cell_str(&r[2])) {
-            have.entry(n).or_insert((e, name));
-        }
-    }
-    let now = now_micros();
-    let mut out = vec![];
-    let mut new_rows = vec![];
-    for (norm, name) in wanted {
-        match have.get(&norm) {
-            Some((eid, n)) => out.push(LinkedEntity {
-                eid: eid.clone(),
-                name: n.clone(),
-                created: false,
-            }),
-            None => {
-                let eid = new_id("e");
-                new_rows.push(DataValue::List(vec![
-                    s(ns),
-                    s(&eid),
-                    s(&name),
-                    s(&norm),
-                    DataValue::Null,
-                    DataValue::from(now),
-                ]));
-                out.push(LinkedEntity {
-                    eid,
-                    name,
-                    created: true,
-                });
+/// A namespace's entities as `remember` sees them: rows and the canonical
+/// entity of each, following current merges (`kleos_entity_merge`).
+#[derive(Default)]
+struct EntityView {
+    /// eid → (name, normalised name)
+    rows: BTreeMap<String, (String, String)>,
+    merged_into: BTreeMap<String, String>,
+}
+
+impl EntityView {
+    fn canonical(&self, eid: &str) -> String {
+        let mut cur = eid.to_string();
+        for _ in 0..10_000 {
+            match self.merged_into.get(&cur) {
+                Some(n) => cur = n.clone(),
+                None => break,
             }
         }
+        cur
     }
-    let mentions = out
-        .iter()
-        .map(|e| DataValue::List(vec![s(ns), s(mem_id), s(&e.eid)]))
-        .collect();
-    let mut script = String::new();
-    if !new_rows.is_empty() {
-        script.push_str(&format!(
-            "{{?[ns, eid, name, norm, kind, created] <- $ents :put {MEM_ENTITY} {{ns, eid => name, norm, kind, created}}}}"
-        ));
+    /// Every entity row of the clusters that contain a row named `name`.
+    fn cluster_of_name(&self, name: &str) -> Vec<String> {
+        let norm = norm_name(name);
+        let canon: BTreeSet<String> = self
+            .rows
+            .iter()
+            .filter(|(_, r)| r.1 == norm)
+            .map(|(e, _)| self.canonical(e))
+            .collect();
+        self.rows
+            .keys()
+            .filter(|e| canon.contains(&self.canonical(e)))
+            .cloned()
+            .collect()
     }
-    script.push_str(&format!(
-        "{{?[ns, id, eid] <- $mentions :put {MEM_MENTION} {{ns, id, eid}}}}"
-    ));
-    db.run_script(
-        &script,
-        params(vec![
-            ("ents", DataValue::List(new_rows)),
-            ("mentions", DataValue::List(mentions)),
-        ]),
-        ScriptMutability::Mutable,
-    )?;
-    Ok(out)
+}
+
+/// The entity writes of one `remember`, decided while planning and written
+/// in its transaction (so they are covered by the namespace version too).
+#[derive(Default)]
+struct EntityPlan {
+    /// New `kleos_mem_entity` rows `[ns, eid, name, norm, kind, created]`.
+    rows: Vec<DataValue>,
+    /// New `kleos_entity_merge` rows (a new surface form of a known entity).
+    merges: Vec<DataValue>,
+    /// New `kleos_entity_link` review rows.
+    links: Vec<DataValue>,
+    out: Vec<EntityLink>,
+    /// Canonical entities of the statement.
+    sure: BTreeSet<String>,
+    /// Canonical entities its names may also be (auto or tentative
+    /// candidates that were not taken).
+    maybe: BTreeSet<String>,
+}
+
+/// Entity resolution over the memory schema's own entity relation, scoped
+/// to one namespace.
+fn mem_entity_config(ns: &str, decider: Option<&str>) -> EntityConfig {
+    let mut cfg = EntityConfig::new(MEM_ENTITY);
+    cfg.id = "eid".into();
+    cfg.type_col = Some("kind".into());
+    cfg.scope = Some(("ns".into(), s(ns)));
+    cfg.decider = decider.map(|d| d.to_string());
+    cfg
 }
 
 // ------------------------------------------------------------------ engine
@@ -613,6 +789,11 @@ struct Cand {
     id: String,
     text: String,
     from: i64,
+    /// Canonical entities it mentions.
+    ents: BTreeSet<String>,
+    /// Archived, or expired at the new statement's time: never a duplicate
+    /// target (the restatement would vanish into a hidden memory).
+    hidden: bool,
 }
 
 fn mem_decision(c: &Cand, d: &Decision, action: &str) -> MemDecision {
@@ -728,7 +909,22 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("2".to_string()))?;
             cfg.version = 2;
         }
+        if cfg.version < 3 {
+            // v2 stores predate scoring (E4) and entity merges (E3)
+            self.create_v3_relations()?;
+            self.set_mem_config("version", Some("3".to_string()))?;
+            cfg.version = 3;
+        }
         Ok(Some(cfg))
+    }
+
+    fn create_v3_relations(&'s self) -> Result<()> {
+        self.mem_q(&format!("{{:create {MEM_ACCESS} {{ns: String, id: String => n: Int, last: Int}}}}"), vec![])?;
+        self.mem_q(
+            &format!("{{:create {MEM_LIFE} {{ns: String, id: String => expires: Int?, archived: Int?}}}}"),
+            vec![],
+        )?;
+        self.ensure_entity_relations()
     }
 
     fn set_mem_config(&'s self, key: &str, value: Option<String>) -> Result<()> {
@@ -757,6 +953,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 ] {
                     self.mem_q(&stmt, vec![])?;
                 }
+                self.create_v3_relations()?;
                 self.mem_q(
                     &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: [Lowercase, Stemmer('english'), Stopwords('en')]}}"),
                     vec![],
@@ -911,8 +1108,9 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     /// Hybrid search over one namespace: filtered HNSW on the memory vectors
     /// plus FTS on the text, fused with `WeightedFusion`, then joined with
-    /// the memories valid at `as_of` (default now). Returns
-    /// `(id, score, text, kind, source, created, importance)` rows by score.
+    /// the memories valid at `as_of` (default now). The index legs fetch for
+    /// `k` hits; the `window` best are returned. Returns `(id, score, text,
+    /// kind, source, created, importance)` rows by score.
     #[allow(clippy::too_many_arguments)]
     fn mem_search(
         &'s self,
@@ -921,10 +1119,13 @@ impl<'s, S: Storage<'s>> Db<S> {
         text: &str,
         qvec: Option<Vec<f32>>,
         k: usize,
+        window: usize,
         as_of: Option<i64>,
         kind: Option<&str>,
-        entity: Option<&str>,
+        entity: Option<&[String]>,
         vector_weight: f64,
+        hide_archived: bool,
+        hide_expired_at: Option<i64>,
     ) -> Result<Vec<Vec<DataValue>>> {
         let fq = fts_query(text);
         // indexes see superseded and retraction rows too: over-fetch
@@ -980,18 +1181,34 @@ impl<'s, S: Storage<'s>> Db<S> {
             filters.push_str(", kind == $kind");
             p.push(("kind", s(kd)));
         }
-        if let Some(e) = entity {
-            filters.push_str(&format!(
-                ", *{MEM_ENTITY}:by_norm{{ns: $ns, norm: $enorm, eid}}, *{MEM_MENTION}{{ns: $ns, id, eid}}"
-            ));
-            p.push(("enorm", s(&norm_name(e))));
+        if let Some(eids) = entity {
+            // every row of the entity's cluster (merged names included)
+            filters.push_str(&format!(", *{MEM_MENTION}{{ns: $ns, id, eid}}, is_in(eid, $eids)"));
+            p.push(("eids", str_list(eids)));
+        }
+        // the archive tier and expired memories are left out unless asked
+        let mut hidden = String::new();
+        if hide_archived {
+            hidden.push_str("hidden[id] := life[id, _, a], !is_null(a)\n");
+        }
+        if let Some(t) = hide_expired_at {
+            hidden.push_str("hidden[id] := life[id, e, _], !is_null(e), e <= $exp_at\n");
+            p.push(("exp_at", DataValue::from(t)));
+        }
+        if !hidden.is_empty() {
+            hidden.insert_str(
+                0,
+                &format!("life[id, e, a] := f[id, _], *{MEM_LIFE}{{ns: $ns, id, expires: e, archived: a}}\n"),
+            );
+            filters.push_str(", not hidden[id]");
         }
         let script = format!(
             "{legs}\n\
              f[id, score] <~ WeightedFusion(l[lid, id, score], weights: [{w}], norms: [{n}])\n\
+             {hidden}\
              ?[id, score, text, kind, source, created, importance] := f[id, score], \
                *{MEM}{{ns: $ns, id, text, kind, source, created, importance @ {at}}}{filters}\n\
-             :order -score\n:limit {k}",
+             :order -score\n:limit {window}",
             legs = legs.join("\n"),
             w = weights.join(", "),
             n = norms.join(", "),
@@ -1017,6 +1234,158 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect())
     }
 
+    /// The namespace's entity rows and current merges.
+    fn entity_view(&'s self, ns: &str) -> Result<EntityView> {
+        let mut v = EntityView::default();
+        for r in self
+            .mem_q(&format!("?[eid, name, norm] := *{MEM_ENTITY}{{ns: $ns, eid, name, norm}}"), vec![("ns", s(ns))])?
+            .rows
+        {
+            if let (Some(e), Some(n), Some(m)) = (cell_str(&r[0]), cell_str(&r[1]), cell_str(&r[2])) {
+                v.rows.insert(e, (n, m));
+            }
+        }
+        if !v.rows.is_empty() {
+            let eids: Vec<String> = v.rows.keys().cloned().collect();
+            for r in self
+                .mem_q(
+                    &format!("?[f, i] := f in $eids, *{ENTITY_MERGES}{{relation: $r, from: f, into: i @ 'NOW'}}"),
+                    vec![("eids", str_list(&eids)), ("r", s(MEM_ENTITY))],
+                )?
+                .rows
+            {
+                if let (Some(f), Some(i)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    v.merged_into.insert(f, i);
+                }
+            }
+        }
+        Ok(v)
+    }
+
+    /// Resolve the names a statement mentions against the namespace's
+    /// entities (E3, `entity.rs`; no NER: `names` are the caller's) and
+    /// decide the writes: an Auto match links the existing entity (reusing
+    /// the cluster's row of the same name, else a new row merged into it); a
+    /// Tentative one makes a new entity with review links; none, a new
+    /// entity. Nothing is written here.
+    fn plan_entities(
+        &'s self,
+        ns: &str,
+        names: &[String],
+        decider: Option<&str>,
+        view: &EntityView,
+    ) -> Result<EntityPlan> {
+        let mut wanted: Vec<(String, String)> = vec![];
+        for n in names {
+            let k = norm_name(n);
+            if !k.is_empty() && !wanted.iter().any(|w| w.0 == k) {
+                wanted.push((k, n.trim().to_string()));
+            }
+        }
+        let mut plan = EntityPlan::default();
+        if wanted.is_empty() {
+            return Ok(plan);
+        }
+        // no context: an exact, unique name in the namespace is the same
+        // entity by rule; the model only sees other near names
+        let cfg = mem_entity_config(ns, decider);
+        let mentions: Vec<Mention> = wanted.iter().map(|(_, n)| Mention::new(n.as_str())).collect();
+        let res = self.resolve_entities(&cfg, &mentions, ResolveOptions { commit: false })?;
+        let now = now_micros();
+        let canon_of = |c: &DataValue| c.get_str().map(|x| view.canonical(x));
+        for ((norm, name), r) in wanted.iter().zip(res) {
+            let review: Vec<&crate::entity::Candidate> = r
+                .candidates
+                .iter()
+                .filter(|c| matches!(c.band, Some(Band::Auto) | Some(Band::Tentative)))
+                .collect();
+            let (eid, canonical, created) = match (r.outcome, r.entity.as_ref().and_then(canon_of)) {
+                (Outcome::Matched, Some(c)) => {
+                    match view.rows.iter().find(|(e, row)| row.1 == *norm && view.canonical(e) == c) {
+                        Some((e, _)) => (e.clone(), c, false),
+                        None => {
+                            // a new name of a known entity: its own row,
+                            // merged (non-destructively, splittable)
+                            let e = new_id("e");
+                            plan.merges.push(DataValue::List(vec![
+                                s(MEM_ENTITY),
+                                s(&e),
+                                DataValue::Validity(Validity::from((now, true))),
+                                s(&c),
+                                DataValue::from(r.p),
+                                s(&r.decided_by),
+                                s(r.reason.as_deref().unwrap_or("")),
+                            ]));
+                            (e, c, true)
+                        }
+                    }
+                }
+                _ => {
+                    let e = new_id("e");
+                    (e.clone(), e, true)
+                }
+            };
+            if created {
+                plan.rows.push(DataValue::List(vec![
+                    s(ns),
+                    s(&eid),
+                    s(name),
+                    s(norm),
+                    DataValue::Null,
+                    DataValue::from(now),
+                ]));
+                // every other likely match is linked for review, never
+                // merged (no transitive merges); a reused row keeps the
+                // links (and rejections) it already has
+                for c in &review {
+                    if canon_of(&c.entity).as_deref() == Some(canonical.as_str()) {
+                        continue;
+                    }
+                    plan.links.push(DataValue::List(vec![
+                        s(MEM_ENTITY),
+                        s(&eid),
+                        c.entity.clone(),
+                        DataValue::from(c.p.unwrap_or(0.0)),
+                        s(c.band.unwrap_or(Band::None).name()),
+                        s(c.decided_by.as_deref().unwrap_or("")),
+                        s("pending"),
+                        DataValue::from(now),
+                    ]));
+                }
+            }
+            for c in &review {
+                plan.maybe.extend(canon_of(&c.entity));
+            }
+            plan.sure.insert(canonical.clone());
+            plan.out.push(EntityLink {
+                name: name.clone(),
+                eid,
+                canonical,
+                outcome: r.outcome.name().to_string(),
+                created,
+                decided_by: r.decided_by.clone(),
+                p: r.p,
+            });
+        }
+        Ok(plan)
+    }
+
+    /// `(expires, archived)` of the ids that have a `kleos_mem_life` row.
+    fn life_of(&'s self, ns: &str, ids: &[String]) -> Result<BTreeMap<String, (Option<i64>, Option<i64>)>> {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        Ok(self
+            .mem_q(
+                &format!("?[id, expires, archived] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires, archived}}"),
+                vec![("ns", s(ns)), ("ids", str_list(ids))],
+            )?
+            .rows
+            .into_iter()
+            .filter_map(|r| Some((cell_str(&r[0])?, (r[1].get_int(), r[2].get_int()))))
+            .collect())
+    }
+
     /// The read-only half of `remember`: candidates, decisions and the
     /// actions they imply. Nothing is written.
     fn plan_remember(
@@ -1035,27 +1404,74 @@ impl<'s, S: Storage<'s>> Db<S> {
             text,
             vec.clone(),
             opts.k.unwrap_or(DEFAULT_K).max(1),
+            opts.k.unwrap_or(DEFAULT_K).max(1),
             None,
             None,
             None,
             DEFAULT_VECTOR_WEIGHT,
+            false,
+            None,
         )?;
         let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
         let iv = intervals(&self.mem_history(&ns, &ids)?, i64::MAX);
+        let life = self.life_of(ns, &ids)?;
+        let decider = self.pick_decider(opts.decider.as_deref(), &cfg);
+
+        // entities: resolve the statement's names, and read the candidates'
+        let view = if opts.entities.is_empty() {
+            EntityView::default()
+        } else {
+            self.entity_view(ns)?
+        };
+        let ents = self.plan_entities(ns, &opts.entities, decider.as_deref(), &view)?;
+        let mut cand_ents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        if !ents.sure.is_empty() && !ids.is_empty() {
+            for r in self
+                .mem_q(
+                    &format!("?[id, eid] := id in $ids, *{MEM_MENTION}{{ns: $ns, id, eid}}"),
+                    vec![("ns", s(ns)), ("ids", str_list(&ids))],
+                )?
+                .rows
+            {
+                if let (Some(id), Some(e)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    cand_ents.entry(id).or_default().insert(view.canonical(&e));
+                }
+            }
+        }
         let cands: Vec<Cand> = rows
             .iter()
             .filter_map(|r| {
                 let id = cell_str(&r[0])?;
+                let hidden = life
+                    .get(&id)
+                    .is_some_and(|(e, a)| a.is_some() || e.is_some_and(|e| e <= at));
                 Some(Cand {
                     from: iv.get(&id).map(|x| x.0).unwrap_or(0),
+                    ents: cand_ents.remove(&id).unwrap_or_default(),
+                    hidden,
                     id,
                     text: cell_str(&r[2])?,
                 })
             })
             .collect();
 
+        // same-subject gate: when both statements name entities, a
+        // supersede needs a shared one; sharing only a possible match
+        // (review band) caps it at pending
+        let mut gated = vec![false; cands.len()];
+        let mut capped = vec![false; cands.len()];
+        for (i, c) in cands.iter().enumerate() {
+            if ents.sure.is_empty() || c.ents.is_empty() || !c.ents.is_disjoint(&ents.sure) {
+                continue;
+            }
+            if c.ents.is_disjoint(&ents.maybe) {
+                gated[i] = true;
+            } else {
+                capped[i] = true;
+            }
+        }
+
         // decisions
-        let decider = self.pick_decider(opts.decider.as_deref(), &cfg);
         let key = norm_text(text);
         let mut sup: Vec<Option<Decision>> = vec![None; cands.len()];
         let mut dup: Vec<Option<Decision>> = vec![None; cands.len()];
@@ -1072,21 +1488,28 @@ impl<'s, S: Storage<'s>> Db<S> {
                 todo.push(i);
             }
         }
+        // the supersedes question is not asked across subjects
+        let sup_todo: Vec<usize> = todo.iter().copied().filter(|&i| !gated[i]).collect();
         if !todo.is_empty() {
             match &decider {
                 Some(name) => {
-                    let pairs: Vec<(&str, &str)> =
-                        todo.iter().map(|&i| (cands[i].text.as_str(), text)).collect();
-                    let s_ds = decide::decide(name, Template::Supersedes, &pairs)?;
-                    let d_ds = decide::decide(name, Template::Duplicate, &pairs)?;
-                    for ((&i, a), b) in todo.iter().zip(s_ds).zip(d_ds) {
-                        sup[i] = Some(a);
+                    let pairs = |which: &[usize]| -> Vec<(&str, &str)> {
+                        which.iter().map(|&i| (cands[i].text.as_str(), text)).collect()
+                    };
+                    if !sup_todo.is_empty() {
+                        let s_ds = decide::decide(name, Template::Supersedes, &pairs(&sup_todo))?;
+                        for (&i, a) in sup_todo.iter().zip(s_ds) {
+                            sup[i] = Some(a);
+                        }
+                    }
+                    let d_ds = decide::decide(name, Template::Duplicate, &pairs(&todo))?;
+                    for (&i, b) in todo.iter().zip(d_ds) {
                         dup[i] = Some(b);
                     }
                 }
                 None => {
                     // model-free: the value pre-check alone (decide::rules)
-                    for &i in &todo {
+                    for &i in &sup_todo {
                         if let rules::ValueRule::Update(r) = rules::value_rule(&cands[i].text, text) {
                             sup[i] = Some(rule_decision(
                                 Template::Supersedes,
@@ -1105,13 +1528,19 @@ impl<'s, S: Storage<'s>> Db<S> {
             ns: ns.to_string(),
             decider: decider.clone(),
             embedded: vec.is_some(),
+            gated: cands
+                .iter()
+                .zip(&gated)
+                .filter(|(_, g)| **g)
+                .map(|(c, _)| c.id.clone())
+                .collect(),
             ..Default::default()
         };
         let mut supersede = vec![];
         let mut duplicate: Option<(usize, f64)> = None;
         for (i, c) in cands.iter().enumerate() {
-            let s_auto = sup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto));
-            let d_auto = dup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto));
+            let s_auto = sup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto)) && !capped[i];
+            let d_auto = dup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto)) && !c.hidden;
             if d_auto && !s_auto {
                 let p = dup[i].as_ref().unwrap().p;
                 if duplicate.map_or(true, |(_, q)| p > q) {
@@ -1164,6 +1593,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             supersede,
             duplicate,
             audit,
+            ents,
             res,
         })
     }
@@ -1181,6 +1611,11 @@ impl<'s, S: Storage<'s>> Db<S> {
         if text.is_empty() {
             bail!("`remember` needs a non-empty text");
         }
+        if let Some(x) = opts.importance {
+            if !(0.0..=1.0).contains(&x) {
+                bail!("`remember` option importance must be in [0, 1], got {x}");
+            }
+        }
         let cfg = self.mem_ready(opts.embedder.as_deref())?;
         let ns = ns_of(&opts.ns);
         let stmt = new_id("m");
@@ -1194,7 +1629,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         // also the later one in valid time.
         let gate = ns_gate(&ns);
         let mut attempt = 0;
-        let (mut res, mem_id, duplicate) = loop {
+        let (mut res, duplicate) = loop {
             let locked = attempt >= OPTIMISTIC_ATTEMPTS;
             let held = if locked { Some(gate.commit()) } else { None };
             let local = gate.seq();
@@ -1218,6 +1653,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 supersede,
                 duplicate,
                 audit,
+                ents,
                 mut res,
             } = plan;
 
@@ -1246,6 +1682,13 @@ impl<'s, S: Storage<'s>> Db<S> {
                     "importance",
                     opts.importance.map(DataValue::from).unwrap_or(DataValue::Null),
                 ));
+                let expires = opts.expires.or(opts.ttl.map(|t| at.saturating_add(t)));
+                if let Some(e) = expires {
+                    script.push_str(&format!(
+                        "{{?[ns, id, expires, archived] <- [[$ns, $id, $expires, null]] :put {MEM_LIFE} {{ns, id => expires, archived}}}}"
+                    ));
+                    p.push(("expires", DataValue::from(e)));
+                }
                 if let (Some(v), Some(_)) = (&vec, cfg.dim) {
                     script.push_str(&format!(
                         "{{?[ns, id, current, vec] <- [[$ns, $id, true, $vec]] :put {MEM_VEC} {{ns, id => current, vec}}}}"
@@ -1327,6 +1770,40 @@ impl<'s, S: Storage<'s>> Db<S> {
                 ));
                 p.push(("audit", DataValue::List(rows)));
             }
+            // entities: new rows, merges and review links, and the mentions
+            if !ents.rows.is_empty() {
+                script.push_str(&format!(
+                    "{{?[ns, eid, name, norm, kind, created] <- $ents :put {MEM_ENTITY} {{ns, eid => name, norm, kind, created}}}}"
+                ));
+                p.push(("ents", DataValue::List(ents.rows.clone())));
+            }
+            if !ents.merges.is_empty() {
+                script.push_str(&format!(
+                    "{{?[relation, from, vt, into, p, decided_by, reason] <- $merges \
+                      :put {ENTITY_MERGES} {{relation, from, vt => into, p, decided_by, reason}}}}"
+                ));
+                p.push(("merges", DataValue::List(ents.merges.clone())));
+            }
+            if !ents.links.is_empty() {
+                script.push_str(&format!(
+                    "{{?[relation, a, b, p, band, decided_by, status, at] <- $elinks \
+                      :put {ENTITY_LINKS} {{relation, a, b => p, band, decided_by, status, at}}}}"
+                ));
+                p.push(("elinks", DataValue::List(ents.links.clone())));
+            }
+            if !ents.out.is_empty() {
+                let mentions = ents
+                    .out
+                    .iter()
+                    .map(|e| DataValue::List(vec![s(&ns), s(&mem_id), s(&e.eid)]))
+                    .collect();
+                script.push_str(&format!(
+                    "{{?[ns, id, eid] <- $mentions :put {MEM_MENTION} {{ns, id, eid}}}}"
+                ));
+                p.push(("mentions", DataValue::List(mentions)));
+                res.entities = ents.out.iter().map(|e| e.eid.clone()).collect();
+                res.entity_links = ents.out.clone();
+            }
             // the version this plan was made against must still hold
             script.insert_str(
                 0,
@@ -1335,7 +1812,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             script.push_str(&bump_ns_head());
             p.push(("seen", DataValue::from(seen)));
             match self.mem_q(&script, p) {
-                Ok(_) => break (res, mem_id, duplicate),
+                Ok(_) => break (res, duplicate),
                 Err(e) => {
                     drop(commit);
                     let moved = self.ns_head(&ns).map_or(false, |h| h != seen);
@@ -1352,25 +1829,50 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         };
 
-        if !opts.entities.is_empty() {
-            res.entities = link_entities(self, &ns, &mem_id, text, &opts.entities)?
-                .into_iter()
-                .map(|e| e.eid)
-                .collect();
-        }
         res.action = if duplicate.is_some() { "duplicate" } else { "added" }.to_string();
         res.id = if duplicate.is_some() { None } else { Some(stmt) };
         Ok(res)
     }
 
     /// Hybrid recall (vector + FTS, `WeightedFusion`) over the memories valid
-    /// now, or at `as_of`. Filters: namespace, kind, entity.
+    /// now, or at `as_of`, leaving out the archive tier and expired memories
+    /// unless asked. Filters: namespace, kind, entity (its whole cluster).
+    /// Ranked by the blend of relevance with recency, importance and access
+    /// count (docs/specs/memory-api.md, "Ranking"), or by relevance alone
+    /// with `blend: false`. The returned memories count as accessed.
     pub fn recall(&'s self, query: &str, opts: RecallOpts) -> Result<Vec<RecallHit>> {
         let cfg = match self.mem_config()? {
             Some(c) => c,
             None => return Ok(vec![]),
         };
         let ns = ns_of(&opts.ns);
+        let w = opts.vector_weight.unwrap_or(DEFAULT_VECTOR_WEIGHT);
+        if !(0.0..=1.0).contains(&w) {
+            bail!("`recall` option vector_weight must be in [0, 1], got {w}");
+        }
+        let blend = opts.blend.unwrap_or(true);
+        let wr = opts.recency_weight.unwrap_or(DEFAULT_RECENCY_WEIGHT);
+        let half_life = opts.half_life_days.unwrap_or(DEFAULT_HALF_LIFE_DAYS);
+        let wi = opts.importance_weight.unwrap_or(DEFAULT_IMPORTANCE_WEIGHT);
+        let wa = opts.access_weight.unwrap_or(DEFAULT_ACCESS_WEIGHT);
+        for (name, x) in [("recency_weight", wr), ("importance_weight", wi), ("access_weight", wa)] {
+            if !x.is_finite() || x < 0.0 {
+                bail!("`recall` option {name} must be a non-negative number, got {x}");
+            }
+        }
+        if !half_life.is_finite() || half_life <= 0.0 {
+            bail!("`recall` option half_life_days must be positive, got {half_life}");
+        }
+        let eids = match &opts.entity {
+            Some(e) => {
+                let eids = self.entity_view(&ns)?.cluster_of_name(e);
+                if eids.is_empty() {
+                    return Ok(vec![]);
+                }
+                Some(eids)
+            }
+            None => None,
+        };
         let qe = cfg.embedder.as_ref().map(|e| {
             let q = format!("{e}_query");
             if embed::is_embedder_enabled(&q) {
@@ -1380,43 +1882,60 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         });
         let qvec = self.embed_if_on(qe.as_deref(), query)?;
-        let w = opts.vector_weight.unwrap_or(DEFAULT_VECTOR_WEIGHT);
-        if !(0.0..=1.0).contains(&w) {
-            bail!("`recall` option vector_weight must be in [0, 1], got {w}");
-        }
         let k = opts.k.unwrap_or(10).max(1);
+        let read_at = opts.as_of.unwrap_or_else(now_micros);
+        let fetch = if opts.hide_pending { k * 2 } else { k };
+        // the blend re-ranks a wider window of the most relevant (the index
+        // legs fetch as for k, so the searches cost the same)
+        let window = if blend { fetch.max(2 * k + 10) } else { fetch };
         let rows = self.mem_search(
             &cfg,
             &ns,
             query,
             qvec,
-            if opts.hide_pending { k * 2 } else { k },
+            fetch,
+            window,
             opts.as_of,
             opts.kind.as_deref(),
-            opts.entity.as_deref(),
+            eids.as_deref(),
             w,
+            !opts.include_archived,
+            (!opts.include_expired).then_some(read_at),
         )?;
         let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
-        let read_at = opts.as_of.unwrap_or_else(now_micros);
         let iv = intervals(&self.mem_history(&ns, &ids)?, read_at);
         let mut pending: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut access: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+        let mut life: BTreeMap<String, (Option<i64>, Option<i64>)> = BTreeMap::new();
         if !ids.is_empty() {
+            // pending supersedes, access counts and the tier, in one read
             for r in self
                 .mem_q(
                     &format!(
-                        "?[cand, new] := *{MEM_DECISION}{{ns: $ns, new, cand, template: 'supersedes', status: 'pending'}}, \
-                           cand in $ids, *{MEM}{{ns: $ns, id: new @ $at}}"
+                        "?[tag, id, a, b] := *{MEM_DECISION}{{ns: $ns, new, cand: id, template: 'supersedes', status: 'pending'}}, \
+                           id in $ids, *{MEM}{{ns: $ns, id: new @ $at}}, tag = 'p', a = new, b = null\n\
+                         ?[tag, id, a, b] := id in $ids, *{MEM_ACCESS}{{ns: $ns, id, n: a, last: b}}, tag = 'a'\n\
+                         ?[tag, id, a, b] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires: a, archived: b}}, tag = 'l'"
                     ),
                     vec![("ns", s(&ns)), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
                 )?
                 .rows
             {
-                if let (Some(c), Some(n)) = (cell_str(&r[0]), cell_str(&r[1])) {
-                    pending.entry(c).or_default().push(n);
+                let Some(id) = cell_str(&r[1]) else { continue };
+                match r[0].get_str() {
+                    Some("p") => pending.entry(id).or_default().extend(cell_str(&r[2])),
+                    Some("a") => {
+                        access.insert(id, (r[2].get_int().unwrap_or(0), r[3].get_int().unwrap_or(0)));
+                    }
+                    Some("l") => {
+                        life.insert(id, (r[2].get_int(), r[3].get_int()));
+                    }
+                    _ => {}
                 }
             }
         }
-        Ok(rows
+        let half_life_us = half_life * MICROS_PER_DAY;
+        let mut hits: Vec<RecallHit> = rows
             .into_iter()
             .filter_map(|r| {
                 let id = cell_str(&r[0])?;
@@ -1425,21 +1944,178 @@ impl<'s, S: Storage<'s>> Db<S> {
                     return None;
                 }
                 let (from, to) = iv.get(&id).copied().unwrap_or((0, None));
+                let (mut n, mut last) = access.get(&id).copied().map_or((0, None), |(n, l)| (n, Some(l)));
+                if let Some((bn, bl)) = self.mem_access.get(&ns, &id) {
+                    n += bn;
+                    last = Some(last.map_or(bl, |l| l.max(bl)));
+                }
+                let (expires, archived) = life.get(&id).copied().unwrap_or((None, None));
+                let relevance = r[1].get_float().unwrap_or(0.0);
+                let importance = r[6].get_float();
+                let recency = 0.5f64.powf((read_at - from).max(0) as f64 / half_life_us);
+                let acc = ((1.0 + n as f64).ln() / (1.0 + ACCESS_SATURATION).ln()).min(1.0);
+                let score = if blend {
+                    relevance + wr * recency + wi * (importance.unwrap_or(0.5) - 0.5) + wa * acc
+                } else {
+                    relevance
+                };
                 Some(RecallHit {
                     pending_superseded_by: by,
-                    score: r[1].get_float().unwrap_or(0.0),
+                    score,
+                    relevance,
+                    recency,
+                    access_count: n,
+                    last_access: last,
+                    expires,
+                    archived: archived.is_some(),
                     text: cell_str(&r[2])?,
                     kind: cell_str(&r[3]).unwrap_or_default(),
                     source: cell_str(&r[4]),
                     created: r[5].get_int().unwrap_or(0),
-                    importance: r[6].get_float(),
+                    importance,
                     valid_from: from,
                     valid_to: to,
                     id,
                 })
             })
-            .take(k)
-            .collect())
+            .collect();
+        if blend {
+            // stable: equal scores keep the relevance order
+            hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        hits.truncate(k);
+        if opts.record_access.unwrap_or(true) && !hits.is_empty() {
+            let got: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+            if self.mem_access.add(&ns, &got, now_micros()) {
+                // best effort: a failed flush keeps the counts buffered
+                let _ = self.memory_flush();
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Write the buffered access counts (`kleos_mem_access`) in one small
+    /// transaction of their own. `recall` calls it every second or 64
+    /// memories; call it before closing a database to keep the last counts.
+    /// Returns the number of memories written.
+    pub fn memory_flush(&'s self) -> Result<usize> {
+        let pending = self.mem_access.take();
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let rows: Vec<DataValue> = pending
+            .iter()
+            .map(|((ns, id), (n, l))| DataValue::List(vec![s(ns), s(id), DataValue::from(*n), DataValue::from(*l)]))
+            .collect();
+        let n = rows.len();
+        // only memories that still exist (an erase may have raced the buffer)
+        let script = format!(
+            "d[ns, id, c, l] <- $rows\n\
+             live[ns, id, c, l] := d[ns, id, c, l], *{MEM}{{ns, id}}\n\
+             ?[ns, id, n, last] := live[ns, id, c, l], *{MEM_ACCESS}{{ns, id, n: n0, last: l0}}, n = n0 + c, last = max(l0, l)\n\
+             ?[ns, id, n, last] := live[ns, id, c, l], not *{MEM_ACCESS}{{ns, id}}, n = c, last = l\n\
+             :put {MEM_ACCESS} {{ns, id => n, last}}"
+        );
+        match self.mem_q(&script, vec![("rows", DataValue::List(rows))]) {
+            Ok(_) => Ok(n),
+            Err(e) => {
+                self.mem_access.restore(pending);
+                Err(e)
+            }
+        }
+    }
+
+    /// Change scoring metadata of memories: importance, expiry, archive
+    /// state. The text and validity are untouched; importance is rewritten
+    /// in place on the memory's current row (it is not versioned). Commits
+    /// under the namespace version, like `forget`, since the archive and
+    /// expiry change which memories `remember` may treat as duplicates.
+    pub fn memory_set(&'s self, opts: SetOpts) -> Result<JsonValue> {
+        if self.mem_config()?.is_none() {
+            bail!("`memory set`: there is no memory store yet");
+        }
+        let ns = ns_of(&opts.ns);
+        let mut ids = opts.ids.clone();
+        ids.extend(opts.id.clone());
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            bail!("`memory set` needs an id or ids");
+        }
+        if let Some(x) = opts.importance {
+            if !(0.0..=1.0).contains(&x) {
+                bail!("`memory set` importance must be in [0, 1], got {x}");
+            }
+        }
+        if opts.no_ttl && (opts.ttl.is_some() || opts.expires.is_some()) {
+            bail!("`memory set` takes no_ttl or ttl/expires, not both");
+        }
+        let gate = ns_gate(&ns);
+        let _commit = gate.commit();
+        let now = now_micros();
+        // current memories only, with the valid time of their current row
+        let hist = self.mem_history(&ns, &ids)?;
+        let iv = intervals(&hist, now);
+        let found: Vec<String> = iv.keys().cloned().collect();
+        if found.is_empty() {
+            return Ok(serde_json::json!({"ns": ns, "ids": found}));
+        }
+        let mut script = String::new();
+        let mut p = vec![("ns", s(&ns)), ("ids", str_list(&found))];
+        if let Some(x) = opts.importance {
+            // the latest assertion at or before now holds the current values
+            let rows: Vec<DataValue> = found
+                .iter()
+                .filter_map(|id| {
+                    let ts = hist
+                        .iter()
+                        .filter(|(i, t, a)| i == id && *a && *t <= now)
+                        .map(|(_, t, _)| *t)
+                        .max()?;
+                    Some(DataValue::List(vec![s(id), DataValue::from(ts)]))
+                })
+                .collect();
+            script.push_str(&format!(
+                "{{cur[id, ts] <- $cur\n\
+                  ?[ns, id, vt, text, kind, source, created, importance] := cur[id, ts], \
+                    *{MEM}{{ns, id, vt, text, kind, source, created}}, ns = $ns, to_int(vt) == ts, to_bool(vt), importance = $imp \
+                  :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
+            ));
+            p.push(("cur", DataValue::List(rows)));
+            p.push(("imp", DataValue::from(x)));
+        }
+        if opts.ttl.is_some() || opts.expires.is_some() || opts.no_ttl || opts.archived.is_some() {
+            let old = self.life_of(&ns, &found)?;
+            let rows: Vec<DataValue> = found
+                .iter()
+                .map(|id| {
+                    let (mut e, mut a) = old.get(id).copied().unwrap_or((None, None));
+                    if opts.no_ttl {
+                        e = None;
+                    }
+                    if let Some(x) = opts.expires.or(opts.ttl.map(|t| now.saturating_add(t))) {
+                        e = Some(x);
+                    }
+                    match opts.archived {
+                        Some(true) => a = a.or(Some(now)),
+                        Some(false) => a = None,
+                        None => {}
+                    }
+                    let opt_i = |v: Option<i64>| v.map(DataValue::from).unwrap_or(DataValue::Null);
+                    DataValue::List(vec![s(&ns), s(id), opt_i(e), opt_i(a)])
+                })
+                .collect();
+            script.push_str(&format!(
+                "{{?[ns, id, expires, archived] <- $life :put {MEM_LIFE} {{ns, id => expires, archived}}}}"
+            ));
+            p.push(("life", DataValue::List(rows)));
+        }
+        if script.is_empty() {
+            bail!("`memory set` needs importance, ttl, expires, no_ttl or archived");
+        }
+        script.push_str(&bump_ns_head());
+        self.mem_q(&script, p)?;
+        Ok(serde_json::json!({"ns": ns, "ids": found}))
     }
 
     /// Forget memories by id or filter. `retract` (default) ends their
@@ -1449,8 +2125,8 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// rows, and entities left with no mention.
     pub fn forget(&'s self, opts: ForgetOpts) -> Result<ForgetResult> {
         let mode = opts.mode.clone().unwrap_or_else(|| "retract".to_string());
-        if mode != "retract" && mode != "erase" {
-            bail!("`forget` mode must be 'retract' or 'erase', got '{mode}'");
+        if !["retract", "erase", "archive"].contains(&mode.as_str()) {
+            bail!("`forget` mode must be 'retract', 'erase' or 'archive', got '{mode}'");
         }
         let cfg = match self.mem_config()? {
             Some(c) => c,
@@ -1468,9 +2144,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         let _commit = gate.commit();
         let mut ids: Vec<String> = opts.ids.clone();
         ids.extend(opts.id.clone());
-        let by_filter = opts.kind.is_some() || opts.entity.is_some();
+        let by_filter = opts.kind.is_some() || opts.entity.is_some() || opts.expired;
         if ids.is_empty() && !by_filter && !opts.all {
-            bail!("`forget` needs an id, ids, a kind or entity filter, or all: true");
+            bail!("`forget` needs an id, ids, a kind, entity or expired filter, or all: true");
         }
         if !ids.is_empty() && (by_filter || opts.all) {
             bail!("`forget` takes ids or a filter, not both");
@@ -1484,10 +2160,14 @@ impl<'s, S: Storage<'s>> Db<S> {
                 p.push(("kind", s(k)));
             }
             if let Some(e) = &opts.entity {
+                body.push_str(&format!(", *{MEM_MENTION}{{ns: $ns, id, eid}}, is_in(eid, $eids)"));
+                p.push(("eids", str_list(&self.entity_view(&ns)?.cluster_of_name(e))));
+            }
+            if opts.expired {
                 body.push_str(&format!(
-                    ", *{MEM_ENTITY}:by_norm{{ns: $ns, norm: $enorm, eid}}, *{MEM_MENTION}{{ns: $ns, id, eid}}"
+                    ", *{MEM_LIFE}{{ns: $ns, id, expires: e, archived: a}}, !is_null(e), e <= $now, is_null(a)"
                 ));
-                p.push(("enorm", s(&norm_name(e))));
+                p.push(("now", DataValue::from(opts.at.unwrap_or_else(now_micros))));
             }
             ids = self
                 .mem_q(&format!("?[id] := {body}"), p)?
@@ -1502,6 +2182,41 @@ impl<'s, S: Storage<'s>> Db<S> {
             return Ok(ForgetResult { mode, ids });
         }
         let has_vec = cfg.dim.is_some();
+        if mode == "archive" {
+            // the archive tier: still valid, hidden from recall by default
+            let at = opts.at.unwrap_or_else(now_micros);
+            let cur: Vec<String> = self
+                .mem_q(
+                    &format!("?[id] := *{MEM}{{ns: $ns, id @ 'NOW'}}, id in $ids"),
+                    vec![("ns", s(&ns)), ("ids", str_list(&ids))],
+                )?
+                .rows
+                .into_iter()
+                .filter_map(|r| cell_str(&r[0]))
+                .collect();
+            if cur.is_empty() {
+                return Ok(ForgetResult { mode, ids: cur });
+            }
+            let old = self.life_of(&ns, &cur)?;
+            let rows: Vec<DataValue> = cur
+                .iter()
+                .map(|id| {
+                    let (e, a) = old.get(id).copied().unwrap_or((None, None));
+                    DataValue::List(vec![
+                        s(&ns),
+                        s(id),
+                        e.map(DataValue::from).unwrap_or(DataValue::Null),
+                        DataValue::from(a.unwrap_or(at)),
+                    ])
+                })
+                .collect();
+            let mut script = format!(
+                "{{?[ns, id, expires, archived] <- $life :put {MEM_LIFE} {{ns, id => expires, archived}}}}"
+            );
+            script.push_str(&bump_ns_head());
+            self.mem_q(&script, vec![("ns", s(&ns)), ("life", DataValue::List(rows))])?;
+            return Ok(ForgetResult { mode, ids: cur });
+        }
         if mode == "retract" {
             let at = opts.at.unwrap_or_else(now_micros);
             let cur: Vec<String> = self
@@ -1582,13 +2297,29 @@ impl<'s, S: Storage<'s>> Db<S> {
              {{gone[x] := x in $ids\n gone[x] := x in $eids, not *{MEM_ENTITY}{{ns: $ns, eid: x}}\n\
                ?[ns, src, rel, dst] := *{MEM_LINK}{{ns, src, rel, dst}}, ns = $ns, gone[src]\n\
                ?[ns, src, rel, dst] := *{MEM_LINK}{{ns, src, rel, dst}}, ns = $ns, gone[dst] \
-               :rm {MEM_LINK} {{ns, src, rel, dst}}}}"
+               :rm {MEM_LINK} {{ns, src, rel, dst}}}}\
+             {{?[ns, id] := *{MEM_ACCESS}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_ACCESS} {{ns, id}}}}\
+             {{?[ns, id] := *{MEM_LIFE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_LIFE} {{ns, id}}}}\
+             {{gone[x] := x in $eids, not *{MEM_ENTITY}{{ns: $ns, eid: x}}\n\
+               ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[from]\n\
+               ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[into] \
+               :rm {ENTITY_MERGES} {{relation, from, vt}}}}\
+             {{gone[x] := x in $eids, not *{MEM_ENTITY}{{ns: $ns, eid: x}}\n\
+               ?[relation, a, b] := *{ENTITY_LINKS}{{relation, a, b}}, relation = $erel, gone[a]\n\
+               ?[relation, a, b] := *{ENTITY_LINKS}{{relation, a, b}}, relation = $erel, gone[b] \
+               :rm {ENTITY_LINKS} {{relation, a, b}}}}"
         ));
         script.push_str(&bump_ns_head());
         self.mem_q(
             &script,
-            vec![("ns", s(&ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))],
+            vec![
+                ("ns", s(&ns)),
+                ("ids", str_list(&exist)),
+                ("eids", str_list(&eids)),
+                ("erel", s(MEM_ENTITY)),
+            ],
         )?;
+        self.mem_access.forget(&ns, &exist);
         Ok(ForgetResult { mode, ids: exist })
     }
 
@@ -1690,10 +2421,16 @@ impl<'s, S: Storage<'s>> Db<S> {
             ),
             vec![("ns", s(&ns))],
         )?;
+        // grouped by canonical entity: merged names count as one
+        let view = self.entity_view(&ns)?;
         let mut groups: BTreeMap<String, Vec<(i64, String, String)>> = BTreeMap::new();
         for r in shared.rows {
             if let (Some(e), Some(id), Some(t)) = (cell_str(&r[0]), cell_str(&r[2]), cell_str(&r[3])) {
-                groups.entry(e).or_default().push((r[1].get_int().unwrap_or(0), id, t));
+                let g = groups.entry(view.canonical(&e)).or_default();
+                let item = (r[1].get_int().unwrap_or(0), id, t);
+                if !g.contains(&item) {
+                    g.push(item);
+                }
             }
         }
         let mut seen: BTreeSet<(String, String)> = res
@@ -1805,10 +2542,17 @@ impl<'s, S: Storage<'s>> Db<S> {
                 serde_json::to_value(self.recall(&q, from_args(op, args)?)?).into_diagnostic()?
             }
             "forget" => serde_json::to_value(self.forget(from_args(op, args)?)?).into_diagnostic()?,
+            "set" => self.memory_set(from_args(op, args)?)?,
+            "flush" => {
+                if let Some(k) = args.keys().next() {
+                    bail!("memory flush takes no options, got '{k}'");
+                }
+                serde_json::json!({ "flushed": self.memory_flush()? })
+            }
             "reflect" => serde_json::to_value(self.reflect(from_args(op, args)?)?).into_diagnostic()?,
             "link" => self.link(from_args(op, args)?)?,
             other => bail!(
-                "unknown memory op '{other}': expected init, remember, recall, forget, reflect or link"
+                "unknown memory op '{other}': expected init, remember, recall, forget, reflect, link, set or flush"
             ),
         };
         Ok(out)
@@ -1843,7 +2587,7 @@ pub(crate) fn memory_rows(op: &str, v: JsonValue) -> NamedRows {
         ("recall", JsonValue::Array(hits)) => {
             let cols: Vec<String> = [
                 "id", "text", "score", "kind", "valid_from", "valid_to", "created", "source", "importance",
-                "pending_superseded_by",
+                "pending_superseded_by", "relevance", "recency", "access_count", "last_access", "expires", "archived",
             ]
             .iter()
             .map(|s| s.to_string())

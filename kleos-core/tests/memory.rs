@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use kleos::decide::{self, Calibration, Fitted};
 use kleos::embed::{self, Embedder};
-use kleos::memory::{ForgetOpts, InitOpts, LinkOpts, RecallOpts, ReflectOpts, RememberOpts};
+use kleos::memory::{ForgetOpts, InitOpts, LinkOpts, RecallOpts, RecallHit, ReflectOpts, RememberOpts, SetOpts};
 use kleos::{DataValue, DbInstance, DecideAnswer, DecideRequest, Decider, Family, ScriptMutability, Template};
 
 static REGISTRY: RwLock<()> = RwLock::new(());
@@ -521,6 +521,285 @@ fn no_ml_degrades_to_add_only_fts_and_rules() {
     assert!(r.changes.iter().any(|c| c.change == "ended"));
 }
 
+// ------------------------------------------------------- entities (E3 hook)
+
+fn with_ents(ns_: &str, t: i64, ents: &[&str]) -> RememberOpts {
+    RememberOpts {
+        ns: ns(ns_),
+        at: Some(t),
+        entities: ents.iter().map(|e| e.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+const SISTER: &str = "My sister Anna lives in Munich.";
+
+#[test]
+fn entities_gate_supersedes_to_shared_subjects() {
+    // the fake decider says the sister's city "supersedes" the user's: only
+    // the entity gate stands between them
+    let m = Models::new("gate", vec![(BERLIN, SISTER), (BERLIN, LISBON)], vec![]);
+    let db = m.db();
+    let berlin = db.remember(BERLIN, with_ents("u", d(1), &["user", "Berlin"])).unwrap();
+    assert_eq!(berlin.entity_links.iter().map(|e| e.outcome.as_str()).collect::<Vec<_>>(), ["new", "new"]);
+    let berlin = berlin.id.unwrap();
+
+    let s = db.remember(SISTER, with_ents("u", d(2), &["Anna", "Munich"])).unwrap();
+    assert!(s.superseded.is_empty() && s.tentative.is_empty(), "{s:?}");
+    assert_eq!(s.gated, vec![berlin.clone()], "{s:?}");
+    // the question is not even asked across subjects
+    assert!(!s.decisions.iter().any(|x| x.template == "supersedes"), "{s:?}");
+    assert_eq!(recall(&db, "where does everyone live", "u", None).len(), 2);
+
+    // the same subject ("user", resolved to the existing entity) supersedes
+    let l = db.remember(LISBON, with_ents("u", d(9), &["User", "Lisbon"])).unwrap();
+    assert_eq!(l.superseded, vec![berlin.clone()], "{l:?}");
+    let user = &l.entity_links[0];
+    assert_eq!((user.outcome.as_str(), user.created), ("match", false), "{l:?}");
+    assert!(user.decided_by.starts_with("rule|exact"), "{user:?}");
+    // one "user" entity in all
+    assert_eq!(count(&db, "?[e] := *kleos_mem_entity{ns: 'u', eid: e, norm: 'user'}"), 1);
+
+    // without entities on the new statement: behaves as before (no gate).
+    // (one registry read guard at a time: a waiting writer would deadlock)
+    drop(db);
+    drop(m);
+    let m2 = Models::new("gate2", vec![(BERLIN, SISTER)], vec![]);
+    let db2 = m2.db();
+    let b2 = db2.remember(BERLIN, with_ents("u", d(1), &["user"])).unwrap().id.unwrap();
+    let s2 = db2.remember(SISTER, at("u", d(2))).unwrap();
+    assert_eq!(s2.superseded, vec![b2], "{s2:?}");
+}
+
+#[test]
+fn entities_resolve_merge_review_and_split() {
+    // rules only (an unknown decider): exact names match by rule, a new
+    // surface form of the same name is merged, initials are only reviewed
+    let m = Models::new("eres", vec![], vec![]);
+    let db = m.db();
+    let rules = |ns_: &str, t: i64, ents: &[&str]| RememberOpts { decider: Some("none".into()), ..with_ents(ns_, t, ents) };
+    const RENT1: &str = "My rent is $1,800 per month.";
+    const RENT2: &str = "My rent is $2,100 per month.";
+    const RENT3: &str = "My rent is $2,400 per month.";
+    let a = db.remember(RENT1, rules("u", d(1), &["Alice Smith"])).unwrap();
+    let alice = a.entities[0].clone();
+
+    // "A. Smith" may be Alice Smith (initial rule, tentative): a new entity
+    // with a review link, and the value-rule supersede is capped at pending
+    let b = db.remember(RENT2, rules("u", d(2), &["A. Smith"])).unwrap();
+    assert_eq!(b.entity_links[0].outcome, "possible", "{b:?}");
+    assert_ne!(b.entities[0], alice);
+    assert!(b.superseded.is_empty(), "{b:?}");
+    assert_eq!(b.tentative.len(), 1, "{b:?}");
+    assert_eq!(b.tentative[0].candidate, a.id.clone().unwrap());
+    let pend = db.entity_pending("kleos_mem_entity").unwrap();
+    assert_eq!(pend.rows.len(), 1, "{pend:?}");
+    assert_eq!(pend.rows[0][1], DataValue::from(alice.as_str()));
+
+    // "Dr. Alice Smith" is Alice Smith by rule (honorific dropped): its own
+    // row, merged into hers, and the supersede acts
+    let c = db.remember(RENT3, rules("u", d(3), &["Dr. Alice Smith"])).unwrap();
+    let link = &c.entity_links[0];
+    assert_eq!((link.outcome.as_str(), link.created, link.canonical.as_str()), ("match", true, alice.as_str()), "{c:?}");
+    assert_eq!(c.superseded, vec![a.id.clone().unwrap()], "{c:?}");
+    assert_eq!(db.canonical_entity("kleos_mem_entity", &DataValue::from(link.eid.as_str())).unwrap(), DataValue::from(alice.as_str()));
+    // the entity filter follows the merge
+    let by = |e: &str| -> Vec<String> {
+        db.recall("rent", RecallOpts { ns: ns("u"), entity: Some(e.into()), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .map(|h| h.text)
+            .collect()
+    };
+    assert_eq!(by("Alice Smith"), vec![RENT3.to_string()]);
+    // non-destructive: a split restores two entities
+    assert_eq!(
+        db.split_entity("kleos_mem_entity", &DataValue::from(link.eid.as_str())).unwrap(),
+        Some(DataValue::from(alice.as_str()))
+    );
+    assert!(by("Alice Smith").is_empty());
+    assert_eq!(by("Dr. Alice Smith"), vec![RENT3.to_string()]);
+
+    // erase removes the entities, their merges and links with the memories
+    let ids = vec![a.id.unwrap(), b.id.unwrap(), c.id.clone().unwrap()];
+    db.forget(ForgetOpts { ns: ns("u"), ids, mode: Some("erase".into()), ..Default::default() }).unwrap();
+    assert_eq!(count(&db, "?[e] := *kleos_mem_entity{ns: 'u', eid: e}"), 0);
+    assert_eq!(count(&db, "?[f, vt] := *kleos_entity_merge{relation: 'kleos_mem_entity', from: f, vt}"), 0);
+    assert_eq!(count(&db, "?[a, b] := *kleos_entity_link{relation: 'kleos_mem_entity', a, b}"), 0);
+}
+
+// ------------------------------------------------------- scoring (E4, C6)
+
+fn hits(db: &DbInstance, q: &str, opts: RecallOpts) -> Vec<RecallHit> {
+    db.recall(q, RecallOpts { ns: ns("s"), record_access: Some(false), ..opts }).unwrap()
+}
+
+fn texts(h: &[RecallHit]) -> Vec<&str> {
+    h.iter().map(|x| x.text.as_str()).collect()
+}
+
+const STRONG: &str = "The garage door code is 4417, garage door.";
+const WEAK: &str = "Door code for the shed.";
+
+#[test]
+fn recency_and_importance_rank_and_blend_off_is_relevance() {
+    let m = Models::new("rank", vec![], vec![]);
+    let db = m.db();
+    let now = kleos_now();
+    let strong = db.remember(STRONG, at("s", now - 600 * DAY)).unwrap().id.unwrap();
+    let weak = db.remember(WEAK, at("s", now - DAY)).unwrap().id.unwrap();
+    let q = "garage door code";
+    // relevance alone: the stronger text first, score = relevance
+    let off = hits(&db, q, RecallOpts { blend: Some(false), ..Default::default() });
+    assert_eq!(texts(&off), [STRONG, WEAK]);
+    assert!(off.iter().all(|h| h.score == h.relevance), "{off:?}");
+    // the recency signal halves every half-life
+    let r: Vec<f64> = off.iter().map(|h| h.recency).collect();
+    assert!((r[1] - 0.5f64.powf(1.0 / 90.0)).abs() < 1e-3 && (r[0] - 0.5f64.powf(600.0 / 90.0)).abs() < 1e-4, "{r:?}");
+    // a heavy recency weight puts the fresh memory first; default weights
+    // do not override a clear relevance gap
+    let rec = hits(&db, q, RecallOpts { recency_weight: Some(5.0), ..Default::default() });
+    assert_eq!(texts(&rec), [WEAK, STRONG]);
+    assert_eq!(texts(&hits(&db, q, RecallOpts::default())), [STRONG, WEAK]);
+    // a short half-life makes both old: relevance decides again
+    let short = hits(&db, q, RecallOpts { recency_weight: Some(5.0), half_life_days: Some(0.01), ..Default::default() });
+    assert_eq!(texts(&short), [STRONG, WEAK]);
+
+    // importance: set later with `set`, used by the blend, ignored without
+    db.memory_set(SetOpts { ns: ns("s"), id: Some(weak.clone()), importance: Some(1.0), ..Default::default() })
+        .unwrap();
+    db.memory_set(SetOpts { ns: ns("s"), id: Some(strong.clone()), importance: Some(0.0), ..Default::default() })
+        .unwrap();
+    let imp = hits(&db, q, RecallOpts { importance_weight: Some(5.0), recency_weight: Some(0.0), ..Default::default() });
+    assert_eq!(texts(&imp), [WEAK, STRONG]);
+    assert_eq!(imp[0].importance, Some(1.0));
+    let off2 = hits(&db, q, RecallOpts { blend: Some(false), ..Default::default() });
+    assert_eq!(texts(&off2), [STRONG, WEAK]);
+    assert_eq!(off2.iter().map(|h| h.score).collect::<Vec<_>>(), off.iter().map(|h| h.score).collect::<Vec<_>>());
+    // importance is metadata: no new version, validity unchanged
+    assert_eq!(count(&db, "?[id, vt] := *kleos_mem{ns: 's', id, vt}"), 2);
+    assert_eq!(off2[1].valid_from, now - DAY);
+    assert!(db.memory_set(SetOpts { ns: ns("s"), id: Some(weak), importance: Some(2.0), ..Default::default() }).is_err());
+    // the remember option and the `::memory set` op
+    let c = db
+        .remember("A note about the boat.", RememberOpts { ns: ns("s"), importance: Some(0.9), ..Default::default() })
+        .unwrap()
+        .id
+        .unwrap();
+    db.run_script(&format!("::memory set '{c}' {{ns: 's', importance: 0.3}}"), Default::default(), ScriptMutability::Mutable)
+        .unwrap();
+    assert_eq!(hits(&db, "boat", RecallOpts::default())[0].importance, Some(0.3));
+}
+
+fn kleos_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64
+}
+
+#[test]
+fn access_counts_are_buffered_flushed_and_ranked() {
+    let m = Models::new("acc", vec![], vec![]);
+    let db = m.db();
+    let id = db.remember(STRONG, at("s", d(1))).unwrap().id.unwrap();
+    let rec = |db: &DbInstance| db.recall("garage", RecallOpts { ns: ns("s"), ..Default::default() }).unwrap();
+    assert_eq!(rec(&db)[0].access_count, 0);
+    rec(&db);
+    rec(&db);
+    // counted, flushed or not (the first recall's flush is due at once)
+    let h = rec(&db);
+    assert_eq!(h[0].access_count, 3, "{h:?}");
+    assert!(h[0].last_access.is_some());
+    db.memory_flush().unwrap();
+    assert_eq!(
+        db.run_script(&format!("?[n] := *kleos_mem_access{{ns: 's', id: '{id}', n}}"), Default::default(), ScriptMutability::Immutable)
+            .unwrap()
+            .rows[0][0],
+        DataValue::from(4)
+    );
+    // reads that do not count: the option, and read-only scripts
+    hits(&db, "garage", RecallOpts::default());
+    db.run_script("::memory recall 'garage' {ns: 's'}", Default::default(), ScriptMutability::Immutable)
+        .unwrap();
+    assert_eq!(rec(&db)[0].access_count, 4);
+    // the flush never touches the namespace version
+    let seq = |db: &DbInstance| {
+        db.run_script("?[seq] := *kleos_mem_ns{ns: 's', seq}", Default::default(), ScriptMutability::Immutable)
+            .unwrap()
+            .rows[0][0]
+            .clone()
+    };
+    let before = seq(&db);
+    rec(&db);
+    db.memory_flush().unwrap();
+    assert_eq!(seq(&db), before);
+
+    // ranking: a much-accessed memory overtakes a slightly more relevant one
+    let w = db.remember(WEAK, at("s", d(1))).unwrap().id.unwrap();
+    for _ in 0..50 {
+        db.recall("shed", RecallOpts { ns: ns("s"), k: Some(1), ..Default::default() }).unwrap();
+    }
+    let a = hits(&db, "garage door code", RecallOpts { access_weight: Some(5.0), recency_weight: Some(0.0), ..Default::default() });
+    let rel = hits(&db, "garage door code", RecallOpts { blend: Some(false), ..Default::default() });
+    assert!(a.iter().find(|h| h.id == w).unwrap().access_count >= 50);
+    // by default access counts are recorded, not ranked
+    assert_eq!(hits(&db, "garage door code", RecallOpts { recency_weight: Some(0.0), ..Default::default() })[0].id, id);
+    assert_eq!(a[0].id, w, "{a:?}");
+    assert_eq!(rel[0].id, id, "{rel:?}");
+    // erase drops the counts, buffered and stored
+    db.forget(ForgetOpts { ns: ns("s"), id: Some(w.clone()), mode: Some("erase".into()), ..Default::default() }).unwrap();
+    db.memory_flush().unwrap();
+    assert_eq!(count(&db, &format!("?[n] := *kleos_mem_access{{ns: 's', id: '{w}', n}}")), 0);
+}
+
+#[test]
+fn ttl_expiry_and_archive_tier() {
+    let m = Models::new("ttl", vec![], vec![]);
+    let db = m.db();
+    const GATE: &str = "Today the visitor parking gate code is 9912.";
+    // valid from day 1, expires a day later
+    let e = db
+        .remember(GATE, RememberOpts { ns: ns("s"), at: Some(d(1)), ttl: Some(DAY), ..Default::default() })
+        .unwrap()
+        .id
+        .unwrap();
+    let keep = db.remember(STRONG, at("s", d(1))).unwrap().id.unwrap();
+    let q = "gate code";
+    assert_eq!(texts(&hits(&db, q, RecallOpts::default())), [STRONG]);
+    let all = hits(&db, q, RecallOpts { include_expired: true, ..Default::default() });
+    assert_eq!(all.len(), 2);
+    assert_eq!(all.iter().find(|h| h.id == e).unwrap().expires, Some(d(2)));
+    // before it expired, a past read sees it
+    assert_eq!(hits(&db, q, RecallOpts { as_of: Some(d(1) + 3_600_000_000), ..Default::default() }).len(), 2);
+    // an exact restatement is not swallowed by the expired memory
+    let again = db.remember(GATE, at("s", d(3))).unwrap();
+    assert_eq!(again.action, "added", "{again:?}");
+    let again = again.id.unwrap();
+
+    // archive the expired ones: still valid, hidden from recall by default
+    let f = db
+        .forget(ForgetOpts { ns: ns("s"), expired: true, mode: Some("archive".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(f.ids, vec![e.clone()]);
+    assert_eq!(count(&db, &format!("?[id] := *kleos_mem{{ns: 's', id @ 'NOW'}}, id = '{e}'")), 1);
+    assert_eq!(hits(&db, q, RecallOpts { include_expired: true, ..Default::default() }).len(), 2);
+    let arch = hits(&db, q, RecallOpts { include_expired: true, include_archived: true, ..Default::default() });
+    assert!(arch.iter().any(|h| h.id == e && h.archived), "{arch:?}");
+
+    // archive by id and bring it back
+    db.memory_set(SetOpts { ns: ns("s"), id: Some(keep.clone()), archived: Some(true), ..Default::default() }).unwrap();
+    assert_eq!(texts(&hits(&db, q, RecallOpts::default())), [GATE]);
+    db.run_script(&format!("::memory set '{keep}' {{ns: 's', archived: false}}"), Default::default(), ScriptMutability::Mutable)
+        .unwrap();
+    assert_eq!(hits(&db, q, RecallOpts::default()).len(), 2);
+    // a TTL can be set later and removed
+    db.memory_set(SetOpts { ns: ns("s"), id: Some(again.clone()), ttl: Some(-1), ..Default::default() }).unwrap();
+    assert_eq!(texts(&hits(&db, q, RecallOpts::default())), [STRONG]);
+    db.memory_set(SetOpts { ns: ns("s"), id: Some(again.clone()), no_ttl: true, ..Default::default() }).unwrap();
+    assert_eq!(hits(&db, q, RecallOpts::default()).len(), 2);
+    // erase clears the tier rows
+    db.forget(ForgetOpts { ns: ns("s"), id: Some(e.clone()), mode: Some("erase".into()), ..Default::default() }).unwrap();
+    assert_eq!(count(&db, &format!("?[id] := *kleos_mem_life{{ns: 's', id}}, id = '{e}'")), 0);
+}
+
 /// Real models: decider-nano (nano-tune-v1) and EmbeddingGemma, downloaded
 /// into the Hugging Face cache on first use. Run with
 /// `cargo +1.99.0 test -p kleos --features infer-metal --test memory -- --include-ignored`.
@@ -639,7 +918,12 @@ fn concurrent_remembers_never_leave_two_current() {
             .into_iter()
             .map(|t| {
                 let db = &db;
-                sc.spawn(move || db.remember(t, RememberOpts { ns: ns("race"), ..Default::default() }).unwrap())
+                // both introduce the same new entities while planning
+                let ents = vec!["user".to_string(), "Anna".to_string()];
+                sc.spawn(move || {
+                    db.remember(t, RememberOpts { ns: ns("race"), entities: ents, ..Default::default() })
+                        .unwrap()
+                })
             })
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
@@ -654,6 +938,12 @@ fn concurrent_remembers_never_leave_two_current() {
         results.iter().any(|r| r.superseded.iter().any(|x| ids.contains(x))),
         "one move should supersede the other: {results:?}"
     );
+    // entity writes are under the same version check: the loser re-planned
+    // and linked the winner's entities instead of creating its own
+    for n in ["user", "anna"] {
+        assert_eq!(count(&db, &format!("?[e] := *kleos_mem_entity{{ns: 'race', eid: e, norm: '{n}'}}")), 1, "{results:?}");
+    }
+    assert_eq!(results[0].entities, results[1].entities);
 }
 
 /// Child half of `concurrent_remembers_across_processes`, run only when
