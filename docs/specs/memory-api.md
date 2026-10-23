@@ -321,7 +321,7 @@ It is skipped when recall already filters by `entity`. It only does something wh
 `recall {format: 'context', budget}` (Rust `Db::recall_context`, Python `recall(..., format="context")` or `recall_context`) returns `{text, tokens, budget, ids, omitted}`: the same hits as `recall` with the same options, as a Markdown block for an LLM reader. For example:
 
 ```
-Recalled memories, grouped by topic, most relevant first. [date] is when a statement was made or became true; "previously" lines are older values it replaced.
+Recalled memories, grouped by topic, oldest first. [date] is when a statement was made or became true; "previously" lines are older values it replaced.
 
 ## user
 - [2026-01-11 (Sun)] I moved to Lisbon last month.
@@ -332,7 +332,7 @@ Recalled memories, grouped by topic, most relevant first. [date] is when a state
   said in: "My sister Anna lives in Munich. She is a nurse."
 ```
 
-- **Grouping.** A memory goes under the canonical entity it mentions that most of the shown memories mention (ties by name); without entities, under its source group ("Conversation of <date>"); else "Other". Groups are ordered by their best-ranked memory, and memories within a group by date. Claims of one statement are one item.
+- **Grouping.** A memory goes under the canonical entity it mentions that most of the shown memories mention (ties by name); without entities, under its source group ("Conversation of <date>"); else "Other". Groups are in time order (by their first memory; ties by the best rank), and memories within a group by date, so the newest value reads last, as in a dated list. With groups ordered by relevance (the first version), LongMemEval knowledge-update QA was 0.69 against 0.81 for the dated list, so the order was changed (results in docs/benchmarks/memory.md). Claims of one statement are one item.
 - **Each item:** `[valid-from date]`, `(until <date>)` for a past read, `(assistant)` / `(other)` for another speaker, the text, and the source with `show_source`. Source names are not shown by default; they are ids, not content.
 - **`previously`:** the memories this one superseded (`supersedes` links), up to three steps back, each with its own validity: "previously: X (from d1 until d2)". It is the history kleos already stores, so the reader sees both the current value and the change.
 - **`possibly replaced by`:** a newer memory with a pending `supersedes` decision about this one, marked unconfirmed.

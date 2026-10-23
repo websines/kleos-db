@@ -271,12 +271,12 @@ pub fn window(context: &str, claim: &str, max: usize) -> String {
 pub const CONTEXT_CHARS: usize = 600;
 
 /// The header line of every context block.
-pub const CONTEXT_HEADER: &str = "Recalled memories, grouped by topic, most relevant first. [date] is when a statement was made or became true; \"previously\" lines are older values it replaced.";
+pub const CONTEXT_HEADER: &str = "Recalled memories, grouped by topic, oldest first. [date] is when a statement was made or became true; \"previously\" lines are older values it replaced.";
 
 /// Render the context block from `items` (rank order) within `budget`
 /// tokens. Items are grouped by entity (the canonical entity most of the
 /// shown memories mention; ties by name), else by source group, else
-/// "Other"; groups are ordered by their best-ranked item, items in a group
+/// "Other"; groups are ordered by their first item's date, items in a group
 /// by date. Claims of one statement are shown as one item. First every item
 /// that fits is added in rank order, with its earlier values; then the
 /// statement contexts, in rank order, while the budget lasts.
@@ -397,13 +397,25 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         lines_of[i].push(line);
     }
 
-    // assemble: groups by best rank, items by date
+    // assemble: groups in time order (by their first item; ties by the
+    // best rank), items in a group by date, so the newest value reads last
+    // as in a dated list
     let mut order: Vec<&str> = vec![];
     for (i, g) in group_of.iter().enumerate() {
         if shown[i] && !order.contains(&g.as_str()) {
             order.push(g.as_str());
         }
     }
+    let first_at = |g: &str| {
+        (0..merged.len())
+            .filter(|&i| shown[i] && group_of[i] == g)
+            .map(|i| merged[i].valid_from)
+            .min()
+            .unwrap_or(i64::MAX)
+    };
+    let mut keyed: Vec<(i64, usize, &str)> = order.iter().enumerate().map(|(r, g)| (first_at(g), r, *g)).collect();
+    keyed.sort();
+    let order: Vec<&str> = keyed.into_iter().map(|x| x.2).collect();
     let mut text = String::from(CONTEXT_HEADER);
     text.push('\n');
     let mut ids = vec![];
