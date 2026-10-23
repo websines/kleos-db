@@ -188,6 +188,8 @@ def run_lme(args, cli):
     for c, d in rec_dirs.items():
         have = {p.stem for p in d.glob("*.json")}
         ids = [i for i in ids if i in have]
+    if args.types:
+        ids = [i for i in ids if data[i]["question_type"] in args.types.split(",")]
     if args.n and args.n < len(ids):
         ids = [x["question_id"] for x in C.stratified_sample([data[i] for i in ids], C.lme_category, args.n, seed=args.seed)]
     jobs = []
@@ -301,6 +303,7 @@ def main():
     ap.add_argument("--unit", default="user")
     ap.add_argument("--ids-variant", default=None, help="LongMemEval: only questions this retrieval variant ran")
     ap.add_argument("--n", type=int, default=0, help="stratified sample size")
+    ap.add_argument("--types", default=None, help="LongMemEval: only these question types (comma list)")
     ap.add_argument("--seed", type=int, default=C.SEED)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--thinking", action="store_true", help="let the reasoning model think (default off)")
@@ -308,7 +311,7 @@ def main():
     args = ap.parse_args()
     args.conds = [c.strip() for c in args.conditions.split(",") if c.strip()]
     # results of one question set live together, so every condition is compared on the same questions
-    args.set = (args.ids_variant or "all") + (f"-n{args.n}" if args.n else "")
+    args.set = (args.ids_variant or "all") + (f"-n{args.n}" if args.n else "") + (f"-{args.types}" if args.types else "")
     cli = Client(thinking=args.thinking)
     if cli.endpoint == "synthetic":
         try:

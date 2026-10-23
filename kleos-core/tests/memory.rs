@@ -1476,9 +1476,10 @@ fn recall_entity_expansion() {
     assert!(base.iter().all(|h| !h.expanded));
     assert!(!base.iter().any(|h| h.text.contains("nurse")), "{:?}", texts(&base));
     let ex = db
-        .recall(q, RecallOpts { expand: Some(true), expand_weight: Some(1.0), ..ropts("u", 2) })
+        .recall(q, RecallOpts { expand: Some(true), expand_weight: Some(0.9), ..ropts("u", 2) })
         .unwrap();
-    assert_eq!(ex[0].text, "Anna adopted a greyhound called Pixel.");
+    // the seed keeps the top; the memory about the same entity follows
+    assert_eq!(ex[0].text, "Anna adopted a greyhound called Pixel.", "{:?}", texts(&ex));
     assert!(ex.iter().any(|h| h.text.contains("nurse") && h.expanded), "{:?}", texts(&ex));
     // a hub entity (mentioned by more than 25 memories) is not followed
     for i in 0..26 {
