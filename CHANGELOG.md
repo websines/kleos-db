@@ -190,6 +190,13 @@ to kleos.
   stay in libmalloc's large cache (836 MB loaded, 478 MB after disable). The
   kernel reclaims that memory under pressure. Spec: `docs/specs/embedder-toggle.md`; tests:
   `kleos-core/tests/embed_toggle.rs`.
+- `kleos-infer`'s `decider_bench` reports `weights_cached_pct`: how much of the
+  checkpoint was in the OS page cache before loading. The ~9 s CPU q8 load seen
+  in benchmarks was a cold read of the 298 MB bf16 checkpoint from a disk giving
+  21-34 MB/s (USB 2.0 link, shared). Every precision pays it; macOS had evicted
+  the file within 90 s of idle under memory pressure. With the file cached, CPU
+  q8 loads in 0.3-0.5 s (read() ≈25 ms) and EmbeddingGemma q8 in 0.8-1.9 s (cold:
+  34 s for its 1.2 GB f32 checkpoint).
 
 ### Fixed
 
