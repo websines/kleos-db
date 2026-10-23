@@ -196,11 +196,10 @@ pub struct CtxItem {
     /// Canonical entity names the memory mentions.
     pub entities: Vec<String>,
     /// Its own resolved temporal expressions: `(expression, resolved)`,
-    /// e.g. `("yesterday", "2023-05-07 (Sun)")`.
+    /// e.g. `("yesterday", "2023-05-07 (Sun)")`. Shown on its own line
+    /// only: dates on `said in` lines made the reader pick older values
+    /// (docs/benchmarks/memory.md, "Dates and list text").
     pub events: Vec<(String, String)>,
-    /// Those of the other claims of its statement (shown with `said in`
-    /// when the expression is in the shown window).
-    pub statement_events: Vec<(String, String)>,
     /// The values it replaced, newest first.
     pub previously: Vec<Previous>,
     /// Texts of newer memories that may replace it (pending decisions).
@@ -360,7 +359,7 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         .collect();
 
     // pass 1: items in rank order while they fit; pass 2: contexts
-    let header = if merged.iter().any(|it| !it.events.is_empty() || !it.statement_events.is_empty()) {
+    let header = if merged.iter().any(|it| !it.events.is_empty()) {
         CONTEXT_HEADER_DATES
     } else {
         CONTEXT_HEADER
@@ -419,12 +418,7 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         if one_line(&w) == one_line(&it.text) {
             continue;
         }
-        let more = dates_note(
-            it.statement_events
-                .iter()
-                .filter(|e| !it.events.contains(e) && w.contains(one_line(&e.0).as_str())),
-        );
-        let line = format!("  said in: \"{w}\"{more}");
+        let line = format!("  said in: \"{w}\"");
         let cost = estimate_tokens(&line) + 1;
         if used + cost > budget {
             continue;
