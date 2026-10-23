@@ -1596,9 +1596,6 @@ impl<'s, S: Storage<'s>> Db<S> {
                 .map(|id| DataValue::List(vec![s(&ns), s(id)]))
                 .collect(),
         );
-        // ::erase deletes every row of each key with its FTS/HNSW entries and
-        // writes the salted audit marker (kleos_evict_audit)
-        self.mem_q(&format!("::erase {MEM} $keys"), vec![("keys", keys)])?;
         let mut script = String::new();
         if has_vec {
             script.push_str(&format!(
@@ -1624,7 +1621,15 @@ impl<'s, S: Storage<'s>> Db<S> {
             p.extend(ps);
         }
         script.push_str(&bump_ns_head());
+        // The dependent rows and the Engram erase job commit first, the
+        // memory rows second: after a crash in between, the overlay is
+        // already being erased and the memory is still there, so repeating
+        // the `forget` completes it. The other order could leave a memory
+        // erased while its Engram rows still answer.
         self.mem_q(&script, p)?;
+        // ::erase deletes every row of each key with its FTS/HNSW entries and
+        // writes the salted audit marker (kleos_evict_audit)
+        self.mem_q(&format!("::erase {MEM} $keys"), vec![("keys", keys)])?;
         Ok(ForgetResult { mode, ids: exist })
     }
 

@@ -157,7 +157,9 @@ The vector leg always returns the nearest neighbours, so recall returns up to k 
 
 - Targets: `id` or `ids`, or a filter `kind` / `entity`, or `all: true` for a whole namespace. A call without any of these is an error.
 - `mode: 'retract'` (the default) ends validity at `at` (default now) with a retraction row and clears `current` on the vector. History and `as_of` recall keep the memory.
-- `mode: 'erase'` (GDPR) calls `::erase kleos_mem` on the keys. That deletes every version, with its FTS entries, and writes the salted `kleos_evict_audit` marker. It then removes the memory's vector, source rows, mentions, links and audit rows, and any entity left with no mention.
+- `mode: 'erase'` (GDPR) runs in two steps:
+  1. One transaction removes the memory's vector, source rows, mentions, links and audit rows, and any entity left with no mention. When an Engram model is attached, the same transaction enqueues the overlay erase.
+  2. `::erase kleos_mem` then deletes every version of the keys, with their FTS entries, and writes the salted `kleos_evict_audit` marker.
 - Returns `{mode, ids}`: the memories that were current (retract) or existed (erase).
 
 ### reflect(ns, opts)
@@ -186,7 +188,7 @@ The job's `qid` is the `kleos_mem_ns` version its commit produces, computed in t
 
 The hook is one function, `memory_engram::enqueue`, called from the write-script assembly of `remember` and of both `forget` modes. It returns nothing when no model is attached or the feature is off, so the memory API's behaviour and cost are unchanged then.
 
-`forget` erase still runs `::erase kleos_mem` as its own statement before the script that cleans up and enqueues. A failure between the two leaves the memory erased without an erase job (as it already left the vectors and sources); the job is written with the clean-up, not with `::erase`.
+`forget` erase runs `::erase kleos_mem` as its own statement, after the transaction that cleans up and enqueues the Engram erase job. A crash between the two leaves the memory present and its overlay being erased. Repeating the `forget` completes it, since erase is idempotent. The opposite order could have left an erased memory whose Engram rows still answer.
 
 
 
