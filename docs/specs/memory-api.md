@@ -178,9 +178,9 @@ score = relevance
 | Option | Default | Notes |
 |---|---|---|
 | `blend` | true | false: `score = relevance` and the old fetch size and order, exactly |
-| `recency_weight` | 0.1 | a memory stated now gets +0.1, one a half-life old +0.05 |
-| `half_life_days` | 30 | the read time is `as_of` when given, so past reads decay from then |
-| `importance_weight` | 0.2 | importance 1 → +0.1, 0 → −0.1, unset → 0 |
+| `recency_weight` | 0.03 | a memory stated now gets +0.03, one a half-life old +0.015 |
+| `half_life_days` | 90 | the read time is `as_of` when given, so past reads decay from then |
+| `importance_weight` | 0.1 | importance 1 → +0.05, 0 → −0.05, unset → 0 |
 | `access_weight` | 0 | recorded, not ranked by default (below) |
 
 `relevance` is the `WeightedFusion` score, in [0, 1]. It is returned with every hit, together with `recency`, `importance` and `access_count`, so a caller can re-rank with its own formula. In CozoScript the signals are plain columns: `importance` on `kleos_mem`, `valid_from` from the validity, `n`/`last` on `kleos_mem_access`, `expires`/`archived` on `kleos_mem_life`. For example:
@@ -192,7 +192,8 @@ score = relevance
 ```
 
 Why these defaults:
-- **Recency** favours the newer of two similarly relevant memories, which is usually the current one. Decay is from the read time, so after a long idle period every memory has decayed alike and relevance decides.
+- **Scale.** The weights are small because the relevance of the top hits is compressed. With EmbeddingGemma, distinct facts near the top of a short memory list often differ by 0.01 or less, so a signal weighing 0.1 decides between them regardless of relevance.
+- **Recency** favours the newer of two similarly relevant memories, which is usually the current one. Decay is from the read time, so after a long idle period every memory has decayed alike and relevance decides. The defaults come from a sweep on the life stream read at its own "now" (day 126), where recency matters (half-life 7, 30 or 90 days × weight 0 to 0.1). 0.1 / 30 days lost 3 of 20 answers with `hide_pending`: recent unrelated memories ("I read a lot of science fiction") climbed over the answer. Every weight up to 0.05 at 90 days, and up to 0.03 at 30 days, lost none; from 0.02 up they also cut stale memories in the top 3 from 5 to 4 without `hide_pending`. A 7-day half-life lost answers from 0.03. 0.03 / 90 days sits inside that safe region on both axes.
 - **Importance** is never inferred: the `important` template is unvalidated. It is the caller's (`remember {importance}`, `set {importance}`), and unset memories are neutral.
 - **Access counts** weigh 0 by default. Every returned hit counts as an access, including the nearest-neighbour filler of unrelated queries, so a positive weight is self-reinforcing. On the life stream, 0.05 flipped a near-tie (a relevance gap of 0.0007) the wrong way. They are recorded and returned either way; pass `access_weight` to use them.
 
@@ -354,8 +355,29 @@ A 40-turn "user life" stream (`scripts/memory-api/life_stream.py`): moves, job c
 
 What the numbers say:
 - The auto band is safe on this stream.
-- The misses all sit just under τ. The review band catches them, but it also flags different-subject pairs.
-- Same-subject candidates, which is what entity resolution (E3) will provide, are the precision lever for both. Until then, `hide_pending` stays off by default.
+- The misses all sit just under τ. The review band catches them, but it also flags different-subject pairs; the entity gate below removes most of those.
+
+#### With entity resolution and scoring (wave2/mem-scoring)
+
+Each turn now passes `entities`: the subject (`user` for first-person statements, `Anna`, `Max`) plus the named things (`scripts/memory-api/life_stream.py`). The "before" binary is main at 276f90f, run on the same annotated stream (its exact-name hook links entities but nothing reads them). Same machine, same models, run back to back.
+
+| | Before | After |
+|---|---|---|
+| Recall, current fact first (top-1) | 15 / 20 | 15 / 20 |
+| … with `hide_pending` | 18 / 20 | **19 / 20** |
+| False pending supersedes | 6 | **2** |
+| True pending supersedes (the 3 misses below τ) | 3 | 3 |
+| Auto-supersede | 12 right, 0 wrong | 12 right, 0 wrong |
+| Duplicates | 4 right, 0 wrong | 4 right, 0 wrong |
+| `supersedes` questions skipped (different subjects) | – | 22 |
+| Remember p50, ms (3 runs; load average ~20 from other builds) | 395, 455, 539 | 427, 445, 548 |
+| Recall p50, ms, first pass (query embedded) | 11.2, 11.8, 14.0 | 14.2, 18.5, 22.2 |
+| Recall p50, ms, query vector cached | – | blend on 4.1, blend off 6.2 |
+
+- **Gate.** The four false pendings removed are the sister against the user's home (three pairs, both directions) and the sister's move against the user's move. The two left share the subject: the cat against the dog (both the user's pets), and "moved again, from Lisbon to Porto" against "I live in Berlin" (Berlin is still current because Berlin → Lisbon was missed below τ, so that one is arguably right). The `hide_pending` gain is the time-travel question the sister's false pending used to hide.
+- **Recall order.** At the real read time (months after the stream) recency has decayed for every memory, and the blend gives exactly the relevance answers: 15 and 19 with the blend on or off. Read at the stream's own "now" (day 126), the default blend also keeps 15 and 19 and cuts stale memories in the top 3 from 5 to 4. Higher recency weights lose answers (sweep in "Ranking").
+- **Latency.** Remember is within run-to-run noise: resolution with exact names needs no model call, and gated candidates skip one. The cached-query recall cost is the same with the blend on or off. The first-pass recall difference (3 to 8 ms) is mostly the query embedding on a loaded GPU; recall does no more index work than before, since the blend re-ranks a wider window (2k + 10) of the same index fetch.
+- Not exercised by this stream: importance (no turn sets it) and access counts (weight 0). The deterministic tests cover both.
 
 ## Caveats
 
@@ -364,4 +386,9 @@ What the numbers say:
 - Recall over-fetches to skip stale index rows. A namespace with very many superseded versions of one topic could still crowd a current memory out of the fetched window.
 - One vector dimension per store. Changing to an embedder with another dimension is refused; re-embedding is not implemented.
 - `importance` is never inferred: the `important` template is unvalidated.
+- **The gate depends on the caller's entities.** It only helps when statements name their subject. Named things alone ("Berlin", "Lisbon") would block true supersedes ("I live in Berlin" → "I moved to Lisbon" share no entity), so the subject must be included. A wrong entity can block a true supersede; the decision is then simply not asked (listed in `gated`), never acted on.
+- Resolution scans the namespace's entities once per `remember` with entities (E3's one-scan-per-call), and the merge snapshot covers every namespace's merges of `kleos_mem_entity`. Fine for thousands of entities per store, not for millions.
+- Access counts are approximate: counts buffered when a process exits are lost (call `memory_flush`), and a flush that keeps failing caps the buffer at 100 000 memories.
+- Archived and expired memories can still crowd the recall window: they are filtered after the index fetch, like stale versions.
+- Importance is rewritten in place on the current row, so it has no history.
 - There is no API to resolve pending decisions yet; consolidation is E7.
