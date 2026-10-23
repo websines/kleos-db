@@ -9,6 +9,10 @@ returned (cached by retrieval.py), and an LLM judge grades the answer with the
 benchmark's official judge prompt. Same reader and judge for every condition:
 
   kleos:<variant>  the top-10 memories recall returned, in time order, with dates
+  stmt:<variant>   the same list, each claim replaced by its whole statement (`context`)
+  ctx:<variant>    the same recall as recall's context block (`format: 'context'`,
+                   stored by retrieval.py --context-budget): grouped, dated, with
+                   superseded values and the statements the claims came from
   none             no memory at all (the question only)
   oracle           LongMemEval: the answer sessions in full (the paper's oracle);
                    LoCoMo: the evidence turns
@@ -120,7 +124,24 @@ Just return the label CORRECT or WRONG in a json format with the key as "label".
 
 
 def results_dir(tag, bench, unit, variant):
-    return C.bench_dir() / "results" / tag / f"{bench}-{unit}" / variant.split("+")[0]
+    return C.bench_dir() / "results" / tag / f"{bench}-{unit}" / variant.removesuffix("+hide_pending")
+
+
+def is_mem(cond):
+    return cond.split(":", 1)[0] in ("kleos", "ctx", "stmt")
+
+
+def stmt_hits(hits):
+    """stmt:<variant>: the list format, each claim replaced by the whole
+    statement it came from (once per statement), as before claims."""
+    out, seen = [], set()
+    for h in hits:
+        t = h.get("context") or h["text"]
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append({**h, "text": t})
+    return out
 
 
 def hits_key(cond):
@@ -137,9 +158,13 @@ def locomo_date(us):
 
 # ---------------------------------------------------------------- LongMemEval
 def lme_context(cond, x, rec):  # noqa: C901
-    if cond.startswith("kleos:"):
+    if cond.startswith("ctx:"):
+        return rec["ctx10"]["text"]
+    if cond.startswith("kleos:") or cond.startswith("stmt:"):
         hits = sorted(rec[hits_key(cond)], key=lambda h: h.get("valid_from") or 0)
-        return "\n\n".join(f"[{C.fmt_ts(h['valid_from'])}] user: {h['text']}" for h in hits)
+        if cond.startswith("stmt:"):
+            hits = stmt_hits(hits)
+        return "\n\n".join(f"[{C.fmt_ts(h['valid_from'])}] {h.get('role') or 'user'}: {h['text']}" for h in hits)
     sess = sorted(zip(x["haystack_session_ids"], x["haystack_dates"], x["haystack_sessions"]),
                   key=lambda z: C.lme_ts(z[1]))
     if cond == "oracle":
@@ -155,7 +180,7 @@ def run_lme(args, cli):
     path = C.lme_path("longmemeval_oracle.json") if args.bench == "lme-oracle" else C.lme_path()
     data = {x["question_id"]: x for x in C.lme_questions(path)}
     rec_dirs = {c: results_dir(args.tag, args.bench, args.unit, c.split(":", 1)[1])
-                for c in args.conds if c.startswith("kleos:")}
+                for c in args.conds if is_mem(c)}
     ids = sorted(data)
     if args.ids_variant:
         have = {p.stem for p in results_dir(args.tag, args.bench, args.unit, args.ids_variant).glob("*.json")} - {"meta"}
@@ -163,6 +188,8 @@ def run_lme(args, cli):
     for c, d in rec_dirs.items():
         have = {p.stem for p in d.glob("*.json")}
         ids = [i for i in ids if i in have]
+    if args.types:
+        ids = [i for i in ids if data[i]["question_type"] in args.types.split(",")]
     if args.n and args.n < len(ids):
         ids = [x["question_id"] for x in C.stratified_sample([data[i] for i in ids], C.lme_category, args.n, seed=args.seed)]
     jobs = []
@@ -201,7 +228,7 @@ def run_lme(args, cli):
 def run_locomo(args, cli):
     convs = {c["sample_id"]: c for c in C.locomo_data()}
     rec_dirs = {c: results_dir(args.tag, "locomo", "turn", c.split(":", 1)[1])
-                for c in args.conds if c.startswith("kleos:")}
+                for c in args.conds if is_mem(c)}
     recs = {}
     for c, d in rec_dirs.items():
         recs[c] = {}
@@ -238,15 +265,22 @@ def run_locomo(args, cli):
         if cond == "none":
             prompt = LOCOMO_READER_NONE.format(a=a, b=b, q=q["question"])
         else:
-            if cond.startswith("kleos:"):
+            if cond.startswith("ctx:"):
+                mem = None
+            elif cond.startswith("kleos:") or cond.startswith("stmt:"):
                 hits = sorted(recs[cond][it["question_id"]][hits_key(cond)], key=lambda h: h.get("valid_from") or 0)
+                if cond.startswith("stmt:"):
+                    hits = stmt_hits(hits)
                 mem = [(h["valid_from"], h["text"]) for h in hits]
             elif cond == "oracle":
                 ev = C.locomo_evidence(q.get("evidence"))
                 mem = sorted((turns[it["sid"]][e]["at"], turns[it["sid"]][e]["text"]) for e in ev if e in turns[it["sid"]])
             else:  # full
                 mem = [(u["at"], u["text"]) for u in turns[it["sid"]].values()]
-            m = "\n".join(f"[{locomo_date(t)}] {txt}" for t, txt in mem)
+            if mem is None:
+                m = recs[cond][it["question_id"]]["ctx10"]["text"]
+            else:
+                m = "\n".join(f"[{locomo_date(t)}] {txt}" for t, txt in mem)
             prompt = LOCOMO_READER.format(a=a, b=b, m=m, q=q["question"])
         r = cli.chat([{"role": "user", "content": prompt}])
         gold = str(q.get("answer"))
@@ -269,6 +303,7 @@ def main():
     ap.add_argument("--unit", default="user")
     ap.add_argument("--ids-variant", default=None, help="LongMemEval: only questions this retrieval variant ran")
     ap.add_argument("--n", type=int, default=0, help="stratified sample size")
+    ap.add_argument("--types", default=None, help="LongMemEval: only these question types (comma list)")
     ap.add_argument("--seed", type=int, default=C.SEED)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--thinking", action="store_true", help="let the reasoning model think (default off)")
@@ -276,7 +311,7 @@ def main():
     args = ap.parse_args()
     args.conds = [c.strip() for c in args.conditions.split(",") if c.strip()]
     # results of one question set live together, so every condition is compared on the same questions
-    args.set = (args.ids_variant or "all") + (f"-n{args.n}" if args.n else "")
+    args.set = (args.ids_variant or "all") + (f"-n{args.n}" if args.n else "") + (f"-{args.types}" if args.types else "")
     cli = Client(thinking=args.thinking)
     if cli.endpoint == "synthetic":
         try:

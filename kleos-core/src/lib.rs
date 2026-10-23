@@ -165,6 +165,7 @@ pub mod decide;
 pub mod embed;
 pub mod memory;
 pub mod memory_claims;
+pub mod memory_recall;
 pub mod memory_engram;
 pub mod entity;
 pub mod engram;
@@ -1361,6 +1362,10 @@ impl DbInstance {
     /// Dispatcher method. See [crate::Db::recall].
     pub fn recall(&self, query: &str, opts: memory::RecallOpts) -> Result<Vec<memory::RecallHit>> {
         dispatch_db!(self, db => db.recall(query, opts))
+    }
+    /// Dispatcher method. See [crate::Db::recall_context].
+    pub fn recall_context(&self, query: &str, opts: memory::RecallOpts) -> Result<memory_recall::RecallContext> {
+        dispatch_db!(self, db => db.recall_context(query, opts))
     }
     /// Dispatcher method. See [crate::Db::forget].
     pub fn forget(&self, opts: memory::ForgetOpts) -> Result<memory::ForgetResult> {

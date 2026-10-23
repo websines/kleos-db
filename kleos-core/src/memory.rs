@@ -40,6 +40,7 @@ use crate::decide::{self, rules, Band, Decision, Template};
 use crate::embed;
 use crate::entity::{EntityConfig, Mention, Outcome, ResolveOptions, ENTITY_LINKS, ENTITY_MERGES};
 use crate::memory_claims;
+use crate::memory_recall;
 use crate::memory_engram::{self as engram_hook, Job};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
@@ -72,9 +73,13 @@ pub const MEM_ACCESS: &str = "kleos_mem_access";
 /// Expiry and archive tier: `{ns, id => expires, archived}` (µs; null when
 /// unset). Only memories with a TTL or in the archive have a row.
 pub const MEM_LIFE: &str = "kleos_mem_life";
+/// Who said a memory: `{ns, id => role}` (`user`, `assistant` or `other`).
+/// Only memories stored with a `role` have a row; none means the user.
+pub const MEM_ROLE: &str = "kleos_mem_role";
 /// Current schema version (2 added `kleos_mem_ns`; 3 added `kleos_mem_access`
-/// and `kleos_mem_life`, and entity merges / review links).
-const SCHEMA_VERSION: i64 = 3;
+/// and `kleos_mem_life`, and entity merges / review links; 4 added
+/// `kleos_mem_role`).
+const SCHEMA_VERSION: i64 = 4;
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
@@ -122,6 +127,29 @@ const DEFAULT_ACCESS_WEIGHT: f64 = 0.0;
 /// relevant to a question as the fact that answers it, and conversational
 /// text is full of them; the blend ranks it this much lower.
 const DEFAULT_QUESTION_WEIGHT: f64 = 0.05;
+/// Recall diversity (docs/specs/memory-api.md, "Diversity"): at most this
+/// many hits per statement (the claims of one message) and per source group
+/// (`chat-12#4` → `chat-12`), and the MMR-style penalty on a candidate's
+/// similarity to the hits already chosen. The pool chosen from is
+/// `max(DIVERSITY_POOL_MULT · k, k + 10)` deep.
+const DEFAULT_MAX_PER_STATEMENT: usize = 1;
+const DEFAULT_MAX_PER_SOURCE: usize = 0;
+const DEFAULT_MMR_WEIGHT: f64 = 0.0;
+const DIVERSITY_POOL_MULT: usize = 3;
+/// Subtracted from the score of an assistant memory (`remember {role}`).
+const DEFAULT_ASSISTANT_WEIGHT: f64 = 0.05;
+/// Entity expansion: from the `EXPAND_FROM` most relevant hits, other
+/// memories about the same entities join the pool at `expand_weight` (default
+/// 0.5) times the seed's relevance; entities mentioned by more than
+/// `EXPAND_MAX_DEGREE` memories (a speaker, the user) are not followed.
+const DEFAULT_EXPAND_WEIGHT: f64 = 0.5;
+const EXPAND_FROM: usize = 3;
+const EXPAND_MAX_DEGREE: usize = 25;
+const EXPAND_MAX_NEW: usize = 30;
+/// Default token budget of `recall {format: 'context'}`.
+const DEFAULT_CONTEXT_BUDGET: usize = 2000;
+/// Roles `remember` accepts.
+const ROLES: [&str; 3] = ["user", "assistant", "other"];
 /// Accesses at which the access signal saturates (reaches 1).
 const ACCESS_SATURATION: f64 = 100.0;
 /// Buffered access counts are flushed once this many memories are pending,
@@ -480,6 +508,12 @@ pub struct RememberOpts {
     /// the decider (default 0.6). Only applies to the claims of a split
     /// statement, when both texts are embedded.
     pub min_similarity: Option<f64>,
+    /// Who said it: `user` (the default when unset), `assistant` or
+    /// `other`. Assistant and other memories are stored and recalled (an
+    /// assistant memory at a lower weight, `recall {assistant_weight}`) but
+    /// never take part in supersede / duplicate decisions: what the
+    /// assistant said does not replace what the user said.
+    pub role: Option<String>,
 }
 
 /// Options of [`Db::recall`].
@@ -523,6 +557,42 @@ pub struct RecallOpts {
     /// Count this recall as an access of the memories it returns (default
     /// true; false in read-only scripts).
     pub record_access: Option<bool>,
+    /// Diverse selection from a deeper pool (default true; see the caps and
+    /// `mmr_weight`). False: the top k by score, exactly as before.
+    pub diversity: Option<bool>,
+    /// At most this many hits per statement, i.e. claims of one text
+    /// (default 1; 0 = no cap). Hits beyond the caps only fill up to k.
+    pub max_per_statement: Option<usize>,
+    /// At most this many hits per source group: the source up to its first
+    /// `#` (`chat-12#4` → `chat-12`) (default 0 = no cap).
+    pub max_per_source: Option<usize>,
+    /// MMR-style penalty: a candidate's score minus this times its highest
+    /// similarity (vector cosine, else word overlap) to the hits already
+    /// chosen (default 0).
+    pub mmr_weight: Option<f64>,
+    /// Candidates the diverse selection chooses from (default max(3k, k + 10)).
+    pub pool: Option<usize>,
+    /// Entity-graph expansion (default false): other current memories about
+    /// the entities of the top hits join the pool at a reduced weight.
+    pub expand: Option<bool>,
+    /// Weight of an expanded memory: this times its seed hit's relevance
+    /// (default 0.5).
+    pub expand_weight: Option<f64>,
+    /// Subtracted from the score of an assistant memory (default 0.05).
+    pub assistant_weight: Option<f64>,
+    /// Only memories of this role (`user` includes memories with no role).
+    pub role: Option<String>,
+    /// Only memories whose validity starts at or after this time (µs).
+    pub from: Option<i64>,
+    /// Only memories whose validity starts before this time (µs).
+    pub to: Option<i64>,
+    /// `list` (the default: hits) or `context` (a token-budgeted text
+    /// block for an LLM reader, [`Db::recall_context`]).
+    pub format: Option<String>,
+    /// Token budget of the context block (default 2000).
+    pub budget: Option<usize>,
+    /// Show each memory's source in the context block (default false).
+    pub show_source: bool,
 }
 
 /// Options of [`Db::memory_set`]: change a memory's importance, expiry or
@@ -749,6 +819,12 @@ pub struct RecallHit {
     /// of a longer text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// Who said it (`remember {role}`); `None`: not recorded (the user).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Pulled in by entity expansion rather than found by the search.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expanded: bool,
 }
 
 /// What [`Db::forget`] did.
@@ -1065,7 +1141,18 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("3".to_string()))?;
             cfg.version = 3;
         }
+        if cfg.version < 4 {
+            // v3 stores predate speaker roles
+            self.create_v4_relations()?;
+            self.set_mem_config("version", Some("4".to_string()))?;
+            cfg.version = 4;
+        }
         Ok(Some(cfg))
+    }
+
+    fn create_v4_relations(&'s self) -> Result<()> {
+        self.mem_q(&format!("{{:create {MEM_ROLE} {{ns: String, id: String => role: String}}}}"), vec![])?;
+        Ok(())
     }
 
     fn create_v3_relations(&'s self) -> Result<()> {
@@ -1104,6 +1191,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     self.mem_q(&stmt, vec![])?;
                 }
                 self.create_v3_relations()?;
+                self.create_v4_relations()?;
                 self.mem_q(
                     &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: [Lowercase, Stemmer('english'), Stopwords('en')]}}"),
                     vec![],
@@ -1383,6 +1471,22 @@ impl<'s, S: Storage<'s>> Db<S> {
             .rows)
     }
 
+    /// Roles of the memories that have one (`remember {role}`).
+    fn roles_of(&'s self, ns: &str, ids: &[String]) -> Result<BTreeMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        Ok(self
+            .mem_q(
+                &format!("?[id, role] := id in $ids, *{MEM_ROLE}{{ns: $ns, id, role}}"),
+                vec![("ns", s(ns)), ("ids", str_list(ids))],
+            )?
+            .rows
+            .into_iter()
+            .filter_map(|r| Some((cell_str(&r[0])?, cell_str(&r[1])?)))
+            .collect())
+    }
+
     /// Validity history rows `(id, ts, is_assert)` of `ids` in `ns`.
     fn mem_history(&'s self, ns: &str, ids: &[String]) -> Result<Vec<(String, i64, bool)>> {
         Ok(self
@@ -1623,9 +1727,11 @@ impl<'s, S: Storage<'s>> Db<S> {
 
         // candidates per claim; only declarative claims (and candidates)
         // take part in decisions in `auto` mode
+        // assistant and other speakers' memories are never decided
+        let user_said = opts.role.as_deref().map_or(true, |r| r == "user");
         let decided: Vec<bool> = claims
             .iter()
-            .map(|c| !auto || memory_claims::is_declarative(&c.1))
+            .map(|c| user_said && (!auto || memory_claims::is_declarative(&c.1)))
             .collect();
         let mut rows_per: Vec<Vec<Vec<DataValue>>> = Vec::with_capacity(claims.len());
         for (ci, (_, text, vec)) in claims.iter().enumerate() {
@@ -1648,16 +1754,24 @@ impl<'s, S: Storage<'s>> Db<S> {
                 false,
                 None,
             )?;
-            let rows: Vec<Vec<DataValue>> = if auto {
-                rows.into_iter()
-                    .filter(|r| r[2].get_str().is_some_and(memory_claims::is_declarative))
-                    .take(k)
-                    .collect()
-            } else {
-                rows
-            };
             rows_per.push(rows);
         }
+        // candidates: never another speaker's memory; in `auto` mode only
+        // declarative ones, the first k of the 2k fetched
+        let spoken = self.roles_of(
+            ns,
+            &rows_per.iter().flatten().filter_map(|r| cell_str(&r[0])).collect::<Vec<_>>(),
+        )?;
+        let rows_per: Vec<Vec<Vec<DataValue>>> = rows_per
+            .into_iter()
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|r| cell_str(&r[0]).map_or(true, |id| spoken.get(&id).map_or(true, |x| x == "user")))
+                    .filter(|r| !auto || r[2].get_str().is_some_and(memory_claims::is_declarative))
+                    .take(k)
+                    .collect()
+            })
+            .collect();
         let ids: Vec<String> = rows_per
             .iter()
             .flatten()
@@ -1955,6 +2069,11 @@ impl<'s, S: Storage<'s>> Db<S> {
             Some("none") => false,
             Some(x) => bail!("`remember` option split must be 'auto' or 'none', got '{x}'"),
         };
+        if let Some(r) = opts.role.as_deref() {
+            if !ROLES.contains(&r) {
+                bail!("`remember` option role must be 'user', 'assistant' or 'other', got '{r}'");
+            }
+        }
         let floor = opts.min_similarity.unwrap_or(DEFAULT_MIN_SIMILARITY);
         if !(-1.0..=1.0).contains(&floor) {
             bail!("`remember` option min_similarity must be in [-1, 1], got {floor}");
@@ -2014,6 +2133,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             let expires = opts.expires.or(opts.ttl.map(|t| at.saturating_add(t)));
             let mut mems = vec![];
             let mut lives = vec![];
+            let mut roles = vec![];
             let mut vec_rows = vec![];
             let mut old_all: Vec<String> = vec![];
             let mut links = vec![];
@@ -2050,6 +2170,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                     ]));
                     if let Some(e) = expires {
                         lives.push(DataValue::List(vec![s(&ns), s(&mem_id), DataValue::from(e), DataValue::Null]));
+                    }
+                    if let Some(r) = &opts.role {
+                        roles.push(DataValue::List(vec![s(&ns), s(&mem_id), s(r)]));
                     }
                     if let (Some(v), Some(_)) = (&cp.vec, cfg.dim) {
                         vec_rows.push(DataValue::List(vec![
@@ -2136,6 +2259,10 @@ impl<'s, S: Storage<'s>> Db<S> {
                     "{{?[ns, id, expires, archived] <- $lives :put {MEM_LIFE} {{ns, id => expires, archived}}}}"
                 ));
                 p.push(("lives", DataValue::List(lives)));
+            }
+            if !roles.is_empty() {
+                script.push_str(&format!("{{?[ns, id, role] <- $roles :put {MEM_ROLE} {{ns, id => role}}}}"));
+                p.push(("roles", DataValue::List(roles)));
             }
             if !vec_rows.is_empty() {
                 script.push_str(&format!(
@@ -2285,11 +2412,17 @@ impl<'s, S: Storage<'s>> Db<S> {
         let wi = opts.importance_weight.unwrap_or(DEFAULT_IMPORTANCE_WEIGHT);
         let wa = opts.access_weight.unwrap_or(DEFAULT_ACCESS_WEIGHT);
         let wq = opts.question_weight.unwrap_or(DEFAULT_QUESTION_WEIGHT);
+        let mmr = opts.mmr_weight.unwrap_or(DEFAULT_MMR_WEIGHT);
+        let we = opts.expand_weight.unwrap_or(DEFAULT_EXPAND_WEIGHT);
+        let was = opts.assistant_weight.unwrap_or(DEFAULT_ASSISTANT_WEIGHT);
         for (name, x) in [
             ("recency_weight", wr),
             ("importance_weight", wi),
             ("access_weight", wa),
             ("question_weight", wq),
+            ("mmr_weight", mmr),
+            ("expand_weight", we),
+            ("assistant_weight", was),
         ] {
             if !x.is_finite() || x < 0.0 {
                 bail!("`recall` option {name} must be a non-negative number, got {x}");
@@ -2298,6 +2431,18 @@ impl<'s, S: Storage<'s>> Db<S> {
         if !half_life.is_finite() || half_life <= 0.0 {
             bail!("`recall` option half_life_days must be positive, got {half_life}");
         }
+        if let Some(r) = opts.role.as_deref() {
+            if !ROLES.contains(&r) {
+                bail!("`recall` option role must be 'user', 'assistant' or 'other', got '{r}'");
+            }
+        }
+        match opts.format.as_deref() {
+            None | Some("list") | Some("context") => {}
+            Some(f) => bail!("`recall` option format must be 'list' or 'context', got '{f}'"),
+        }
+        let diversity = opts.diversity.unwrap_or(true);
+        let max_stmt = opts.max_per_statement.unwrap_or(DEFAULT_MAX_PER_STATEMENT);
+        let max_src = opts.max_per_source.unwrap_or(DEFAULT_MAX_PER_SOURCE);
         let eids = match &opts.entity {
             Some(e) => {
                 let eids = self.entity_view(&ns)?.cluster_of_name(e);
@@ -2319,11 +2464,21 @@ impl<'s, S: Storage<'s>> Db<S> {
         let qvec = self.embed_if_on(qe.as_deref(), query)?;
         let k = opts.k.unwrap_or(10).max(1);
         let read_at = opts.as_of.unwrap_or_else(now_micros);
-        let fetch = if opts.hide_pending { k * 2 } else { k };
+        let mut fetch = if opts.hide_pending { k * 2 } else { k };
+        // post-filters (valid-from range, role) need a deeper fetch
+        if opts.from.is_some() || opts.to.is_some() || opts.role.is_some() {
+            fetch *= 4;
+        }
         // the blend re-ranks a wider window of the most relevant (the index
         // legs fetch as for k, so the searches cost the same)
-        let window = if blend { fetch.max(2 * k + 10) } else { fetch };
-        let rows = self.mem_search(
+        let mut window = if blend { fetch.max(2 * k + 10) } else { fetch };
+        if diversity {
+            // the diverse selection chooses from a deeper window of the same
+            // index fetch (deeper legs let name-only BM25 matches of short
+            // claims into the fusion: LoCoMo R@5 fell 0.39 -> 0.36)
+            window = window.max(opts.pool.unwrap_or((DIVERSITY_POOL_MULT * k).max(k + 10)));
+        }
+        let mut rows = self.mem_search(
             &cfg,
             &ns,
             query,
@@ -2337,16 +2492,40 @@ impl<'s, S: Storage<'s>> Db<S> {
             !opts.include_archived,
             (!opts.include_expired).then_some(read_at),
         )?;
+        // entity-graph expansion: other memories about the top hits' entities
+        let mut expanded: BTreeSet<String> = BTreeSet::new();
+        if opts.expand.unwrap_or(false) && eids.is_none() && !rows.is_empty() {
+            let (boost, new_rows) = self.expand_rows(&ns, &rows, we, opts.as_of, opts.kind.as_deref())?;
+            // a related memory already in the pool takes the expansion
+            // score when it is higher than its own relevance
+            for r in rows.iter_mut() {
+                if let Some(id) = cell_str(&r[0]) {
+                    if let Some(&b) = boost.get(&id) {
+                        if b > r[1].get_float().unwrap_or(0.0) {
+                            r[1] = DataValue::from(b);
+                            expanded.insert(id);
+                        }
+                    }
+                }
+            }
+            for r in new_rows {
+                if let Some(id) = cell_str(&r[0]) {
+                    expanded.insert(id);
+                    rows.push(r);
+                }
+            }
+        }
         let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
         let iv = intervals(&self.mem_history(&ns, &ids)?, read_at);
         let mut pending: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut access: BTreeMap<String, (i64, i64)> = BTreeMap::new();
         let mut life: BTreeMap<String, (Option<i64>, Option<i64>)> = BTreeMap::new();
+        let mut roles: BTreeMap<String, String> = BTreeMap::new();
         // the statement each memory came from first (its own)
         let mut origin: BTreeMap<String, (i64, String)> = BTreeMap::new();
         if !ids.is_empty() {
-            // pending supersedes, access counts, the tier and the origin
-            // statement, in one read
+            // pending supersedes, access counts, the tier, the role and the
+            // origin statement, in one read
             for r in self
                 .mem_q(
                     &format!(
@@ -2354,6 +2533,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                            id in $ids, *{MEM}{{ns: $ns, id: new @ $at}}, tag = 'p', a = new, b = null\n\
                          ?[tag, id, a, b] := id in $ids, *{MEM_ACCESS}{{ns: $ns, id, n: a, last: b}}, tag = 'a'\n\
                          ?[tag, id, a, b] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires: a, archived: b}}, tag = 'l'\n\
+                         ?[tag, id, a, b] := id in $ids, *{MEM_ROLE}{{ns: $ns, id, role: a}}, tag = 'r', b = null\n\
                          ?[tag, id, a, b] := id in $ids, *{MEM_SOURCE}{{ns: $ns, id, at: b, text: a}}, tag = 's'"
                     ),
                     vec![("ns", s(&ns)), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
@@ -2368,6 +2548,11 @@ impl<'s, S: Storage<'s>> Db<S> {
                     }
                     Some("l") => {
                         life.insert(id, (r[2].get_int(), r[3].get_int()));
+                    }
+                    Some("r") => {
+                        if let Some(x) = cell_str(&r[2]) {
+                            roles.insert(id, x);
+                        }
                     }
                     Some("s") => {
                         if let (Some(t), Some(at)) = (cell_str(&r[2]), r[3].get_int()) {
@@ -2390,12 +2575,29 @@ impl<'s, S: Storage<'s>> Db<S> {
                     return None;
                 }
                 let (from, to) = iv.get(&id).copied().unwrap_or((0, None));
+                if opts.from.is_some_and(|f| from < f) || opts.to.is_some_and(|t| from >= t) {
+                    return None;
+                }
+                let role = roles.get(&id).cloned();
+                if let Some(want) = opts.role.as_deref() {
+                    let is = role.as_deref().unwrap_or("user");
+                    if is != want {
+                        return None;
+                    }
+                }
+                let is_exp = expanded.contains(&id);
+                let (expires, archived) = life.get(&id).copied().unwrap_or((None, None));
+                if is_exp
+                    && ((!opts.include_archived && archived.is_some())
+                        || (!opts.include_expired && expires.is_some_and(|e| e <= read_at)))
+                {
+                    return None;
+                }
                 let (mut n, mut last) = access.get(&id).copied().map_or((0, None), |(n, l)| (n, Some(l)));
                 if let Some((bn, bl)) = self.mem_access.get(&ns, &id) {
                     n += bn;
                     last = Some(last.map_or(bl, |l| l.max(bl)));
                 }
-                let (expires, archived) = life.get(&id).copied().unwrap_or((None, None));
                 let text = cell_str(&r[2])?;
                 // a claim of a longer statement: the statement is its context
                 let context = origin.remove(&id).map(|x| x.1).filter(|t| t.trim() != text.trim());
@@ -2405,7 +2607,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let acc = ((1.0 + n as f64).ln() / (1.0 + ACCESS_SATURATION).ln()).min(1.0);
                 let score = if blend {
                     let q = if wq > 0.0 && !memory_claims::is_declarative(&text) { wq } else { 0.0 };
-                    relevance + wr * recency + wi * (importance.unwrap_or(0.5) - 0.5) + wa * acc - q
+                    let a = if role.as_deref() == Some("assistant") { was } else { 0.0 };
+                    relevance + wr * recency + wi * (importance.unwrap_or(0.5) - 0.5) + wa * acc - q - a
                 } else {
                     relevance
                 };
@@ -2426,13 +2629,44 @@ impl<'s, S: Storage<'s>> Db<S> {
                     importance,
                     valid_from: from,
                     valid_to: to,
+                    role,
+                    expanded: is_exp,
                     id,
                 })
             })
             .collect();
-        if blend {
+        if blend || !expanded.is_empty() {
             // stable: equal scores keep the relevance order
             hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        if diversity && hits.len() > 1 {
+            let vecs: BTreeMap<String, Vec<f32>> = if mmr > 0.0 && cfg.dim.is_some() {
+                let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+                self.mem_q(
+                    &format!("?[id, vec] := id in $ids, *{MEM_VEC}{{ns: $ns, id, vec}}"),
+                    vec![("ns", s(&ns)), ("ids", str_list(&ids))],
+                )?
+                .rows
+                .into_iter()
+                .filter_map(|r| Some((cell_str(&r[0])?, vec_of(&r[1])?)))
+                .collect()
+            } else {
+                BTreeMap::new()
+            };
+            let cands: Vec<memory_recall::SelCand<'_>> = hits
+                .iter()
+                .map(|h| memory_recall::SelCand {
+                    id: &h.id,
+                    score: h.score,
+                    group: h.source.as_deref().map(memory_recall::source_group),
+                    vec: vecs.get(&h.id).map(|v| v.as_slice()),
+                    words: if mmr > 0.0 { memory_recall::word_set(&h.text) } else { BTreeSet::new() },
+                })
+                .collect();
+            let pick = memory_recall::select_diverse(&cands, k, max_stmt, max_src, mmr);
+            drop(cands);
+            let mut slots: Vec<Option<RecallHit>> = hits.into_iter().map(Some).collect();
+            hits = pick.into_iter().filter_map(|i| slots[i].take()).collect();
         }
         hits.truncate(k);
         if opts.record_access.unwrap_or(true) && !hits.is_empty() {
@@ -2443,6 +2677,280 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
         Ok(hits)
+    }
+
+    /// Entity-graph expansion for `recall`: the canonical entities (merges
+    /// followed) of the `EXPAND_FROM` most relevant rows, minus entities that
+    /// more than `EXPAND_MAX_DEGREE` memories mention, and the other memories
+    /// that mention them, scored `weight` × the best seed's relevance.
+    /// Returns those scores for memories already among `rows`, and search
+    /// rows for the others that are valid at the read time (at most
+    /// `EXPAND_MAX_NEW`).
+    fn expand_rows(
+        &'s self,
+        ns: &str,
+        rows: &[Vec<DataValue>],
+        weight: f64,
+        as_of: Option<i64>,
+        kind: Option<&str>,
+    ) -> Result<(BTreeMap<String, f64>, Vec<Vec<DataValue>>)> {
+        let seeds: Vec<(String, f64)> = rows
+            .iter()
+            .take(EXPAND_FROM)
+            .filter_map(|r| Some((cell_str(&r[0])?, r[1].get_float().unwrap_or(0.0))))
+            .collect();
+        let seed_ids: Vec<String> = seeds.iter().map(|x| x.0.clone()).collect();
+        let ment = self.mem_q(
+            &format!("?[id, eid] := id in $ids, *{MEM_MENTION}{{ns: $ns, id, eid}}"),
+            vec![("ns", s(ns)), ("ids", str_list(&seed_ids))],
+        )?;
+        if ment.rows.is_empty() {
+            return Ok(Default::default());
+        }
+        let view = self.entity_view(ns)?;
+        // canonical entity -> best seed relevance
+        let mut canon: BTreeMap<String, f64> = BTreeMap::new();
+        for r in &ment.rows {
+            if let (Some(id), Some(e)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                let rel = seeds.iter().find(|x| x.0 == id).map_or(0.0, |x| x.1);
+                let c = view.canonical(&e);
+                let v = canon.entry(c).or_insert(rel);
+                if rel > *v {
+                    *v = rel;
+                }
+            }
+        }
+        let cluster: BTreeMap<String, String> = view
+            .rows
+            .keys()
+            .map(|e| (e.clone(), view.canonical(e)))
+            .filter(|(_, c)| canon.contains_key(c))
+            .collect();
+        let eids: Vec<String> = cluster.keys().cloned().collect();
+        let mut by_canon: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for r in self
+            .mem_q(
+                &format!("?[eid, id] := eid in $eids, *{MEM_MENTION}{{ns: $ns, eid, id}}"),
+                vec![("ns", s(ns)), ("eids", str_list(&eids))],
+            )?
+            .rows
+        {
+            if let (Some(e), Some(id)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                if let Some(c) = cluster.get(&e) {
+                    by_canon.entry(c.clone()).or_default().insert(id);
+                }
+            }
+        }
+        let have: BTreeSet<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
+        let mut cand: BTreeMap<String, f64> = BTreeMap::new();
+        let mut boost: BTreeMap<String, f64> = BTreeMap::new();
+        for (c, ids) in &by_canon {
+            if ids.len() > EXPAND_MAX_DEGREE {
+                continue;
+            }
+            let sc = weight * canon.get(c).copied().unwrap_or(0.0);
+            // seeds too: another seed's entity can raise one (a lower
+            // score than its own relevance is ignored by the caller)
+            for id in ids {
+                let m = if have.contains(id) { &mut boost } else { &mut cand };
+                let v = m.entry(id.clone()).or_insert(sc);
+                if sc > *v {
+                    *v = sc;
+                }
+            }
+        }
+        if cand.is_empty() {
+            return Ok((boost, vec![]));
+        }
+        let mut cand: Vec<(String, f64)> = cand.into_iter().collect();
+        cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        cand.truncate(EXPAND_MAX_NEW);
+        let mut p = vec![
+            ("ns", s(ns)),
+            (
+                "cands",
+                DataValue::List(
+                    cand.iter()
+                        .map(|(id, sc)| DataValue::List(vec![s(id), DataValue::from(*sc)]))
+                        .collect(),
+                ),
+            ),
+        ];
+        let at = match as_of {
+            Some(t) => {
+                p.push(("as_of", DataValue::from(t)));
+                "$as_of"
+            }
+            None => "'NOW'",
+        };
+        let mut filters = String::new();
+        if let Some(kd) = kind {
+            filters.push_str(", kind == $kind");
+            p.push(("kind", s(kd)));
+        }
+        let mut out = self
+            .mem_q(
+                &format!(
+                    "c[id, score] <- $cands\n\
+                     ?[id, score, text, kind, source, created, importance] := c[id, score], \
+                       *{MEM}{{ns: $ns, id, text, kind, source, created, importance @ {at}}}{filters}"
+                ),
+                p,
+            )?
+            .rows;
+        out.sort_by(|a, b| {
+            b[1].get_float()
+                .partial_cmp(&a[1].get_float())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| cell_str(&a[0]).cmp(&cell_str(&b[0])))
+        });
+        Ok((boost, out))
+    }
+
+    /// `recall` as a token-budgeted text block for an LLM reader
+    /// (`recall {format: 'context', budget}`; docs/specs/memory-api.md,
+    /// "Context output"): the same hits, grouped by entity (else by source
+    /// group), each with its valid-from date, the values it superseded
+    /// ("previously: X (from to until)"), unconfirmed replacements, and the
+    /// statement it came from while the budget lasts. Deterministic.
+    pub fn recall_context(&'s self, query: &str, opts: RecallOpts) -> Result<memory_recall::RecallContext> {
+        let budget = opts.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
+        let show_source = opts.show_source;
+        let ns = ns_of(&opts.ns);
+        let read_at = opts.as_of.unwrap_or_else(now_micros);
+        let hits = self.recall(query, opts)?;
+        if hits.is_empty() {
+            return Ok(memory_recall::render_context(&[], budget, show_source));
+        }
+        let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+        // entities: canonical names
+        let mut ents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let ment = self.mem_q(
+            &format!("?[id, eid] := id in $ids, *{MEM_MENTION}{{ns: $ns, id, eid}}"),
+            vec![("ns", s(&ns)), ("ids", str_list(&ids))],
+        )?;
+        if !ment.rows.is_empty() {
+            let view = self.entity_view(&ns)?;
+            for r in ment.rows {
+                if let (Some(id), Some(e)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    let c = view.canonical(&e);
+                    let name = view.rows.get(&c).or_else(|| view.rows.get(&e)).map(|x| x.0.clone());
+                    if let Some(n) = name {
+                        let v = ents.entry(id).or_default();
+                        if !v.contains(&n) {
+                            v.push(n);
+                        }
+                    }
+                }
+            }
+            for v in ents.values_mut() {
+                v.sort();
+            }
+        }
+        // previously: follow `supersedes` links, up to three steps back
+        let mut prev: BTreeMap<String, Vec<memory_recall::Previous>> = BTreeMap::new();
+        let mut frontier: Vec<(String, String)> = ids.iter().map(|i| (i.clone(), i.clone())).collect();
+        for _ in 0..3 {
+            if frontier.is_empty() {
+                break;
+            }
+            let srcs: Vec<String> = frontier.iter().map(|x| x.1.clone()).collect();
+            let links = self.mem_q(
+                &format!("?[src, dst] := src in $srcs, *{MEM_LINK}{{ns: $ns, src, rel: 'supersedes', dst}}"),
+                vec![("ns", s(&ns)), ("srcs", str_list(&srcs))],
+            )?;
+            let pairs: Vec<(String, String)> = links
+                .rows
+                .iter()
+                .filter_map(|r| Some((cell_str(&r[0])?, cell_str(&r[1])?)))
+                .collect();
+            if pairs.is_empty() {
+                break;
+            }
+            let olds: Vec<String> = pairs.iter().map(|x| x.1.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+            let versions = self.mem_versions(&ns, &olds, read_at)?;
+            let mut next = vec![];
+            for (root, src) in &frontier {
+                for (a, b) in &pairs {
+                    if a != src {
+                        continue;
+                    }
+                    if let Some(v) = versions.get(b) {
+                        prev.entry(root.clone()).or_default().push(v.clone());
+                        next.push((root.clone(), b.clone()));
+                    }
+                }
+            }
+            frontier = next;
+        }
+        for v in prev.values_mut() {
+            v.sort_by(|a, b| b.from.cmp(&a.from).then(a.text.cmp(&b.text)));
+        }
+        // unconfirmed replacements (pending supersedes)
+        let newer: Vec<String> = hits
+            .iter()
+            .flat_map(|h| h.pending_superseded_by.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let newer_v = if newer.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.mem_versions(&ns, &newer, read_at)?
+        };
+        let items: Vec<memory_recall::CtxItem> = hits
+            .into_iter()
+            .map(|h| memory_recall::CtxItem {
+                entities: ents.remove(&h.id).unwrap_or_default(),
+                previously: prev.remove(&h.id).unwrap_or_default(),
+                maybe_replaced_by: h
+                    .pending_superseded_by
+                    .iter()
+                    .filter_map(|n| newer_v.get(n).map(|v| (v.text.clone(), v.from)))
+                    .collect(),
+                id: h.id,
+                text: h.text,
+                valid_from: h.valid_from,
+                valid_to: h.valid_to,
+                role: h.role,
+                source: h.source,
+                context: h.context,
+            })
+            .collect();
+        Ok(memory_recall::render_context(&items, budget, show_source))
+    }
+
+    /// The last version of each memory that started at or before `t`: its
+    /// text, valid-from and the end of that version (a retraction), if any.
+    fn mem_versions(&'s self, ns: &str, ids: &[String], t: i64) -> Result<BTreeMap<String, memory_recall::Previous>> {
+        let mut by: BTreeMap<String, Vec<(i64, bool, String)>> = BTreeMap::new();
+        for r in self
+            .mem_q(
+                &format!("?[id, vt, text] := id in $ids, *{MEM}{{ns: $ns, id, vt, text}}"),
+                vec![("ns", s(ns)), ("ids", str_list(ids))],
+            )?
+            .rows
+        {
+            if let (Some(id), DataValue::Validity(v), Some(text)) = (cell_str(&r[0]), &r[1], cell_str(&r[2])) {
+                by.entry(id).or_default().push((v.timestamp.0 .0, v.is_assert.0, text));
+            }
+        }
+        let mut out = BTreeMap::new();
+        for (id, mut v) in by {
+            v.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            // the last assertion at or before t, and the first retraction after it
+            let Some(ai) = v.iter().rposition(|x| x.1 && x.0 <= t) else { continue };
+            let to = v[ai + 1..].iter().find(|x| !x.1).map(|x| x.0);
+            out.insert(
+                id,
+                memory_recall::Previous {
+                    text: v[ai].2.clone(),
+                    from: v[ai].0,
+                    to,
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// Write the buffered access counts (`kleos_mem_access`) in one small
@@ -2753,6 +3261,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                :rm {MEM_LINK} {{ns, src, rel, dst}}}}\
              {{?[ns, id] := *{MEM_ACCESS}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_ACCESS} {{ns, id}}}}\
              {{?[ns, id] := *{MEM_LIFE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_LIFE} {{ns, id}}}}\
+             {{?[ns, id] := *{MEM_ROLE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_ROLE} {{ns, id}}}}\
              {{gone[x] := x in $eids, not *{MEM_ENTITY}{{ns: $ns, eid: x}}\n\
                ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[from]\n\
                ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[into] \
@@ -2999,7 +3508,12 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             "recall" => {
                 let q = take_str("query")?.ok_or_else(|| miette::miette!("memory recall needs 'query'"))?;
-                serde_json::to_value(self.recall(&q, from_args(op, args)?)?).into_diagnostic()?
+                let opts: RecallOpts = from_args(op, args)?;
+                if opts.format.as_deref() == Some("context") {
+                    serde_json::to_value(self.recall_context(&q, opts)?).into_diagnostic()?
+                } else {
+                    serde_json::to_value(self.recall(&q, opts)?).into_diagnostic()?
+                }
             }
             "forget" => serde_json::to_value(self.forget(from_args(op, args)?)?).into_diagnostic()?,
             "set" => self.memory_set(from_args(op, args)?)?,
@@ -3048,7 +3562,7 @@ pub(crate) fn memory_rows(op: &str, v: JsonValue) -> NamedRows {
             let cols: Vec<String> = [
                 "id", "text", "score", "kind", "valid_from", "valid_to", "created", "source", "importance",
                 "pending_superseded_by", "relevance", "recency", "access_count", "last_access", "expires", "archived",
-                "context",
+                "context", "role",
             ]
             .iter()
             .map(|s| s.to_string())
