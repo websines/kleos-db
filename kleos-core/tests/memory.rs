@@ -171,7 +171,7 @@ fn recall(db: &DbInstance, q: &str, ns_: &str, as_of: Option<i64>) -> Vec<String
     )
     .unwrap()
     .into_iter()
-    .map(|h| h.text)
+    .map(|h| h.memory_text().to_string())
     .collect()
 }
 
@@ -636,7 +636,7 @@ fn hits(db: &DbInstance, q: &str, opts: RecallOpts) -> Vec<RecallHit> {
 }
 
 fn texts(h: &[RecallHit]) -> Vec<&str> {
-    h.iter().map(|x| x.text.as_str()).collect()
+    h.iter().map(|x| x.memory_text()).collect()
 }
 
 const STRONG: &str = "The garage door code is 4417, garage door.";
@@ -1113,7 +1113,24 @@ fn claims_split_store_and_recall_with_context() {
         .recall("dog named Max", RecallOpts { ns: ns("u"), k: Some(1), ..Default::default() })
         .unwrap()
         .remove(0);
-    assert_eq!((hit.text.as_str(), hit.context.as_deref()), (MAX, Some(text)));
+    // the list text is the statement; the claim is kept in `claim`
+    assert_eq!((hit.text.as_str(), hit.claim.as_deref(), hit.context.as_deref()), (text, Some(MAX), Some(text)));
+    assert_eq!(hit.memory_text(), MAX);
+    // hit_text: 'claim' is the claim alone, as before
+    let old = db
+        .recall("dog named Max", RecallOpts { ns: ns("u"), k: Some(1), hit_text: Some("claim".into()), ..Default::default() })
+        .unwrap()
+        .remove(0);
+    assert_eq!((old.text.as_str(), old.claim.as_deref(), old.context.as_deref()), (MAX, None, Some(text)));
+    // a long statement: a window of text_chars around the claim
+    let win = db
+        .recall("dog named Max", RecallOpts { ns: ns("u"), k: Some(1), text_chars: Some(30), ..Default::default() })
+        .unwrap()
+        .remove(0);
+    assert!(win.text.contains(MAX) && win.text.chars().count() <= 32, "{}", win.text);
+    assert!(db
+        .recall("x", RecallOpts { ns: ns("u"), hit_text: Some("all".into()), ..Default::default() })
+        .is_err());
     assert_eq!(hit.id, format!("{stmt}.2"));
 
     // one sentence: the plain statement id, no claims, no context
@@ -1367,7 +1384,7 @@ fn claims_questions_rank_below_statements() {
         .unwrap()
     };
     let (on, off) = (get(None), get(Some(0.0)));
-    let score = |h: &[RecallHit], t: &str| h.iter().find(|x| x.text == t).unwrap().score;
+    let score = |h: &[RecallHit], t: &str| h.iter().find(|x| x.memory_text() == t).unwrap().score;
     let q = "Where should I go on holiday?";
     let s = "I go to Spain every summer.";
     assert!((score(&off, q) - score(&on, q) - 0.05).abs() < 1e-6);
@@ -1597,4 +1614,156 @@ fn remember_roles_and_time_filters() {
     db.forget(ForgetOpts { ns: ns("u"), id: asst.id.clone(), mode: Some("erase".into()), ..Default::default() })
         .unwrap();
     assert_eq!(count(&db, "?[id] := *kleos_mem_role{ns: 'u', id}"), 0);
+}
+
+// ------------------------------------------------------- event times (dates)
+
+fn event_rows(db: &DbInstance, ns_: &str) -> Vec<(String, i64, i64, String, String, String)> {
+    db.run_script(
+        &format!("?[id, start, end, g, k, e] := *kleos_mem_event{{ns: '{ns_}', id, start, end, granularity: g, kind: k, expr: e}}"),
+        Default::default(),
+        ScriptMutability::Immutable,
+    )
+    .unwrap()
+    .rows
+    .into_iter()
+    .map(|r| {
+        (
+            r[0].get_str().unwrap().to_string(),
+            r[1].get_int().unwrap(),
+            r[2].get_int().unwrap(),
+            r[3].get_str().unwrap().to_string(),
+            r[4].get_str().unwrap().to_string(),
+            r[5].get_str().unwrap().to_string(),
+        )
+    })
+    .collect()
+}
+
+/// Relative dates in a memory are resolved against when it was said and
+/// stored per claim in `remember`'s transaction; list hits carry them, the
+/// context block shows them, `event_from` / `event_to` filter on them (else
+/// on valid-from), the question-date boost, erase, and the v4 migration.
+#[test]
+fn event_times_stored_shown_filtered_and_erased() {
+    let m = Models::new("evt", vec![], vec![]);
+    let db = m.db();
+    // T0 = 2026-01-01 (Thu); d(7) = 2026-01-08 (Thu)
+    let r = db
+        .remember("I went to the support group yesterday. Several members told inspiring stories about their families.", at("u", d(7)))
+        .unwrap();
+    let stmt = r.id.clone().unwrap();
+    let c1 = format!("{stmt}.1");
+    let c2 = format!("{stmt}.2");
+    let cat = db.remember("I adopted a cat last summer.", at("u", d(30))).unwrap().id.unwrap();
+    let tennis = db.remember("I play tennis with Anna.", at("u", d(40))).unwrap().id.unwrap();
+    let ev = event_rows(&db, "u");
+    assert_eq!(ev.len(), 2, "{ev:?}");
+    assert!(ev.contains(&(c1.clone(), d(6), d(7), "day".into(), "point".into(), "yesterday".into())), "{ev:?}");
+    // last summer, said on 2026-01-31: June to August 2025
+    let summer = (1_748_736_000_000_000i64, 1_756_684_800_000_000i64); // 2025-06-01, 2025-09-01
+    assert!(ev.contains(&(cat.clone(), summer.0, summer.1, "season".into(), "point".into(), "last summer".into())), "{ev:?}");
+
+    // list hits carry their own events
+    let h = db.recall("support group", ropts("u", 3)).unwrap();
+    let g = h.iter().find(|x| x.id == c1).expect("the claim");
+    assert_eq!(g.events.len(), 1);
+    assert_eq!((g.events[0].expr.as_str(), g.events[0].start, g.events[0].granularity.as_str()), ("yesterday", d(6), "day"));
+    assert!(h.iter().find(|x| x.id == tennis).map_or(true, |x| x.events.is_empty()));
+
+    // the context block shows the resolved date inline
+    let c = db.recall_context("support group", ropts("u", 3)).unwrap();
+    assert!(
+        c.text.contains("I went to the support group yesterday. (≈ 2026-01-07 (Wed), \"yesterday\")"),
+        "{}",
+        c.text
+    );
+    // a claim without a date of its own: its statement's date with `said in`
+    let p = db.recall_context("inspiring stories families", RecallOpts { k: Some(1), ..ropts("u", 1) }).unwrap();
+    assert!(p.ids == vec![c2.clone()], "{p:?}");
+    assert!(
+        p.text.contains("said in: \"I went to the support group yesterday. Several members told inspiring stories about their families.\" (≈ 2026-01-07 (Wed), \"yesterday\")"),
+        "{}",
+        p.text
+    );
+
+    // event filters: overlap with the event time; no event -> valid-from;
+    // a claim without one of its own -> its statement's
+    let ids = |o: RecallOpts| -> BTreeSet<String> {
+        db.recall("support group cat tennis stories", o).unwrap().into_iter().map(|h| h.id).collect()
+    };
+    assert_eq!(
+        ids(RecallOpts { event_from: Some(summer.0), event_to: Some(summer.1), ..ropts("u", 10) }),
+        BTreeSet::from([cat.clone()])
+    );
+    assert_eq!(
+        ids(RecallOpts { event_from: Some(d(6)), event_to: Some(d(7)), ..ropts("u", 10) }),
+        BTreeSet::from([c1.clone(), c2.clone()])
+    );
+    assert_eq!(
+        ids(RecallOpts { event_from: Some(d(39)), event_to: Some(d(41)), ..ropts("u", 10) }),
+        BTreeSet::from([tennis.clone()])
+    );
+    // the said-on day of the support group is not its event time
+    assert!(ids(RecallOpts { event_from: Some(d(7)), event_to: Some(d(8)), ..ropts("u", 10) }).is_empty());
+
+    // the question-date boost (default 0.03; 0 is off): memories whose
+    // event time overlaps a date in the query (resolved at query_at) gain it
+    let q = "what did I do yesterday";
+    let score = |w: Option<f64>, id: &str| -> f64 {
+        db.recall(q, RecallOpts { event_weight: w, query_at: Some(d(7)), ..ropts("u", 10) })
+            .unwrap()
+            .into_iter()
+            .find(|h| h.id == id)
+            .unwrap()
+            .score
+    };
+    assert!((score(Some(0.5), &c1) - score(Some(0.0), &c1) - 0.5).abs() < 1e-6);
+    assert!((score(None, &c1) - score(Some(0.0), &c1) - 0.03).abs() < 1e-6);
+    assert!((score(Some(0.5), &cat) - score(Some(0.0), &cat)).abs() < 1e-6);
+    assert!(db.recall(q, RecallOpts { event_weight: Some(-1.0), ..ropts("u", 2) }).is_err());
+
+    // CozoScript and JSON surfaces return the events
+    let j = db
+        .memory_call("recall", serde_json::json!({"query": "support group", "ns": "u", "k": 1, "record_access": false}))
+        .unwrap();
+    assert_eq!(j[0]["events"][0]["expr"], "yesterday", "{j}");
+
+    // erase removes the statement's event rows
+    db.forget(ForgetOpts { ns: ns("u"), id: Some(stmt.clone()), mode: Some("erase".into()), ..Default::default() })
+        .unwrap();
+    let ev = event_rows(&db, "u");
+    assert!(ev.iter().all(|e| !e.0.starts_with(&stmt)), "{ev:?}");
+    assert_eq!(ev.len(), 1);
+
+    // a v4 store gains the relation on first use, backfilled from the texts
+    db.run_script("::remove kleos_mem_event", Default::default(), ScriptMutability::Mutable).unwrap();
+    db.run_script(
+        "?[key, value] <- [['version', '4']] :put kleos_mem_config {key => value}",
+        Default::default(),
+        ScriptMutability::Mutable,
+    )
+    .unwrap();
+    let _ = db.recall("cat", ropts("u", 1)).unwrap();
+    let ev = event_rows(&db, "u");
+    assert_eq!(ev, vec![(cat.clone(), summer.0, summer.1, "season".into(), "point".into(), "last summer".into())]);
+}
+
+/// The default list text of a claim is its statement, so a reader that
+/// shows only `text` sees the whole message once per statement.
+#[test]
+fn list_text_is_the_statement_by_default() {
+    let m = Models::new("ltxt", vec![], vec![]);
+    let db = m.db();
+    let msg = "Caroline: I went to a LGBTQ support group. It was so powerful. The stories inspired me.";
+    db.remember(msg, at("u", d(1))).unwrap();
+    db.remember("Melanie: I painted a sunrise.", at("u", d(2))).unwrap();
+    let h = db.recall("support group stories", ropts("u", 2)).unwrap();
+    let mine: Vec<_> = h.iter().filter(|x| x.claim.is_some()).collect();
+    assert_eq!(mine.len(), 1, "{h:?}");
+    assert_eq!(mine[0].text, msg);
+    assert!(msg.contains(mine[0].claim.as_deref().unwrap()));
+    // a one-sentence memory is unchanged and has no claim
+    let p = h.iter().find(|x| x.text.starts_with("Melanie")).unwrap();
+    assert!(p.claim.is_none() && p.context.is_none());
 }

@@ -62,8 +62,22 @@ def open_db(variant, device):
 # recall option sets for --configs. `base` is recall as before diversity
 # (the top k by score); the others are measured against it.
 CONFIGS = {
-    "base": {"diversity": False},
+    # main's recall before diversity, shown as before: the top k by score, each
+    # claim's own text, no question-date boost (builds before wave3/dates take
+    # {"diversity": False})
+    "base": {"diversity": False, "hit_text": "claim", "event_weight": 0.0},
+    # recall's defaults: diversity, a claim hit's text is its statement, and the
+    # question-date boost (0.03 since wave3/dates; the question's dates are
+    # resolved at the question date, LongMemEval, or the last session date, LoCoMo)
     "default": {},
+    # the defaults without the question-date boost
+    "noqdate": {"event_weight": 0.0},
+    # the defaults with claim texts (the list output before wave3/dates)
+    "claimtext": {"hit_text": "claim"},
+    # question-date boost: dates in the question raise memories whose event
+    # time overlaps them (the default since wave3/dates)
+    "qdate": {"event_weight": 0.03},
+    "qdate10": {"event_weight": 0.1},
     "stmt1": {"max_per_statement": 1, "max_per_source": 0, "mmr_weight": 0.0},
     "stmt1-src3": {"max_per_statement": 1, "max_per_source": 3, "mmr_weight": 0.0},
     "stmt1-src2": {"max_per_statement": 1, "max_per_source": 2, "mmr_weight": 0.0},
@@ -142,6 +156,8 @@ def recall(db, ns, query, owner, k, **opts):
             "srcs": owner_of(owner, h),
             "role": h.get("role"),
             "context": (h.get("context") or "")[:4000] or None,
+            "claim": h.get("claim"),
+            "events": h.get("events") or None,
             "score": h.get("score"),
             "valid_from": h.get("valid_from"),
             "pending_superseded_by": h.get("pending_superseded_by"),
@@ -180,6 +196,8 @@ def run_lme(args, outdir):
         per = {}
         for cname, copts in configs.items():
             ro = {**ro0, **copts}
+            if "as_of" not in ro:  # dates in the question are relative to when it was asked
+                ro["query_at"] = C.lme_ts(x["question_date"])
             hits10, ms10 = recall(db, ns, x["question"], owner, 10, **ro)
             hits5, ms5 = recall(db, ns, x["question"], owner, 5, **ro)
             hp = {}
@@ -242,8 +260,10 @@ def run_locomo(args, outdir):
         owner, st, lat = ingest(db, ns, units)
         ingest_s = time.perf_counter() - t0
         per = {c: [] for c in configs}
+        last_at = max(u["at"] for u in units)
         for qi, q in enumerate(conv["qa"]):
             for cname, copts in configs.items():
+                copts = {**copts, "query_at": last_at}  # the question is asked after the last session
                 h10, ms10 = recall(db, ns, q["question"], owner, 10, **copts)
                 h5, ms5 = recall(db, ns, q["question"], owner, 5, **copts)
                 hp = {}

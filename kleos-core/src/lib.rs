@@ -166,6 +166,7 @@ pub mod embed;
 pub mod memory;
 pub mod memory_claims;
 pub mod memory_recall;
+pub mod memory_time;
 pub mod memory_engram;
 pub mod entity;
 pub mod engram;

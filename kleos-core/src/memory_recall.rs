@@ -195,6 +195,12 @@ pub struct CtxItem {
     pub context: Option<String>,
     /// Canonical entity names the memory mentions.
     pub entities: Vec<String>,
+    /// Its own resolved temporal expressions: `(expression, resolved)`,
+    /// e.g. `("yesterday", "2023-05-07 (Sun)")`.
+    pub events: Vec<(String, String)>,
+    /// Those of the other claims of its statement (shown with `said in`
+    /// when the expression is in the shown window).
+    pub statement_events: Vec<(String, String)>,
     /// The values it replaced, newest first.
     pub previously: Vec<Previous>,
     /// Texts of newer memories that may replace it (pending decisions).
@@ -273,6 +279,20 @@ pub const CONTEXT_CHARS: usize = 600;
 /// The header line of every context block.
 pub const CONTEXT_HEADER: &str = "Recalled memories, grouped by topic, oldest first. [date] is when a statement was made or became true; \"previously\" lines are older values it replaced.";
 
+/// The header when some item shows resolved dates.
+pub const CONTEXT_HEADER_DATES: &str = "Recalled memories, grouped by topic, oldest first. [date] is when a statement was made or became true; (≈ date, \"words\") resolves its relative times; \"previously\" lines are older values it replaced.";
+
+/// ` (≈ 2023-05-07 (Sun), "yesterday"; ≈ May 2023, "this month")`, or
+/// nothing.
+fn dates_note<'a>(events: impl Iterator<Item = &'a (String, String)>) -> String {
+    let parts: Vec<String> = events.map(|(x, d)| format!("≈ {d}, \"{}\"", one_line(x))).collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join("; "))
+    }
+}
+
 /// Render the context block from `items` (rank order) within `budget`
 /// tokens. Items are grouped by entity (the canonical entity most of the
 /// shown memories mention; ties by name), else by source group, else
@@ -299,6 +319,11 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
             }
             m.previously.extend(it.previously.iter().cloned());
             m.maybe_replaced_by.extend(it.maybe_replaced_by.iter().cloned());
+            for e in &it.events {
+                if !m.events.contains(e) {
+                    m.events.push(e.clone());
+                }
+            }
             m.valid_from = m.valid_from.min(it.valid_from);
             ids_of[i].push(it.id.clone());
         } else {
@@ -335,7 +360,12 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         .collect();
 
     // pass 1: items in rank order while they fit; pass 2: contexts
-    let header_tokens = estimate_tokens(CONTEXT_HEADER) + 1;
+    let header = if merged.iter().any(|it| !it.events.is_empty() || !it.statement_events.is_empty()) {
+        CONTEXT_HEADER_DATES
+    } else {
+        CONTEXT_HEADER
+    };
+    let header_tokens = estimate_tokens(header) + 1;
     let mut used = header_tokens;
     let mut shown = vec![false; merged.len()];
     let mut lines_of: Vec<Vec<String>> = vec![vec![]; merged.len()];
@@ -352,6 +382,7 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         }
         first.push(' ');
         first.push_str(&one_line(&it.text));
+        first.push_str(&dates_note(it.events.iter()));
         if show_source {
             if let Some(s) = &it.source {
                 first.push_str(&format!(" [source: {s}]"));
@@ -388,7 +419,12 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         if one_line(&w) == one_line(&it.text) {
             continue;
         }
-        let line = format!("  said in: \"{w}\"");
+        let more = dates_note(
+            it.statement_events
+                .iter()
+                .filter(|e| !it.events.contains(e) && w.contains(one_line(&e.0).as_str())),
+        );
+        let line = format!("  said in: \"{w}\"{more}");
         let cost = estimate_tokens(&line) + 1;
         if used + cost > budget {
             continue;
@@ -416,7 +452,7 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
     let mut keyed: Vec<(i64, usize, &str)> = order.iter().enumerate().map(|(r, g)| (first_at(g), r, *g)).collect();
     keyed.sort();
     let order: Vec<&str> = keyed.into_iter().map(|x| x.2).collect();
-    let mut text = String::from(CONTEXT_HEADER);
+    let mut text = String::from(header);
     text.push('\n');
     let mut ids = vec![];
     for g in order {
