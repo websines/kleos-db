@@ -1,10 +1,11 @@
 # Memory API: remember, recall, forget, reflect, link
 
-Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring. Diverse recall, entity expansion, the context output, speaker roles and valid-from filters: wave3/recall.
+Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring. Diverse recall, entity expansion, the context output, speaker roles and valid-from filters: wave3/recall. Statement text in list hits and write-time dates (event times): wave3/dates.
 
 Code:
 - `kleos-core/src/memory.rs`: schema, the operations, entity resolution and the same-subject gate, scoring, the access buffer and the JSON entry point;
 - `kleos-core/src/memory_recall.rs`: the diverse selection and the context block (model-free, deterministic);
+- `kleos-core/src/memory_time.rs`: the rule-based temporal-expression parser behind event times (see "Dates");
 - `parse/sys.rs` and `cozoscript.pest` (`mem_api_op`): the `::memory` ops;
 - `lib.rs`: `DbInstance` dispatch;
 - `kleos-lib-python/src/lib.rs`: Python methods;
@@ -44,12 +45,13 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 | `kleos_mem_access` | `{ns, id => n, last}` | Access counts and the last access (µs), written by batched flushes (see "Ranking"). |
 | `kleos_mem_life` | `{ns, id => expires?, archived?}` | Expiry and archive time (µs). Only memories with a TTL or in the archive have a row. |
 | `kleos_mem_role` | `{ns, id => role}` | Who said a memory (`remember {role}`): `user`, `assistant` or `other`. Only memories stored with a role have a row; none means the user. |
+| `kleos_mem_event` | `{ns, id, n => start, end, granularity, kind, expr}` | Event times: the temporal expressions in a memory's text ("yesterday", "last summer", "since 2019"), resolved against its `at` into `[start, end)` µs, one row per expression (see "Dates"). |
 | `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`, and `engram` when an Engram model is attached. It is created last, so its presence marks a complete schema. |
 | `kleos_engram_queue` | `{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}` | Only with an Engram model attached (feature `engram`): one job per memory change for the overlay worker. See "Engram attachment". |
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
 
-The schema version is 4. A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`.
+The schema version is 5. A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`; a v4 store gains `kleos_mem_event`, filled from the stored memories (each text parsed against its first valid-from).
 
 **Why vectors live in a sibling relation.**
 - The dimension is unknown until an embedder is chosen. With a separate relation, a store created without one can gain vectors later: `::memory init {embedder: …}` creates the relation and backfills it.
@@ -88,7 +90,7 @@ Steps:
 | Tentative (label yes, band tentative); `supersedes` with p ≥ 0.5 below the calibrated threshold (the review band, below); or two auto answers that disagree | The memory is inserted and the decision is recorded `pending`. `recall` flags the older memory with `pending_superseded_by`, and can hide it with `hide_pending`. |
 | None | Plain insert. |
 
-All writes of one `remember` go in one imperative script, so one transaction: the insert, retractions, vector, links, source and audit rows, the expiry row, and the entity rows, merges, review links and mentions. The candidate read, entity resolution and the model calls (about 0.5 s) happen before that transaction.
+All writes of one `remember` go in one imperative script, so one transaction: the insert, retractions, vector, links, source and audit rows, the expiry row, the event rows, and the entity rows, merges, review links and mentions. The candidate read, entity resolution and the model calls (about 0.5 s) happen before that transaction.
 
 **Concurrency** works the same within one process and across processes sharing a database:
 
@@ -266,7 +268,9 @@ Options:
 - `expand` (default false) and `expand_weight` (default 0.5): entity-graph expansion (see "Entity expansion");
 - `assistant_weight` (default 0.05) and `role` (a filter): see "Speaker roles";
 - `from`, `to` (µs): only memories whose validity starts in `[from, to)` (see "Valid-from filters");
-- `format`: `list` (the default) or `context`, with `budget` (tokens, default 2000) and `show_source` (default false): see "Context output".
+- `format`: `list` (the default) or `context`, with `budget` (tokens, default 2000) and `show_source` (default false): see "Context output";
+- `hit_text` (`statement`, the default, or `claim`) and `text_chars` (default 1000): what a list hit's `text` is (see "List text");
+- `event_from`, `event_to` (µs): only memories whose event time overlaps `[event_from, event_to)`; `event_weight` (default 0) and `query_at`: the question-date boost (see "Dates").
 
 It is one script:
 - The vector leg is HNSW over `kleos_mem_vec`, filtered to the namespace (and `current` unless `as_of` is set). Its score is −distance.
@@ -275,7 +279,7 @@ It is one script:
 - The result is joined with `kleos_mem` `@ 'NOW'` (or `@ $as_of`), plus the kind and entity filters. Archived memories, and memories whose expiry is at or before the read time, are left out unless asked. The order is by relevance; with the blend on, a window of max(2k + 10, k) is fetched and re-ranked.
 - Both legs over-fetch (4k + 16, and 4× more with a filter), because the indexes also hold stale versions.
 
-Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`, and `context` (the whole statement) when the memory is one claim of a longer text. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
+Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`; `context` (the whole statement) and `claim` (the memory's own text) when the memory is one claim of a longer text; and `events` (its resolved dates, see "Dates") when it has any. By default a claim hit's `text` is its statement (see "List text"); `memory_text()` in Rust, or `claim` falling back to `text`, is the stored text. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
 
 The vector leg always returns the nearest neighbours, so recall returns up to k memories even when none are relevant. There is no score cutoff.
 
@@ -312,19 +316,51 @@ It is skipped when recall already filters by `entity`. It only does something wh
 - recall subtracts `assistant_weight` (default 0.05) from an assistant memory's blended score, so of two equally relevant memories the user's ranks first;
 - `recall {role}` filters by speaker (`user` includes memories with no role); hits carry `role`.
 
+#### List text
+
+With claims and the default statement cap, each hit is one sentence of a message. A reader that shows only each hit's `text` then loses the rest of the message: who is speaking (LoCoMo's "Caroline:" is on the first claim only), what "it" refers to, and the date words in the next sentence. On the 301 LoCoMo questions that reader scored 0.671 against 0.708 for the old top-k list (docs/benchmarks/memory.md, "Dates and list text").
+
+So by default (`hit_text: 'statement'`) a claim hit's `text` is its statement: the whole statement when it has at most `text_chars` characters (default 1000; 98% of LongMemEval's and all of LoCoMo's statements), else a window of that many characters around the claim, cut at word boundaries with "…". The claim itself is in `claim`, and the whole statement stays in `context`. A memory that is not a claim (one sentence, `split: 'none'`) is unchanged and has no `claim`.
+
+- Ranking, diversity, the context block and `remember`'s candidates all work on the claims; only the returned `text` changes.
+- **Compatibility.** `hit_text: 'claim'` returns the claim as `text`, exactly as before. Callers that compared `text` with a stored sentence should use `claim` (or `memory_text()`).
+- With `diversity: false`, several claims of one statement can be returned, each with the same statement text; the default cap of one claim per statement avoids that.
+
 #### Valid-from filters
 
-`recall {from, to}` keeps memories whose validity (the interval containing the read time) starts in `[from, to)`: "what did I do in May". They are post-filters on a 4× deeper fetch. `as_of` is the other time question: the state of the world at a time. Parsing dates out of questions is not done.
+`recall {from, to}` keeps memories whose validity (the interval containing the read time) starts in `[from, to)`: "what did I say in May". They are post-filters on a 4× deeper fetch. `as_of` is the other time question: the state of the world at a time. For when the thing a memory talks about happened, use `event_from` / `event_to` (see "Dates").
+
+#### Dates (event times)
+
+A memory's valid-from is when it was said. What it talks about often happened at another time: "I went to the support group yesterday", said on 2023-05-08, is about 2023-05-07. Mem0's extraction LLM writes such dates into its memories; kleos resolves them at write time with rules, no model.
+
+**Parser** (`memory_time::parse_times(text, at)`): English temporal expressions resolved against `at` into `[start, end)` with a granularity (`day`, `week`, `month`, `season`, `year`) and a kind (`point`, `since`, `until`, `range`, `duration`):
+- absolute dates in the usual formats ("May 7, 2023", "7 May 2023", "2023-05-07", "May 7" with the year from `at`), month and year ("March 2022"), years with a cue ("in 2019");
+- relative days and parts of days ("yesterday", "tonight", "last night", "this morning", "the day before yesterday");
+- offsets ("two days ago", "a month ago", "in three weeks");
+- weekdays and weekends ("last Friday", "next Friday", "on Friday", "this weekend");
+- relative weeks, months, years and seasons ("last week", "earlier this month", "last summer", "in March");
+- spans ("since 2019", "until June", "for the past three weeks") and ranges ("from May 3 to May 7", "between 2019 and 2021").
+
+Weeks run Monday to Sunday and seasons are northern meteorological ones. The parser is conservative: a missed date is better than a wrong one. "may" the modal, "march" the verb, "second" as an ordinal, names like "June", vague times ("recently", "a few days ago", "the other day") and habits ("every Monday") are not dates. The rules for ambiguous cases are in the module's documentation.
+
+**Storage.** `remember` parses each claim it adds, against the statement's `at`, and writes one `kleos_mem_event` row per expression in its single transaction. A duplicate adds no rows (the existing memory has its own). Retraction leaves them (history); `forget {mode: 'erase'}` removes them.
+
+**Use.**
+- **List hits** carry `events: [{start, end, granularity, kind, expr}]`, the memory's own.
+- **The context block** shows them inline (and its header then explains the `(≈ date, "words")` notation): `- [2023-05-08 (Mon)] Caroline: I went to a LGBTQ support group yesterday. (≈ 2023-05-07 (Sun), "yesterday")`. A claim's statement's other dates are added to its `said in` line when the expression is in the shown window. An expression that names a year ("May 7, 2023") is not repeated.
+- **`recall {event_from, event_to}`** keeps memories whose event time overlaps `[event_from, event_to)`. A memory without events of its own counts by its statement's (the other claims of the same message), else by its valid-from. Post-filters on a 4× deeper fetch, like `from` / `to`.
+- **Question dates** (`event_weight`, default 0): with a weight, the dates in the query are resolved against `query_at` (default `as_of`, else now), and a memory whose event time (as for the filter) overlaps one of them gains the weight. It is off by default: on the benchmarks below it changed nothing measurable (docs/benchmarks/memory.md).
 
 #### Context output
 
 `recall {format: 'context', budget}` (Rust `Db::recall_context`, Python `recall(..., format="context")` or `recall_context`) returns `{text, tokens, budget, ids, omitted}`: the same hits as `recall` with the same options, as a Markdown block for an LLM reader. For example:
 
 ```
-Recalled memories, grouped by topic, oldest first. [date] is when a statement was made or became true; "previously" lines are older values it replaced.
+Recalled memories, grouped by topic, oldest first. [date] is when a statement was made or became true; (≈ date, "words") resolves its relative times; "previously" lines are older values it replaced.
 
 ## user
-- [2026-01-11 (Sun)] I moved to Lisbon last month.
+- [2026-01-11 (Sun)] I moved to Lisbon last month. (≈ December 2025, "last month")
   previously: "I live in Berlin." (from 2026-01-02 until 2026-01-11)
 
 ## Anna
@@ -333,7 +369,7 @@ Recalled memories, grouped by topic, oldest first. [date] is when a statement wa
 ```
 
 - **Grouping.** A memory goes under the canonical entity it mentions that most of the shown memories mention (ties by name); without entities, under its source group ("Conversation of <date>"); else "Other". Groups are in time order (by their first memory; ties by the best rank), and memories within a group by date, so the newest value reads last, as in a dated list. With groups ordered by relevance (the first version), LongMemEval knowledge-update QA was 0.69 against 0.81 for the dated list, so the order was changed (results in docs/benchmarks/memory.md). Claims of one statement are one item.
-- **Each item:** `[valid-from date]`, `(until <date>)` for a past read, `(assistant)` / `(other)` for another speaker, the text, and the source with `show_source`. Source names are not shown by default; they are ids, not content.
+- **Each item:** `[valid-from date]`, `(until <date>)` for a past read, `(assistant)` / `(other)` for another speaker, the text, its resolved dates `(≈ date, "expression")` (see "Dates"), and the source with `show_source`. Source names are not shown by default; they are ids, not content.
 - **`previously`:** the memories this one superseded (`supersedes` links), up to three steps back, each with its own validity: "previously: X (from d1 until d2)". It is the history kleos already stores, so the reader sees both the current value and the change.
 - **`possibly replaced by`:** a newer memory with a pending `supersedes` decision about this one, marked unconfirmed.
 - **`said in`:** for a claim, up to 600 characters of the statement it came from, centred on the claim and cut at word boundaries.

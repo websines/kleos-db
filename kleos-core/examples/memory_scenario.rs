@@ -182,7 +182,7 @@ fn main() -> miette::Result<()> {
         if !hide && !blend && !at_stream {
             rec_off_ms.push(t.elapsed().as_secs_f64() * 1e3);
         }
-        let top = hits.first().map(|h| h.text.clone()).unwrap_or_default();
+        let top = hits.first().map(|h| h.memory_text().to_string()).unwrap_or_default();
         let ok = q["expect"].as_str().unwrap().split('|').any(|e| top.contains(e));
         let stale: Vec<&str> = q["stale"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
         let is_stale = |t: &str| stale.iter().any(|s| t.contains(s));
@@ -192,11 +192,11 @@ fn main() -> miette::Result<()> {
         if is_stale(&top) {
             stale_top += 1;
         }
-        if hits.iter().any(|h| is_stale(&h.text)) {
+        if hits.iter().any(|h| is_stale(h.memory_text())) {
             stale_in_k += 1;
         }
         answers.push(json!({"query": query, "as_of_day": q["as_of_day"], "ok": ok, "top": top,
-            "hits": hits.iter().map(|h| json!([h.text, h.score, h.pending_superseded_by.len()])).collect::<Vec<_>>()}));
+            "hits": hits.iter().map(|h| json!([h.memory_text(), h.score, h.pending_superseded_by.len()])).collect::<Vec<_>>()}));
     }
     policies.push(json!({"hide_pending": hide, "blend": blend, "read_at_stream_time": at_stream, "questions": qs.len(), "correct_top1": correct,
         "accuracy": correct as f64 / qs.len() as f64, "stale_top1": stale_top, "stale_in_top3": stale_in_k,
@@ -247,12 +247,12 @@ fn main() -> miette::Result<()> {
                             ..Default::default()
                         },
                     )?;
-                    let top = hits.first().map(|h| h.text.as_str()).unwrap_or_default();
+                    let top = hits.first().map(|h| h.memory_text()).unwrap_or_default();
                     if q["expect"].as_str().unwrap().split('|').any(|e| top.contains(e)) {
                         correct += 1;
                     }
                     let stale: Vec<&str> = q["stale"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
-                    if hits.iter().any(|h| stale.iter().any(|s| h.text.contains(s))) {
+                    if hits.iter().any(|h| stale.iter().any(|s| h.memory_text().contains(s))) {
                         stale_in_k += 1;
                     }
                 }

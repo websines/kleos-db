@@ -8,7 +8,9 @@
 returned (cached by retrieval.py), and an LLM judge grades the answer with the
 benchmark's official judge prompt. Same reader and judge for every condition:
 
-  kleos:<variant>  the top-10 memories recall returned, in time order, with dates
+  kleos:<variant>  the top-10 memories recall returned, in time order, with dates: each
+                   hit's `text` as the API presents it (since wave3/dates a claim's
+                   statement by default; `hit_text: 'claim'` configs show the claim)
   stmt:<variant>   the same list, each claim replaced by its whole statement (`context`)
   ctx:<variant>    the same recall as recall's context block (`format: 'context'`,
                    stored by retrieval.py --context-budget): grouped, dated, with
@@ -246,6 +248,8 @@ def run_locomo(args, cli):
             items.append({"question_id": f"{sid}/{qi}", "sid": sid, "q": q})
     for c in recs:
         items = [it for it in items if it["question_id"] in recs[c]]
+    if args.types:  # LoCoMo: categories, e.g. "2" (temporal)
+        items = [it for it in items if str(it["q"]["category"]) in args.types.split(",")]
     if args.n and args.n < len(items):
         items = C.stratified_sample(items, lambda it: it["q"]["category"], args.n, seed=args.seed)
     turns = {sid: {u["src"]: u for u in C.locomo_units(conv)} for sid, conv in convs.items()}
@@ -303,7 +307,7 @@ def main():
     ap.add_argument("--unit", default="user")
     ap.add_argument("--ids-variant", default=None, help="LongMemEval: only questions this retrieval variant ran")
     ap.add_argument("--n", type=int, default=0, help="stratified sample size")
-    ap.add_argument("--types", default=None, help="LongMemEval: only these question types (comma list)")
+    ap.add_argument("--types", default=None, help="LongMemEval: only these question types; LoCoMo: categories (comma list)")
     ap.add_argument("--seed", type=int, default=C.SEED)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--thinking", action="store_true", help="let the reasoning model think (default off)")

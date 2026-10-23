@@ -41,6 +41,7 @@ use crate::embed;
 use crate::entity::{EntityConfig, Mention, Outcome, ResolveOptions, ENTITY_LINKS, ENTITY_MERGES};
 use crate::memory_claims;
 use crate::memory_recall;
+use crate::memory_time;
 use crate::memory_engram::{self as engram_hook, Job};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
@@ -76,10 +77,15 @@ pub const MEM_LIFE: &str = "kleos_mem_life";
 /// Who said a memory: `{ns, id => role}` (`user`, `assistant` or `other`).
 /// Only memories stored with a `role` have a row; none means the user.
 pub const MEM_ROLE: &str = "kleos_mem_role";
+/// Event times: `{ns, id, n => start, end, granularity, kind, expr}`, the
+/// temporal expressions of a memory's text ("yesterday", "last summer",
+/// "since 2019") resolved against when it was said (its `at`), one row per
+/// expression (`memory_time`). Written in `remember`'s transaction.
+pub const MEM_EVENT: &str = "kleos_mem_event";
 /// Current schema version (2 added `kleos_mem_ns`; 3 added `kleos_mem_access`
 /// and `kleos_mem_life`, and entity merges / review links; 4 added
-/// `kleos_mem_role`).
-const SCHEMA_VERSION: i64 = 4;
+/// `kleos_mem_role`; 5 added `kleos_mem_event`).
+const SCHEMA_VERSION: i64 = 5;
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
@@ -146,6 +152,12 @@ const DEFAULT_EXPAND_WEIGHT: f64 = 0.5;
 const EXPAND_FROM: usize = 3;
 const EXPAND_MAX_DEGREE: usize = 25;
 const EXPAND_MAX_NEW: usize = 30;
+/// List hits of a claim of a longer statement carry this many characters of
+/// the statement around the claim as their `text` (`recall {hit_text,
+/// text_chars}`); 98% of LongMemEval's and all of LoCoMo's statements fit.
+const DEFAULT_TEXT_CHARS: usize = 1000;
+/// Default weight of the question-date boost (`recall {event_weight}`): off.
+const DEFAULT_EVENT_WEIGHT: f64 = 0.0;
 /// Default token budget of `recall {format: 'context'}`.
 const DEFAULT_CONTEXT_BUDGET: usize = 2000;
 /// Roles `remember` accepts.
@@ -297,6 +309,71 @@ fn bump_ns_head_by(n: usize) -> String {
 /// The memory id of claim `i` (0-based) of a multi-claim statement.
 fn claim_id(stmt: &str, i: usize) -> String {
     format!("{stmt}.{}", i + 1)
+}
+
+/// `kleos_mem_event` rows `[ns, id, n, start, end, granularity, kind, expr]`
+/// of a memory's text said at `at`.
+fn event_rows(ns: &str, id: &str, text: &str, at: i64) -> Vec<DataValue> {
+    memory_time::parse_times(text, at)
+        .into_iter()
+        .enumerate()
+        .map(|(n, e)| {
+            DataValue::List(vec![
+                s(ns),
+                s(id),
+                DataValue::from(n as i64),
+                DataValue::from(e.start),
+                DataValue::from(e.end),
+                s(e.granularity.as_str()),
+                s(e.kind.as_str()),
+                s(&e.expr),
+            ])
+        })
+        .collect()
+}
+
+/// A stored event row back as a [`MemEvent`].
+fn event_of(v: &DataValue) -> Option<(i64, MemEvent)> {
+    let l = match v {
+        DataValue::List(l) if l.len() == 6 => l,
+        _ => return None,
+    };
+    Some((
+        l[0].get_int()?,
+        MemEvent {
+            start: l[1].get_int()?,
+            end: l[2].get_int()?,
+            granularity: cell_str(&l[3])?,
+            kind: cell_str(&l[4])?,
+            expr: cell_str(&l[5])?,
+        },
+    ))
+}
+
+/// The reader-facing form of an event ("2023-05-07 (Sun)", "May 2023",
+/// "since 2019"), or `None` when the expression already says it all (it
+/// names a year).
+fn describe_event(e: &MemEvent) -> Option<String> {
+    let has_year = e
+        .expr
+        .split(|c: char| !c.is_ascii_digit())
+        .any(|w| w.len() == 4);
+    if has_year {
+        return None;
+    }
+    Some(memory_time::describe(&memory_time::TimeExpr {
+        start: e.start,
+        end: e.end,
+        granularity: memory_time::Granularity::parse(&e.granularity)?,
+        kind: memory_time::TimeKind::parse(&e.kind)?,
+        expr: e.expr.clone(),
+        span: (0, 0),
+    }))
+}
+
+/// Whether `[a0, a1)` and `[b0, b1)` overlap (an open side is `None`).
+fn overlaps(a0: i64, a1: i64, b0: Option<i64>, b1: Option<i64>) -> bool {
+    b0.map_or(true, |b| a1 > b) && b1.map_or(true, |b| a0 < b)
 }
 
 /// Whether `text` mentions the entity name `name` (case-insensitive, at
@@ -593,6 +670,26 @@ pub struct RecallOpts {
     pub budget: Option<usize>,
     /// Show each memory's source in the context block (default false).
     pub show_source: bool,
+    /// What a list hit's `text` is for a claim of a longer statement:
+    /// `statement` (the default: up to `text_chars` characters of the
+    /// statement around the claim, the claim itself in `claim`) or `claim`
+    /// (the claim alone, as before).
+    pub hit_text: Option<String>,
+    /// Characters of the statement a claim hit's `text` shows (default 1000).
+    pub text_chars: Option<usize>,
+    /// Only memories whose event time overlaps `[event_from, event_to)`
+    /// (µs); a memory without event times of its own or of its statement
+    /// counts by its valid-from.
+    pub event_from: Option<i64>,
+    /// See `event_from`.
+    pub event_to: Option<i64>,
+    /// Added to the score of a memory whose event time (else valid-from)
+    /// overlaps a date in the query, resolved against `as_of` or now
+    /// (default 0: off).
+    pub event_weight: Option<f64>,
+    /// The time the query's dates are resolved against (µs); default
+    /// `as_of`, else now.
+    pub query_at: Option<i64>,
 }
 
 /// Options of [`Db::memory_set`]: change a memory's importance, expiry or
@@ -825,6 +922,37 @@ pub struct RecallHit {
     /// Pulled in by entity expansion rather than found by the search.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub expanded: bool,
+    /// The memory's own text, when `text` is the statement around it: a
+    /// claim of a longer statement, with `hit_text: 'statement'` (the
+    /// default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    /// When what the memory talks about happened: its temporal expressions
+    /// ("yesterday", "last summer") resolved against when it was said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<MemEvent>,
+}
+
+impl RecallHit {
+    /// The memory's own stored text (the claim), whatever `text` shows.
+    pub fn memory_text(&self) -> &str {
+        self.claim.as_deref().unwrap_or(&self.text)
+    }
+}
+
+/// A temporal expression of a memory, resolved (`kleos_mem_event`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemEvent {
+    /// Start of the interval (µs, inclusive).
+    pub start: i64,
+    /// End of the interval (µs, exclusive).
+    pub end: i64,
+    /// `day`, `week`, `month`, `season` or `year`.
+    pub granularity: String,
+    /// `point`, `since`, `until`, `range` or `duration`.
+    pub kind: String,
+    /// The expression as written ("yesterday").
+    pub expr: String,
 }
 
 /// What [`Db::forget`] did.
@@ -1147,7 +1275,60 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("4".to_string()))?;
             cfg.version = 4;
         }
+        if cfg.version < 5 {
+            // v4 stores predate event times: create the relation and parse
+            // the memories already stored, each against its first valid-from
+            self.create_v5_relations()?;
+            self.backfill_events()?;
+            self.set_mem_config("version", Some("5".to_string()))?;
+            cfg.version = 5;
+        }
         Ok(Some(cfg))
+    }
+
+    fn create_v5_relations(&'s self) -> Result<()> {
+        self.mem_q(
+            &format!(
+                "{{:create {MEM_EVENT} {{ns: String, id: String, n: Int => start: Int, end: Int, granularity: String, kind: String, expr: String}}}}"
+            ),
+            vec![],
+        )?;
+        Ok(())
+    }
+
+    /// Event rows for every memory of a store that predates them: each
+    /// memory's text at its first assertion, parsed against that time.
+    fn backfill_events(&'s self) -> Result<usize> {
+        let mut first: BTreeMap<(String, String), (i64, String)> = BTreeMap::new();
+        for r in self.mem_q(&format!("?[ns, id, vt, text] := *{MEM}{{ns, id, vt, text}}"), vec![])?.rows {
+            if let (Some(ns), Some(id), DataValue::Validity(v), Some(t)) =
+                (cell_str(&r[0]), cell_str(&r[1]), &r[2], cell_str(&r[3]))
+            {
+                if !v.is_assert.0 {
+                    continue;
+                }
+                let ts = v.timestamp.0 .0;
+                let e = first.entry((ns, id)).or_insert((ts, t.clone()));
+                if ts < e.0 {
+                    *e = (ts, t);
+                }
+            }
+        }
+        let rows: Vec<DataValue> = first
+            .into_iter()
+            .flat_map(|((ns, id), (at, text))| event_rows(&ns, &id, &text, at))
+            .collect();
+        let n = rows.len();
+        for chunk in rows.chunks(512) {
+            self.mem_q(
+                &format!(
+                    "?[ns, id, n, start, end, granularity, kind, expr] <- $rows \
+                     :put {MEM_EVENT} {{ns, id, n => start, end, granularity, kind, expr}}"
+                ),
+                vec![("rows", DataValue::List(chunk.to_vec()))],
+            )?;
+        }
+        Ok(n)
     }
 
     fn create_v4_relations(&'s self) -> Result<()> {
@@ -1192,6 +1373,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
                 self.create_v3_relations()?;
                 self.create_v4_relations()?;
+                self.create_v5_relations()?;
                 self.mem_q(
                     &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: [Lowercase, Stemmer('english'), Stopwords('en')]}}"),
                     vec![],
@@ -2134,6 +2316,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             let mut mems = vec![];
             let mut lives = vec![];
             let mut roles = vec![];
+            let mut events = vec![];
             let mut vec_rows = vec![];
             let mut old_all: Vec<String> = vec![];
             let mut links = vec![];
@@ -2174,6 +2357,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     if let Some(r) = &opts.role {
                         roles.push(DataValue::List(vec![s(&ns), s(&mem_id), s(r)]));
                     }
+                    events.extend(event_rows(&ns, &mem_id, &cp.text, at));
                     if let (Some(v), Some(_)) = (&cp.vec, cfg.dim) {
                         vec_rows.push(DataValue::List(vec![
                             s(&ns),
@@ -2263,6 +2447,13 @@ impl<'s, S: Storage<'s>> Db<S> {
             if !roles.is_empty() {
                 script.push_str(&format!("{{?[ns, id, role] <- $roles :put {MEM_ROLE} {{ns, id => role}}}}"));
                 p.push(("roles", DataValue::List(roles)));
+            }
+            if !events.is_empty() {
+                script.push_str(&format!(
+                    "{{?[ns, id, n, start, end, granularity, kind, expr] <- $events \
+                      :put {MEM_EVENT} {{ns, id, n => start, end, granularity, kind, expr}}}}"
+                ));
+                p.push(("events", DataValue::List(events)));
             }
             if !vec_rows.is_empty() {
                 script.push_str(&format!(
@@ -2397,9 +2588,76 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// count (docs/specs/memory-api.md, "Ranking"), or by relevance alone
     /// with `blend: false`. The returned memories count as accessed.
     pub fn recall(&'s self, query: &str, opts: RecallOpts) -> Result<Vec<RecallHit>> {
+        let statement_text = match opts.hit_text.as_deref() {
+            None | Some("statement") => true,
+            Some("claim") => false,
+            Some(x) => bail!("`recall` option hit_text must be 'statement' or 'claim', got '{x}'"),
+        };
+        let chars = opts.text_chars.unwrap_or(DEFAULT_TEXT_CHARS).max(1);
+        let (mut hits, _) = self.recall_hits(query, opts)?;
+        if statement_text {
+            for h in hits.iter_mut() {
+                // a claim of a longer statement: the reader sees the
+                // statement (or a window of it around the claim)
+                let Some(c) = h.context.as_deref() else { continue };
+                let w = if c.chars().count() <= chars {
+                    c.trim().to_string()
+                } else {
+                    memory_recall::window(c, &h.text, chars)
+                };
+                if w != h.text {
+                    h.claim = Some(std::mem::replace(&mut h.text, w));
+                }
+            }
+        }
+        Ok(hits)
+    }
+
+    /// The events of the statements `ids` belong to (a claim's statement is
+    /// the id before its `.n`), by memory id.
+    fn statement_events(&'s self, ns: &str, ids: &[String]) -> Result<BTreeMap<String, Vec<MemEvent>>> {
+        let stmts: BTreeSet<&str> = ids.iter().map(|i| memory_recall::statement_of(i)).collect();
+        if stmts.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let exact: Vec<String> = stmts.iter().map(|x| x.to_string()).collect();
+        let prefixes: Vec<String> = stmts.iter().map(|x| format!("{x}.")).collect();
+        let mut out: BTreeMap<String, Vec<(i64, MemEvent)>> = BTreeMap::new();
+        for r in self
+            .mem_q(
+                &format!(
+                    "?[id, ev] := id in $exact, *{MEM_EVENT}{{ns: $ns, id, n, start, end, granularity, kind, expr}}, \
+                       ev = [n, start, end, granularity, kind, expr]\n\
+                     ?[id, ev] := p in $ps, *{MEM_EVENT}{{ns: $ns, id, n, start, end, granularity, kind, expr}}, \
+                       id > p, id < concat(p, '~'), starts_with(id, p), ev = [n, start, end, granularity, kind, expr]"
+                ),
+                vec![("ns", s(ns)), ("exact", str_list(&exact)), ("ps", str_list(&prefixes))],
+            )?
+            .rows
+        {
+            if let (Some(id), Some(e)) = (cell_str(&r[0]), event_of(&r[1])) {
+                out.entry(id).or_default().push(e);
+            }
+        }
+        Ok(out
+            .into_iter()
+            .map(|(id, mut v)| {
+                v.sort_by_key(|x| x.0);
+                (id, v.into_iter().map(|x| x.1).collect())
+            })
+            .collect())
+    }
+
+    /// `recall` before the list text is chosen: hits with the claim as
+    /// `text`, and the events of the hits' statements by memory id.
+    fn recall_hits(
+        &'s self,
+        query: &str,
+        opts: RecallOpts,
+    ) -> Result<(Vec<RecallHit>, BTreeMap<String, Vec<MemEvent>>)> {
         let cfg = match self.mem_config()? {
             Some(c) => c,
-            None => return Ok(vec![]),
+            None => return Ok(Default::default()),
         };
         let ns = ns_of(&opts.ns);
         let w = opts.vector_weight.unwrap_or(DEFAULT_VECTOR_WEIGHT);
@@ -2415,7 +2673,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mmr = opts.mmr_weight.unwrap_or(DEFAULT_MMR_WEIGHT);
         let we = opts.expand_weight.unwrap_or(DEFAULT_EXPAND_WEIGHT);
         let was = opts.assistant_weight.unwrap_or(DEFAULT_ASSISTANT_WEIGHT);
+        let wev = opts.event_weight.unwrap_or(DEFAULT_EVENT_WEIGHT);
         for (name, x) in [
+            ("event_weight", wev),
             ("recency_weight", wr),
             ("importance_weight", wi),
             ("access_weight", wa),
@@ -2447,7 +2707,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             Some(e) => {
                 let eids = self.entity_view(&ns)?.cluster_of_name(e);
                 if eids.is_empty() {
-                    return Ok(vec![]);
+                    return Ok(Default::default());
                 }
                 Some(eids)
             }
@@ -2466,9 +2726,19 @@ impl<'s, S: Storage<'s>> Db<S> {
         let read_at = opts.as_of.unwrap_or_else(now_micros);
         let mut fetch = if opts.hide_pending { k * 2 } else { k };
         // post-filters (valid-from range, role) need a deeper fetch
-        if opts.from.is_some() || opts.to.is_some() || opts.role.is_some() {
+        let by_event = opts.event_from.is_some() || opts.event_to.is_some();
+        if opts.from.is_some() || opts.to.is_some() || opts.role.is_some() || by_event {
             fetch *= 4;
         }
+        // dates in the query, for the event boost
+        let qdates: Vec<(i64, i64)> = if wev > 0.0 {
+            memory_time::parse_times(query, opts.query_at.or(opts.as_of).unwrap_or(read_at))
+                .into_iter()
+                .map(|e| (e.start, e.end))
+                .collect()
+        } else {
+            vec![]
+        };
         // the blend re-ranks a wider window of the most relevant (the index
         // legs fetch as for k, so the searches cost the same)
         let mut window = if blend { fetch.max(2 * k + 10) } else { fetch };
@@ -2565,6 +2835,21 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
             }
         }
+        // event times: each memory's own, else its statement's
+        let sev = self.statement_events(&ns, &ids)?;
+        let mut by_stmt: BTreeMap<&str, Vec<&MemEvent>> = BTreeMap::new();
+        for (id, v) in &sev {
+            by_stmt.entry(memory_recall::statement_of(id)).or_default().extend(v.iter());
+        }
+        let event_spans = |id: &str, from: i64| -> Vec<(i64, i64)> {
+            let own = sev.get(id).filter(|v| !v.is_empty()).map(|v| v.iter().collect::<Vec<_>>());
+            let evs = own.or_else(|| by_stmt.get(memory_recall::statement_of(id)).cloned()).unwrap_or_default();
+            if evs.is_empty() {
+                vec![(from, from + 1)]
+            } else {
+                evs.iter().map(|e| (e.start, e.end)).collect()
+            }
+        };
         let half_life_us = half_life * MICROS_PER_DAY;
         let mut hits: Vec<RecallHit> = rows
             .into_iter()
@@ -2578,6 +2863,13 @@ impl<'s, S: Storage<'s>> Db<S> {
                 if opts.from.is_some_and(|f| from < f) || opts.to.is_some_and(|t| from >= t) {
                     return None;
                 }
+                let spans = if by_event || !qdates.is_empty() { event_spans(&id, from) } else { vec![] };
+                if by_event && !spans.iter().any(|&(a, b)| overlaps(a, b, opts.event_from, opts.event_to)) {
+                    return None;
+                }
+                let dated = qdates
+                    .iter()
+                    .any(|&(qa, qb)| spans.iter().any(|&(a, b)| overlaps(a, b, Some(qa), Some(qb))));
                 let role = roles.get(&id).cloned();
                 if let Some(want) = opts.role.as_deref() {
                     let is = role.as_deref().unwrap_or("user");
@@ -2612,6 +2904,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 } else {
                     relevance
                 };
+                let score = if dated { score + wev } else { score };
                 Some(RecallHit {
                     pending_superseded_by: by,
                     score,
@@ -2631,11 +2924,13 @@ impl<'s, S: Storage<'s>> Db<S> {
                     valid_to: to,
                     role,
                     expanded: is_exp,
+                    claim: None,
+                    events: sev.get(&id).cloned().unwrap_or_default(),
                     id,
                 })
             })
             .collect();
-        if blend || !expanded.is_empty() {
+        if blend || !expanded.is_empty() || !qdates.is_empty() {
             // stable: equal scores keep the relevance order
             hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         }
@@ -2676,7 +2971,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let _ = self.memory_flush();
             }
         }
-        Ok(hits)
+        Ok((hits, sev))
     }
 
     /// Entity-graph expansion for `recall`: the canonical entities (merges
@@ -2818,10 +3113,31 @@ impl<'s, S: Storage<'s>> Db<S> {
         let show_source = opts.show_source;
         let ns = ns_of(&opts.ns);
         let read_at = opts.as_of.unwrap_or_else(now_micros);
-        let hits = self.recall(query, opts)?;
+        let (hits, sev) = self.recall_hits(query, opts)?;
         if hits.is_empty() {
             return Ok(memory_recall::render_context(&[], budget, show_source));
         }
+        // resolved dates: each hit's own, and its statement's other claims'
+        let notes = |v: &[MemEvent]| -> Vec<(String, String)> {
+            let mut out: Vec<(String, String)> = vec![];
+            for e in v {
+                if let Some(d) = describe_event(e) {
+                    if !out.contains(&(e.expr.clone(), d.clone())) {
+                        out.push((e.expr.clone(), d));
+                    }
+                }
+            }
+            out
+        };
+        let stmt_notes = |id: &str| -> Vec<(String, String)> {
+            let st = memory_recall::statement_of(id);
+            let all: Vec<MemEvent> = sev
+                .iter()
+                .filter(|(i, _)| i.as_str() != id && memory_recall::statement_of(i) == st)
+                .flat_map(|(_, v)| v.iter().cloned())
+                .collect();
+            notes(&all)
+        };
         let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
         // entities: canonical names
         let mut ents: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2901,6 +3217,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         let items: Vec<memory_recall::CtxItem> = hits
             .into_iter()
             .map(|h| memory_recall::CtxItem {
+                events: notes(&h.events),
+                statement_events: stmt_notes(&h.id),
                 entities: ents.remove(&h.id).unwrap_or_default(),
                 previously: prev.remove(&h.id).unwrap_or_default(),
                 maybe_replaced_by: h
@@ -3262,6 +3580,7 @@ impl<'s, S: Storage<'s>> Db<S> {
              {{?[ns, id] := *{MEM_ACCESS}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_ACCESS} {{ns, id}}}}\
              {{?[ns, id] := *{MEM_LIFE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_LIFE} {{ns, id}}}}\
              {{?[ns, id] := *{MEM_ROLE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_ROLE} {{ns, id}}}}\
+             {{?[ns, id, n] := *{MEM_EVENT}{{ns, id, n}}, ns = $ns, id in $ids :rm {MEM_EVENT} {{ns, id, n}}}}\
              {{gone[x] := x in $eids, not *{MEM_ENTITY}{{ns: $ns, eid: x}}\n\
                ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[from]\n\
                ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[into] \
@@ -3562,7 +3881,7 @@ pub(crate) fn memory_rows(op: &str, v: JsonValue) -> NamedRows {
             let cols: Vec<String> = [
                 "id", "text", "score", "kind", "valid_from", "valid_to", "created", "source", "importance",
                 "pending_superseded_by", "relevance", "recency", "access_count", "last_access", "expires", "archived",
-                "context", "role",
+                "context", "role", "claim", "events",
             ]
             .iter()
             .map(|s| s.to_string())
