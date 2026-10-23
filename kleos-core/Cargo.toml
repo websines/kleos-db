@@ -237,6 +237,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "embed_scifact"
 required-features = ["infer"]
 
+[[example]]
+name = "memory_scenario"
+required-features = ["infer"]
+
 [[bench]]
 name = "point_lookup"
 harness = false

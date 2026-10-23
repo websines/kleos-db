@@ -56,6 +56,10 @@ const DEFAULT_KIND: &str = "fact";
 const DEFAULT_K: usize = 5;
 /// Vector-leg weight of the hybrid fusion (the SciFact-tuned 0.6, CHANGELOG).
 const DEFAULT_VECTOR_WEIGHT: f64 = 0.6;
+/// A `supersedes` answer at or above this p, but below the calibrated
+/// threshold, is kept for review. The tuned decider-nano calibration has
+/// threshold = τ_auto (0.997), so it has no tentative band of its own.
+const REVIEW_P: f64 = 0.5;
 
 fn now_micros() -> i64 {
     SystemTime::now()
@@ -182,6 +186,10 @@ pub struct RecallOpts {
     pub as_of: Option<i64>,
     /// Vector-leg weight in [0, 1] (text gets the rest); default 0.6.
     pub vector_weight: Option<f64>,
+    /// Leave out memories that a memory valid at the read time may have
+    /// superseded (a pending `supersedes` decision); default false: return
+    /// them, flagged in `pending_superseded_by`.
+    pub hide_pending: bool,
 }
 
 /// Options of [`Db::forget`].
@@ -305,6 +313,9 @@ pub struct RecallHit {
     pub valid_from: i64,
     /// End of that interval (µs); `None`: still valid.
     pub valid_to: Option<i64>,
+    /// Memories valid at the read time that may have superseded this one
+    /// (pending `supersedes` decisions, see `reflect`).
+    pub pending_superseded_by: Vec<String>,
 }
 
 /// What [`Db::forget`] did.
@@ -1024,8 +1035,11 @@ impl<'s, S: Storage<'s>> Db<S> {
                     } else {
                         "superseded"
                     }
-                } else if d.label == "yes" && d.band != Band::None {
-                    // tentative, an auto answer that conflicts with the
+                } else if (d.label == "yes" && d.band != Band::None)
+                    || (d.template == "supersedes" && d.p >= REVIEW_P)
+                {
+                    // tentative, a likely supersede below the calibrated
+                    // threshold, an auto answer that conflicts with the
                     // other template, a late arrival, or an auto supersede
                     // left undone because the statement is a duplicate
                     "pending"
@@ -1176,25 +1190,49 @@ impl<'s, S: Storage<'s>> Db<S> {
         if !(0.0..=1.0).contains(&w) {
             bail!("`recall` option vector_weight must be in [0, 1], got {w}");
         }
+        let k = opts.k.unwrap_or(10).max(1);
         let rows = self.mem_search(
             &cfg,
             &ns,
             query,
             qvec,
-            opts.k.unwrap_or(10).max(1),
+            if opts.hide_pending { k * 2 } else { k },
             opts.as_of,
             opts.kind.as_deref(),
             opts.entity.as_deref(),
             w,
         )?;
         let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
-        let iv = intervals(&self.mem_history(&ns, &ids)?, opts.as_of.unwrap_or_else(now_micros));
+        let read_at = opts.as_of.unwrap_or_else(now_micros);
+        let iv = intervals(&self.mem_history(&ns, &ids)?, read_at);
+        let mut pending: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        if !ids.is_empty() {
+            for r in self
+                .mem_q(
+                    &format!(
+                        "?[cand, new] := *{MEM_DECISION}{{ns: $ns, new, cand, template: 'supersedes', status: 'pending'}}, \
+                           cand in $ids, *{MEM}{{ns: $ns, id: new @ $at}}"
+                    ),
+                    vec![("ns", s(&ns)), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
+                )?
+                .rows
+            {
+                if let (Some(c), Some(n)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    pending.entry(c).or_default().push(n);
+                }
+            }
+        }
         Ok(rows
             .into_iter()
             .filter_map(|r| {
                 let id = cell_str(&r[0])?;
+                let by = pending.remove(&id).unwrap_or_default();
+                if opts.hide_pending && !by.is_empty() {
+                    return None;
+                }
                 let (from, to) = iv.get(&id).copied().unwrap_or((0, None));
                 Some(RecallHit {
+                    pending_superseded_by: by,
                     score: r[1].get_float().unwrap_or(0.0),
                     text: cell_str(&r[2])?,
                     kind: cell_str(&r[3]).unwrap_or_default(),
@@ -1206,6 +1244,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     id,
                 })
             })
+            .take(k)
             .collect())
     }
 
@@ -1604,6 +1643,7 @@ pub(crate) fn memory_rows(op: &str, v: JsonValue) -> NamedRows {
         ("recall", JsonValue::Array(hits)) => {
             let cols: Vec<String> = [
                 "id", "text", "score", "kind", "valid_from", "valid_to", "created", "source", "importance",
+                "pending_superseded_by",
             ]
             .iter()
             .map(|s| s.to_string())

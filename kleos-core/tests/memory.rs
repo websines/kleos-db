@@ -64,6 +64,10 @@ struct Nli {
     entail: Vec<(&'static str, &'static str)>,
 }
 
+/// Pairs the fake decider is unsure about: P(contradiction) ≈ 0.9, below
+/// the tuned threshold (0.997) but above the review cut (0.5).
+const UNSURE: [(&str, &str); 1] = [("I work at Siemens.", "I joined Spotify.")];
+
 impl Decider for Nli {
     fn model_id(&self) -> String {
         self.id.clone()
@@ -79,6 +83,8 @@ impl Decider for Nli {
                 let (a, b) = st.split_once("\nHypothesis: ").unwrap_or((st, ""));
                 let logits = if self.contra.iter().any(|&(x, y)| x == a && y == b) {
                     vec![0.0, 0.0, 12.0]
+                } else if UNSURE.iter().any(|&(x, y)| x == a && y == b) {
+                    vec![0.0, 0.0, 2.2]
                 } else if self.entail.iter().any(|&(x, y)| (x == a && y == b) || (x == b && y == a)) {
                     vec![12.0, 0.0, 0.0]
                 } else {
@@ -234,6 +240,32 @@ fn add_supersede_and_time_travel() {
     let ch: BTreeSet<_> = r.changes.iter().map(|c| (c.id.clone(), c.change.clone(), c.at)).collect();
     assert!(ch.contains(&(berlin.clone(), "ended".to_string(), d(10))), "{ch:?}");
     assert!(ch.contains(&(lisbon, "added".to_string(), d(10))), "{ch:?}");
+}
+
+#[test]
+fn unsure_supersede_is_pending_and_flagged() {
+    let m = Models::new("unsure", vec![], vec![]);
+    let db = m.db();
+    let old = db.remember(UNSURE[0].0, at("u", d(1))).unwrap().id.unwrap();
+    let r = db.remember(UNSURE[0].1, at("u", d(2))).unwrap();
+    assert!(r.superseded.is_empty());
+    assert_eq!(r.tentative.len(), 1, "{r:?}");
+    let t = &r.tentative[0];
+    assert_eq!((t.template.as_str(), t.band.as_str(), t.candidate.as_str()), ("supersedes", "none", old.as_str()));
+    assert!(t.p > 0.5 && t.p < 0.997, "{t:?}");
+    // reads choose: flagged by default, hidden on request
+    let q = |hide| {
+        db.recall("where do I work", RecallOpts { ns: ns("u"), hide_pending: hide, ..Default::default() })
+            .unwrap()
+    };
+    let shown = q(false);
+    let flagged = shown.iter().find(|h| h.id == old).unwrap();
+    assert_eq!(flagged.pending_superseded_by, vec![r.id.clone().unwrap()]);
+    assert!(q(true).iter().all(|h| h.id != old));
+    // reflect lists it as pending and as a contradiction candidate
+    let refl = db.reflect(ReflectOpts { ns: ns("u"), ..Default::default() }).unwrap();
+    assert_eq!(refl.pending.len(), 1);
+    assert_eq!(refl.contradictions.len(), 1);
 }
 
 #[test]
