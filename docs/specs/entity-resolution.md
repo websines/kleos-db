@@ -76,9 +76,11 @@ Columns that resolution does not write must have defaults: on commit it writes o
 4. **Rule decisions.** An exact or alias match that is the **only** such match decides alone (`decided_by = rule|exact`) when either:
    - there is no decider; or
    - the name is long and specific (≥ 4 tokens or ≥ 25 characters); or
-   - one side has no context.
+   - neither side has any context.
 
-   An exact name with context on both sides goes to the model, because "Alice Smith (my dentist)" and "Alice Smith (engineering manager)" can be two people. So does an exact name that is ambiguous (two entities share it).
+   A short exact name with context goes to the model, because "Alice Smith (my dentist)" and "Alice Smith (engineering manager)" can be two people. So does an exact name that is ambiguous (two entities share it). Once a rule has settled a mention, its other candidates are not sent to the model.
+
+   On commit, a new row's description is its description, or its parenthetical remark, or else its context (clipped). This way later decisions see the evidence the entity came with.
 5. **Model decisions.** All remaining (mention, candidate) pairs of the call go to `decide()` with `same_entity` in one batch. The decider batches them by its `max_batch` and caches pairs.
    - The mention side is rendered as: name (type), aliases, description or remark, then `Context: "…"`.
    - The entity side is the canonical **profile**: name (type), "also called" the names of every row merged into it plus its aliases, and up to 3 descriptions.
