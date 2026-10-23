@@ -191,14 +191,17 @@ fn not_canceled_q() -> String {
 /// advance the workflow's `seq` by `$fl_n`: two queries.
 fn append_q() -> [String; 2] {
     [
+        // values come in as constant rows: a rule with many `x = <const>`
+        // atoms costs CozoScript's planner far more than the write itself
         format!(
-            "ev[i, type, key, name, data] <- $fl_evs \
+            "ev[i, wf, type, key, name, data, at, token] <- $fl_evs \
              ?[wf, seq, type, key, name, data, at, token] := *{FLOW_WF}{{id: $fl_id, seq: s0}}, \
-               ev[i, type, key, name, data], wf = $fl_id, seq = s0 + i, at = $fl_now, token = $fl_token \
+               ev[i, wf, type, key, name, data, at, token], seq = s0 + i \
              :put {FLOW_EVENT} {{wf, seq => type, key, name, data, at, token}}"
         ),
         format!(
-            "?[id, seq, updated] := *{FLOW_WF}{{id: $fl_id, seq: s0}}, id = $fl_id, seq = s0 + $fl_n, updated = $fl_now \
+            "c[id, updated, n] <- [[$fl_id, $fl_now, $fl_n]] \
+             ?[id, seq, updated] := c[id, updated, n], *{FLOW_WF}{{id, seq: s0}}, seq = s0 + n \
              :update {FLOW_WF} {{id => seq, updated}}"
         ),
     ]
@@ -243,7 +246,16 @@ fn ev_params(id: &str, token: i64, now: i64, evs: &[Ev]) -> Vec<(&'static str, D
         .iter()
         .enumerate()
         .map(|(i, (ty, key, name, data))| {
-            DataValue::List(vec![DataValue::from(i as i64 + 1), sv(ty), osv(key), osv(name), jd(data)])
+            DataValue::List(vec![
+                DataValue::from(i as i64 + 1),
+                sv(id),
+                sv(ty),
+                osv(key),
+                osv(name),
+                jd(data),
+                DataValue::from(now),
+                DataValue::from(token),
+            ])
         })
         .collect();
     vec![
@@ -316,23 +328,47 @@ fn wf_row(
 }
 
 /// Blocks that create workflows from `$fl_new` (rows in [`WF_COLS`] order)
-/// with their `started` events, tasks (due `$fl_due`) and lane rows.
+/// with their `started` events, tasks and lane rows ([`create_params`]).
 fn create_blocks() -> String {
     format!(
         "{{?[{WF_COLS}] <- $fl_new :put {FLOW_WF} {{id => name, version, mode, queue, status, input, output, error, \
            parent, serial, serial_seq, token, seq, owner, lease_until, wait, cancel, attempts, created, updated, \
            finished, meta}}}} \
-         {{n[{WF_COLS}] <- $fl_new \
-           ?[wf, seq, type, key, name, data, at, token] := n[{WF_COLS}], wf = id, type = 'started', \
-             key = null, data = input, at = created \
+         {{?[wf, seq, type, key, name, data, at, token] <- $fl_new_ev \
           :put {FLOW_EVENT} {{wf, seq => type, key, name, data, at, token}}}} \
-         {{n[{WF_COLS}] <- $fl_new \
-           ?[wf, queue, due, serial, serial_seq] := n[{WF_COLS}], wf = id, due = $fl_due \
-          :put {FLOW_TASK} {{wf => queue, due, serial, serial_seq}}}} \
-         {{n[{WF_COLS}] <- $fl_new \
-           ?[serial, serial_seq, wf] := n[{WF_COLS}], !is_null(serial), wf = id \
-          :put {FLOW_LANE} {{serial, serial_seq => wf}}}}"
+         {{?[wf, queue, due, serial, serial_seq] <- $fl_new_task :put {FLOW_TASK} {{wf => queue, due, serial, serial_seq}}}} \
+         {{?[serial, serial_seq, wf] <- $fl_new_lane :put {FLOW_LANE} {{serial, serial_seq => wf}}}}"
     )
+}
+
+/// Parameters of [`create_blocks`] for new workflow rows ([`wf_row`]),
+/// runnable at `due`.
+fn create_params(rows: Vec<DataValue>, due: i64) -> Vec<(&'static str, DataValue)> {
+    let (mut evs, mut tasks, mut lanes) = (vec![], vec![], vec![]);
+    for r in &rows {
+        let DataValue::List(c) = r else { continue };
+        // id 0, name 1, queue 4, input 6, serial 10, serial_seq 11, created 19
+        evs.push(DataValue::List(vec![
+            c[0].clone(),
+            DataValue::from(1),
+            sv("started"),
+            DataValue::Null,
+            c[1].clone(),
+            c[6].clone(),
+            c[19].clone(),
+            DataValue::from(0),
+        ]));
+        tasks.push(DataValue::List(vec![c[0].clone(), c[4].clone(), DataValue::from(due), c[10].clone(), c[11].clone()]));
+        if c[10] != DataValue::Null {
+            lanes.push(DataValue::List(vec![c[10].clone(), c[11].clone(), c[0].clone()]));
+        }
+    }
+    vec![
+        ("fl_new", DataValue::List(rows)),
+        ("fl_new_ev", DataValue::List(evs)),
+        ("fl_new_task", DataValue::List(tasks)),
+        ("fl_new_lane", DataValue::List(lanes)),
+    ]
 }
 
 /// Blocks that finish workflow `$fl_id` with `$fl_status`, `$fl_output`,
@@ -340,11 +376,10 @@ fn create_blocks() -> String {
 /// parent.
 fn finish_blocks() -> String {
     format!(
-        "{{?[id, status, output, error, lease_until, wait, finished, updated] := \
-             id = $fl_id, status = $fl_status, output = $fl_output, error = $fl_error, \
-             lease_until = null, wait = null, finished = $fl_now, updated = $fl_now \
+        "{{?[id, status, output, error, lease_until, wait, finished, updated] <- \
+             [[$fl_id, $fl_status, $fl_output, $fl_error, null, null, $fl_now, $fl_now]] \
           :update {FLOW_WF} {{id => status, output, error, lease_until, wait, finished, updated}}}} \
-         {{?[wf] := wf = $fl_id :rm {FLOW_TASK} {{wf}}}} \
+         {{?[wf] <- [[$fl_id]] :rm {FLOW_TASK} {{wf}}}} \
          {{?[wf, key] := *{FLOW_TIMER}{{wf, key}}, wf = $fl_id :rm {FLOW_TIMER} {{wf, key}}}} \
          {{?[serial, serial_seq] := *{FLOW_WF}{{id: $fl_id, serial, serial_seq}}, !is_null(serial) \
           :rm {FLOW_LANE} {{serial, serial_seq}}}} \
@@ -717,14 +752,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             &o.meta,
         );
         let script = format!("{{?[x] := *{FLOW_WF}{{id: $fl_nid}}, x = 1 :assert none}}{}", create_blocks());
-        let res = self.fl_w(
-            &script,
-            vec![
-                ("fl_nid", sv(&id)),
-                ("fl_new", DataValue::List(vec![row])),
-                ("fl_due", DataValue::from(o.run_at.unwrap_or(now))),
-            ],
-        );
+        let mut p = vec![("fl_nid", sv(&id))];
+        p.extend(create_params(vec![row], o.run_at.unwrap_or(now)));
+        let res = self.fl_w(&script, p);
         match res {
             Ok(_) => Ok(json!({"id": id, "status": "pending", "created": now, "mode": mode, "version": version})),
             Err(e) => match self.flow_wf(&id)? {
@@ -814,8 +844,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         let now = now_us();
         self.fl_w(
             &format!(
-                "{{?[wf, sid, name, payload, at, consumed] := wf = $id, sid = $sid, name = $name, payload = $payload, \
-                   at = $now, consumed = null, not *{FLOW_SIGNAL}{{wf: $id, sid: $sid}} \
+                "{{c[wf, sid, name, payload, at, consumed] <- [[$id, $sid, $name, $payload, $now, null]] \
+                   ?[wf, sid, name, payload, at, consumed] := c[wf, sid, name, payload, at, consumed], \
+                     not *{FLOW_SIGNAL}{{wf, sid}} \
                   :put {FLOW_SIGNAL} {{wf, sid => name, payload, at, consumed}}}} \
                  {{?[wf, queue, due, serial, serial_seq] := *{FLOW_WF}{{id: $id, queue, serial, serial_seq, status: 'waiting'}}, \
                    wf = $id, due = $now :put {FLOW_TASK} {{wf => queue, due, serial, serial_seq}}}}"
@@ -1043,16 +1074,17 @@ impl<'s, S: Storage<'s>> Db<S> {
                 &format!(
                     "{{?[x] := *{FLOW_TASK}{{wf: $id, due}}, due <= $now, x = 1 :assert some}} \
                      {{?[x] := *{FLOW_WF}{{id: $id, token: t}}, t == $token, x = 1 :assert some}} \
-                     {{?[id, status, owner, lease_until, token, attempts, updated] := \
-                         *{FLOW_WF}{{id: $id, attempts: a}}, id = $id, status = 'running', owner = $worker, \
-                         lease_until = $lease, token = $token + 1, attempts = a + 1, updated = $now \
+                     {{c[id, status, owner, lease_until, token, updated] <- [[$id, 'running', $worker, $lease, $token1, $now]] \
+                       ?[id, status, owner, lease_until, token, attempts, updated] := \
+                         c[id, status, owner, lease_until, token, updated], *{FLOW_WF}{{id, attempts: a}}, attempts = a + 1 \
                       :update {FLOW_WF} {{id => status, owner, lease_until, token, attempts, updated}}}} \
-                     {{?[wf, due] := wf = $id, due = $lease :update {FLOW_TASK} {{wf => due}}}}"
+                     {{?[wf, due] <- [[$id, $lease]] :update {FLOW_TASK} {{wf => due}}}}"
                 ),
                 vec![
                     ("id", sv(&id)),
                     ("now", DataValue::from(now)),
                     ("token", DataValue::from(token)),
+                    ("token1", DataValue::from(token + 1)),
                     ("worker", sv(&worker)),
                     ("lease", DataValue::from(lease_until)),
                 ],
@@ -1281,11 +1313,12 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
         for e in events {
-            let found = e
-                .1
-                .as_ref()
-                .and_then(|k| existing.get(k))
-                .and_then(|evs| evs.iter().find(|x| x.ty == e.0));
+            // one event per (key, type), except failures: one per attempt
+            let found = e.1.as_ref().and_then(|k| existing.get(k)).and_then(|evs| {
+                evs.iter().find(|x| {
+                    x.ty == e.0 && (x.ty != "step_failed" || x.data.get("attempt") == e.3.get("attempt"))
+                })
+            });
             match found {
                 Some(x) => {
                     if e.2.is_some() && x.name != e.2 {
@@ -1335,7 +1368,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             );
             script.push_str(&format!(
                 "{{?[x] := *{FLOW_SIGNAL}{{wf: $fl_id, sid: $fl_sid, consumed}}, is_null(consumed), x = 1 :assert some}} \
-                 {{?[wf, sid, consumed] := *{FLOW_WF}{{id: $fl_id, seq}}, wf = $fl_id, sid = $fl_sid, consumed = seq \
+                 {{c[wf, sid] <- [[$fl_id, $fl_sid]] \
+                   ?[wf, sid, consumed] := c[wf, sid], *{FLOW_WF}{{id: wf, seq: consumed}} \
                   :update {FLOW_SIGNAL} {{wf, sid => consumed}}}}"
             ));
             p.push(("fl_sid", sv(&sid)));
@@ -1390,11 +1424,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             record_blocks(id, token, &[ev("child", Some(key), Some(workflow), json!({"id": cid}))], true);
         script.push_str(&format!("{{?[x] := *{FLOW_WF}{{id: $fl_cid}}, x = 1 :assert none}}"));
         script.push_str(&create_blocks());
-        p.extend([
-            ("fl_cid", sv(&cid)),
-            ("fl_new", DataValue::List(vec![row])),
-            ("fl_due", DataValue::from(now)),
-        ]);
+        p.push(("fl_cid", sv(&cid)));
+        p.extend(create_params(vec![row], now));
         self.fl_w(&script, p).map_err(|e| self.fl_diagnose(id, token, e))?;
         Ok(cid)
     }
@@ -1422,10 +1453,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             "{}{} \
              {{?[wf, key] := *{FLOW_TIMER}{{wf, key}}, wf = $fl_id :rm {FLOW_TIMER} {{wf, key}}}} \
              {{?[wf, key, due, kind] <- $fl_timers :put {FLOW_TIMER} {{wf, key => due, kind}}}} \
-             {{?[id, status, owner, lease_until, wait, updated] := id = $fl_id, status = 'waiting', owner = null, \
-                 lease_until = null, wait = $fl_wait, updated = $fl_now \
+             {{?[id, status, owner, lease_until, wait, updated] <- [[$fl_id, 'waiting', null, null, $fl_wait, $fl_now]] \
               :update {FLOW_WF} {{id => status, owner, lease_until, wait, updated}}}} \
-             {{?[wf] := wf = $fl_id :rm {FLOW_TASK} {{wf}}}} \
+             {{?[wf] <- [[$fl_id]] :rm {FLOW_TASK} {{wf}}}} \
              {{d[t] := *{FLOW_SIGNAL}{{wf: $fl_id, name, consumed}}, is_null(consumed), is_in(name, $fl_signals), t = $fl_now \
                d[t] := *{FLOW_WF}{{id: c, status}}, is_in(c, $fl_children), is_in(status, $fl_finished), t = $fl_now \
                d[t] := t = $fl_min_timer, !is_null(t) \
@@ -1498,10 +1528,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         let (mut script, mut p) =
             record_blocks(&o.id, o.token, &[ev("task_error", None, None, json!({"error": o.error}))], false);
         script.push_str(&format!(
-            "{{?[id, status, owner, lease_until, error, updated] := id = $fl_id, status = 'waiting', owner = null, \
-                lease_until = null, error = $fl_error, updated = $fl_now \
+            "{{?[id, status, owner, lease_until, error, updated] <- [[$fl_id, 'waiting', null, null, $fl_error, $fl_now]] \
               :update {FLOW_WF} {{id => status, owner, lease_until, error, updated}}}} \
-             {{?[wf, due] := wf = $fl_id, due = $fl_due :update {FLOW_TASK} {{wf => due}}}}"
+             {{?[wf, due] <- [[$fl_id, $fl_due]] :update {FLOW_TASK} {{wf => due}}}}"
         ));
         p.extend([("fl_error", sv(&o.error)), ("fl_due", DataValue::from(due))]);
         self.fl_w(&script, p).map_err(|e| self.fl_diagnose(&o.id, o.token, e))?;
@@ -1512,8 +1541,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         let lease_until = now_us() + o.lease_ms.unwrap_or(DEFAULT_LEASE_MS).max(1) * 1000;
         self.fl_w(
             &format!(
-                "{}{{?[id, lease_until] := id = $fl_id, lease_until = $fl_lease :update {FLOW_WF} {{id => lease_until}}}} \
-                 {{?[wf, due] := wf = $fl_id, due = $fl_lease :update {FLOW_TASK} {{wf => due}}}}",
+                "{}{{?[id, lease_until] <- [[$fl_id, $fl_lease]] :update {FLOW_WF} {{id => lease_until}}}} \
+                 {{?[wf, due] <- [[$fl_id, $fl_lease]] :update {FLOW_TASK} {{wf => due}}}}",
                 fence()
             ),
             vec![
@@ -1617,14 +1646,14 @@ impl<'s, S: Storage<'s>> Db<S> {
             let id = format!("sched:{name}:{at}");
             let mut script = format!(
                 "{{?[x] := *{FLOW_SCHEDULE}{{name: $sn, next_at}}, next_at == $at, x = 1 :assert some}} \
-                 {{?[name, next_at, last_id, updated] := name = $sn, next_at = $next, last_id = $lid, updated = $fl_due \
+                 {{?[name, next_at, last_id, updated] <- [[$sn, $next, $lid, $sat]] \
                   :update {FLOW_SCHEDULE} {{name => next_at, last_id, updated}}}}"
             );
             let mut p = vec![
                 ("sn", sv(&name)),
                 ("at", DataValue::from(at)),
                 ("next", DataValue::from(next)),
-                ("fl_due", DataValue::from(now)),
+                ("sat", DataValue::from(now)),
             ];
             if busy {
                 p.push(("lid", osv(&last)));
@@ -1633,11 +1662,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let wrow = wf_row(&id, &workflow, v, &mode, &queue, &input, None, None, None, now, &json!({"schedule": name}));
                 script.push_str(&format!("{{?[x] := *{FLOW_WF}{{id: $fl_nid}}, x = 1 :assert none}}"));
                 script.push_str(&create_blocks());
-                p.extend([
-                    ("lid", sv(&id)),
-                    ("fl_nid", sv(&id)),
-                    ("fl_new", DataValue::List(vec![wrow])),
-                ]);
+                p.extend([("lid", sv(&id)), ("fl_nid", sv(&id))]);
+                p.extend(create_params(vec![wrow], now));
             }
             if self.fl_w(&script, p).is_ok() && !busy {
                 started.push(id);

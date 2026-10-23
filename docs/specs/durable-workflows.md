@@ -390,3 +390,37 @@ the same code. Only the job plumbing moves onto workflows:
 - Python steps' timeouts cannot stop the function's thread.
 - `http` is off by default (feature `flow-http`) and runs from the worker's
   process with no allow-list beyond the feature gate.
+
+## Results (2026-10-24, branch `wave4/flow`)
+
+Measured on the shared 16 GB Mac while other agents' benchmarks held the load
+average between 6 and 60, so timings are indicative.
+
+**Tests** (all pass):
+- `kleos-core/tests/flow.rs`, 12 tests plus 2 child-process helpers:
+  - a built-in graph using every control-flow kind (keys by path, loop rows written once, fan-out joined);
+  - retries with back-off timers, exhaustion, `on_error: continue`;
+  - timers;
+  - signals: waited for, buffered before the wait, idempotent by `sid`, timed out;
+  - children, and cancel cascading to them;
+  - the code-mode protocol: claim, lease expiry and takeover, a stale worker's query rolled back (`lease lost`), replay, non-determinism, markers, cancel while running;
+  - suspend waking on a signal already in the inbox;
+  - a `remember` step committed with its checkpoint, and a stale one leaving no memory;
+  - schedules firing once and advancing;
+  - the in-process worker waking on a start through the change feed;
+  - **crash mid-step**: a child process records step 1, is killed inside step 2, and a new worker resumes after the lease; step 1's effect exists once, written by the dead worker;
+  - **two worker processes on one SQLite file**: 24 workflows with 4 query steps each (two of them in a fan-out), every step's effect is written exactly once, and the work splits between the processes (20/20 at 40 workflows).
+- `flow_cron` unit tests; `tests/memory.rs` (28, `remember_with` refactor); `tests/memory_engram.rs --features engram` (8 existing + 1 new: jobs are workflows in namespace lanes, one claimable per lane, `adopt_engram` idempotent, a failed memory write starts no workflow).
+- Python: `integrations/kleos-flow/tests/test_flow.py`, 7 tests: replay runs each step once, retries then catch `StepFailed`, signals plus children plus `ctx.query`, child failure, `patched` with an old run (skips the patched step, takes the later patch live) and a fresh run, non-determinism parks instead of failing, cancel and a missing version, two worker threads sharing a queue. `tests/test_memory_api.py` still passes.
+
+**End to end:**
+- `scripts/flow/demo.py`, a code-mode agent workflow: remember, a slow step, sleep 2 s, wait for a signal, recall. Worker process 1 is `kill -9`ed inside the slow step; worker process 2 takes over when the 2 s lease runs out; the signal is sent from the outside. Result: one memory, the `remember` recorded once (by worker 1's token), the slow step run twice (at least once, as specified), 4 claims, output with the signal payload and the recall hit, about 11 s in total. The same script runs a built-in graph (query → fan-out of two `:update` queries → sleep → sum) on the in-process worker thread: 0.5 s.
+- `scripts/engram/remember_e2e.py` (132M Engram model, worker as a separate process) on the new engine: every result equals the run before the change: recall 9/10 own prompt, 9/18 rephrasings; supersede ranks (" 1934" 28 → 1, " 1921" 1 → 54); `as_of` bit-identical; erase-one and erase-all bit-identical; crash after a write (exit 17) and kill -9 mid-job: the same job states and attempts as before (jobs 1 and 2 done after 2 attempts, job 3 after 1), one overlay version per fact.
+- HTTP: `kleos server --flow-worker default`, then `POST /flow/define`, `/flow/start`: the server's worker ran the graph, slept, woke on its timer, completed.
+
+**Cost of the Engram workflow rows.** `remember` on an attached store writes four more rows (workflow, started event, task, lane). Interleaved runs of the old and new wheel (SQLite, 70 remembers each, 4 rounds) gave attached medians of 21.4 / 21.4 / 13.9 / 79.7 ms (old) and 25.0 / 20.7 / 19.8 / 12.9 ms (new): no difference beyond this machine's noise.
+
+**Findings along the way:**
+- A CozoScript rule with many `column = <constant>` atoms costs the planner far more than the write. A 23-column workflow row took 16–28 ms that way and about 0.5 ms as a constant-row `:put`. The flow scripts therefore pass precomputed constant rows (`<- $rows`, or a constant rule joined to the computed columns).
+- `?[k, c] := k = 1, c = true :update t {k => c}` silently writes nothing, while `c = to_bool(1)` or a constant rule `<- [[1, true]]` works. This is an engine quirk, not fixed here. The flow code uses constant rules.
+- A multi-statement transaction (`run_multi_transaction`) takes one program per payload and stays open after a failed query. The `query` step therefore sends its blocks one by one and drops the payload channel on any early return, which ends and rolls back the transaction.

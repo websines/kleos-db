@@ -83,24 +83,30 @@ pub(crate) fn ready<'s, S: crate::storage::Storage<'s>>(db: &'s crate::runtime::
 fn flow_blocks(qrule: &str) -> String {
     use crate::flow::{FLOW_EVENT, FLOW_LANE, FLOW_TASK, FLOW_WF};
     let fw = format!("{qrule} fw[id, qid] := q[qid], id = concat('engram:', $ns, ':', to_string(qid))");
+    // constants come in as constant rows: rules with many `x = <const>` atoms
+    // cost the planner far more than the writes
     format!(
         "{{{fw} \
+           c[name, version, mode, queue, status, output, error, parent, token, seq, owner, lease_until, wait, \
+             cancel, attempts, created, updated, finished, meta] <- \
+             [['engram.apply', 1, 'code', 'engram', 'pending', null, null, null, 0, 1, null, null, null, false, 0, \
+               $eq_now, $eq_now, null, null]] \
            ?[id, name, version, mode, queue, status, input, output, error, parent, serial, serial_seq, token, seq, \
              owner, lease_until, wait, cancel, attempts, created, updated, finished, meta] := fw[id, qid], \
-             name = 'engram.apply', version = 1, mode = 'code', queue = 'engram', status = 'pending', \
-             input = json_object('ns', $ns, 'qid', qid), output = null, error = null, parent = null, \
-             serial = concat('engram:', $ns), serial_seq = qid, token = 0, seq = 1, owner = null, \
-             lease_until = null, wait = null, cancel = to_bool(0), attempts = 0, created = $eq_now, updated = $eq_now, \
-             finished = null, meta = null \
+             c[name, version, mode, queue, status, output, error, parent, token, seq, owner, lease_until, wait, \
+               cancel, attempts, created, updated, finished, meta], \
+             input = json_object('ns', $ns, 'qid', qid), serial = concat('engram:', $ns), serial_seq = qid \
           :put {FLOW_WF} {{id => name, version, mode, queue, status, input, output, error, parent, serial, serial_seq, \
              token, seq, owner, lease_until, wait, cancel, attempts, created, updated, finished, meta}}}} \
          {{{fw} \
-           ?[wf, seq, type, key, name, data, at, token] := fw[wf, qid], seq = 1, type = 'started', key = null, \
-             name = 'engram.apply', data = json_object('ns', $ns, 'qid', qid), at = $eq_now, token = 0 \
+           c[seq, type, key, name, at, token] <- [[1, 'started', null, 'engram.apply', $eq_now, 0]] \
+           ?[wf, seq, type, key, name, data, at, token] := fw[wf, qid], c[seq, type, key, name, at, token], \
+             data = json_object('ns', $ns, 'qid', qid) \
           :put {FLOW_EVENT} {{wf, seq => type, key, name, data, at, token}}}} \
          {{{fw} \
-           ?[wf, queue, due, serial, serial_seq] := fw[wf, qid], queue = 'engram', due = $eq_now, \
-             serial = concat('engram:', $ns), serial_seq = qid \
+           c[queue, due] <- [['engram', $eq_now]] \
+           ?[wf, queue, due, serial, serial_seq] := fw[wf, qid], c[queue, due], serial = concat('engram:', $ns), \
+             serial_seq = qid \
           :put {FLOW_TASK} {{wf => queue, due, serial, serial_seq}}}} \
          {{{fw} \
            ?[serial, serial_seq, wf] := fw[wf, qid], serial = concat('engram:', $ns), serial_seq = qid \
