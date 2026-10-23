@@ -108,6 +108,75 @@ pub(crate) fn enqueue(cfg: &MemConfig, job: Job<'_>) -> Option<(String, Vec<(&'s
     ))
 }
 
+/// Several jobs of one memory change (one per claim a `remember` adds), as
+/// one script block numbered `qid = v + 1 .. v + n` from the version `v` the
+/// change planned against. Returns the fragment, its parameters and `n`:
+/// the caller must advance `kleos_mem_ns` by `n`, so the last qid is the
+/// version its commit produces and qids stay unique and in commit order.
+/// `None` when no Engram model is attached or there are no jobs.
+#[cfg(not(feature = "engram"))]
+pub(crate) fn enqueue_jobs(
+    _cfg: &MemConfig,
+    _jobs: &[Job<'_>],
+) -> Option<(String, Vec<(&'static str, DataValue)>, usize)> {
+    None
+}
+
+#[cfg(feature = "engram")]
+pub(crate) fn enqueue_jobs(
+    cfg: &MemConfig,
+    jobs: &[Job<'_>],
+) -> Option<(String, Vec<(&'static str, DataValue)>, usize)> {
+    let model = cfg.engram.as_ref()?;
+    if jobs.is_empty() {
+        return None;
+    }
+    let strs = |v: &[String]| DataValue::List(v.iter().map(|x| DataValue::from(x.as_str())).collect());
+    let rows: Vec<DataValue> = jobs
+        .iter()
+        .enumerate()
+        .map(|(i, job)| {
+            let meta = if job.entities.is_empty() {
+                DataValue::Null
+            } else {
+                DataValue::Json(crate::JsonData(serde_json::json!({ "entities": job.entities })))
+            };
+            DataValue::List(vec![
+                DataValue::from(i as i64 + 1),
+                DataValue::from(job.op),
+                strs(job.mem_ids),
+                strs(job.old),
+                job.text.map_or(DataValue::Null, DataValue::from),
+                DataValue::from(job.at),
+                meta,
+            ])
+        })
+        .collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0);
+    let script = format!(
+        "{{cur[max(s)] := *{}{{ns: $ns, seq: s}} \
+           cur[max(s)] := s = 0 \
+           j[i, op, mem_ids, old, text, at, meta] <- $eq_jobs \
+           ?[ns, qid, op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated] := \
+             cur[s0], j[i, op, mem_ids, old, text, at, meta], ns = $ns, qid = s0 + i, model = $eq_model, \
+             status = 'pending', attempts = 0, error = null, created = $eq_now, updated = $eq_now \
+          :put {ENGRAM_QUEUE} {{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}}}}",
+        crate::memory::MEM_NS
+    );
+    Some((
+        script,
+        vec![
+            ("eq_jobs", DataValue::List(rows)),
+            ("eq_model", DataValue::from(model.as_str())),
+            ("eq_now", DataValue::from(now)),
+        ],
+        jobs.len(),
+    ))
+}
+
 #[cfg(feature = "engram")]
 pub(crate) use imp::*;
 

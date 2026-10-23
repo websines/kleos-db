@@ -1064,3 +1064,315 @@ fn concurrent_remembers_across_processes() {
     drop(db);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ------------------------------------------------------------------ claims
+
+const MAX: &str = "I have a dog named Max.";
+
+fn claim_ids(r: &kleos::memory::RememberResult) -> Vec<String> {
+    r.claims.iter().map(|c| c.id.clone().unwrap()).collect()
+}
+
+fn current_texts(db: &DbInstance, n: &str) -> BTreeSet<String> {
+    db.run_script(
+        "?[text] := *kleos_mem{ns: $ns, text @ 'NOW'}",
+        [("ns".to_string(), DataValue::from(n))].into_iter().collect(),
+        ScriptMutability::Immutable,
+    )
+    .unwrap()
+    .rows
+    .into_iter()
+    .map(|r| r[0].get_str().unwrap().to_string())
+    .collect()
+}
+
+/// A multi-sentence text is stored as one memory per claim, with ids
+/// derived from the statement id and the whole text as each claim's source;
+/// recall returns the statement as context. One sentence, or `split:
+/// 'none'`, is one memory with the plain statement id, as before claims.
+#[test]
+fn claims_split_store_and_recall_with_context() {
+    let m = Models::new("claims", vec![], vec![]);
+    let db = m.db();
+    let text = "I live in Berlin. I have a dog named Max.\nWhere should I go on holiday?";
+    let r = db.remember(text, at("u", d(1))).unwrap();
+    assert_eq!(r.action, "added");
+    let stmt = r.id.clone().unwrap();
+    assert!(!stmt.contains('.'), "{stmt}");
+    assert_eq!(claim_ids(&r), (1..=3).map(|i| format!("{stmt}.{i}")).collect::<Vec<_>>());
+    let texts: Vec<&str> = r.claims.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(texts, vec![BERLIN, MAX, "Where should I go on holiday?"]);
+    assert_eq!(r.claims.iter().map(|c| c.decided).collect::<Vec<_>>(), vec![true, true, false]);
+    assert_eq!(current_texts(&db, "u").len(), 3);
+    // every claim's source row is the whole statement
+    assert_eq!(
+        count(&db, &format!("?[id] := *kleos_mem_source{{ns: 'u', id, stmt: '{stmt}', text: $t}}").replace("$t", &format!("{:?}", text))),
+        3
+    );
+    let hit = db
+        .recall("dog named Max", RecallOpts { ns: ns("u"), k: Some(1), ..Default::default() })
+        .unwrap()
+        .remove(0);
+    assert_eq!((hit.text.as_str(), hit.context.as_deref()), (MAX, Some(text)));
+    assert_eq!(hit.id, format!("{stmt}.2"));
+
+    // one sentence: the plain statement id, no claims, no context
+    let c = db.remember(COFFEE, at("u", d(2))).unwrap();
+    assert!(c.claims.is_empty());
+    let cid = c.id.unwrap();
+    assert!(!cid.contains('.'));
+    let hit = db
+        .recall("coffee black", RecallOpts { ns: ns("u"), ..Default::default() })
+        .unwrap()
+        .into_iter()
+        .find(|h| h.id == cid)
+        .unwrap();
+    assert_eq!(hit.context, None);
+    // split: none keeps the whole text as one memory
+    let w = db
+        .remember("I like jazz. I play the piano.", RememberOpts { ns: ns("w"), split: Some("none".into()), ..Default::default() })
+        .unwrap();
+    assert!(w.claims.is_empty());
+    assert_eq!(current_texts(&db, "w"), BTreeSet::from(["I like jazz. I play the piano.".to_string()]));
+    assert!(db
+        .remember("x y z", RememberOpts { split: Some("sometimes".into()), ..Default::default() })
+        .is_err());
+    // CozoScript and JSON surfaces take the option and return the claims
+    let rows = db
+        .run_script(
+            "::memory remember 'I like tea. I play chess.' {ns: 'j', split: 'auto'}",
+            Default::default(),
+            ScriptMutability::Mutable,
+        )
+        .unwrap();
+    assert!(rows.headers.contains(&"claims".to_string()), "{:?}", rows.headers);
+    let j = db
+        .memory_call("remember", serde_json::json!({"text": "I like tea. I play chess.", "ns": "j2", "split": "none"}))
+        .unwrap();
+    assert!(j.get("claims").is_none(), "{j}");
+}
+
+/// A claim supersedes only the claim it updates: the old statement's other
+/// claims stay current. The similarity floor keeps a split statement's
+/// unrelated candidates from the decider.
+#[test]
+fn claims_supersede_only_the_old_claim() {
+    let m = Models::new("csup", vec![(BERLIN, LISBON)], vec![]);
+    let db = m.db();
+    let a = db.remember(&format!("{BERLIN} {MAX}"), at("u", d(1))).unwrap();
+    let old = claim_ids(&a);
+    // a short update against a long old message
+    let b = db.remember(LISBON, at("u", d(10))).unwrap();
+    assert_eq!(b.superseded, vec![old[0].clone()], "{b:?}");
+    assert_eq!(current_texts(&db, "u"), BTreeSet::from([MAX.to_string(), LISBON.to_string()]));
+    // the old claim keeps its history
+    let then = recall(&db, "where do I live", "u", Some(d(5)));
+    assert!(then.contains(&BERLIN.to_string()), "{then:?}");
+
+    // a split update: only its first claim supersedes, and the decision,
+    // the link and the result name that claim
+    let db = m.db();
+    let a = db.remember(&format!("{BERLIN} {MAX}"), at("u", d(1))).unwrap();
+    let old = claim_ids(&a);
+    let b = db
+        .remember(
+            &format!("{LISBON} {COFFEE}"),
+            RememberOpts { ns: ns("u"), at: Some(d(10)), min_similarity: Some(-1.0), ..Default::default() },
+        )
+        .unwrap();
+    let new = claim_ids(&b);
+    assert_eq!(b.superseded, vec![old[0].clone()]);
+    assert_eq!(b.claims[0].superseded, vec![old[0].clone()]);
+    assert!(b.claims[1].superseded.is_empty());
+    let applied: Vec<_> = b.decisions.iter().filter(|x| x.action == "superseded").collect();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].claim.as_deref(), Some(new[0].as_str()));
+    assert!(applied[0].similarity.is_some());
+    assert_eq!(
+        count(&db, &format!("?[s] := *kleos_mem_link{{ns: 'u', src: s, rel: 'supersedes', dst: '{}'}}, s = '{}'", old[0], new[0])),
+        1
+    );
+    assert_eq!(
+        current_texts(&db, "u"),
+        BTreeSet::from([MAX.to_string(), LISBON.to_string(), COFFEE.to_string()])
+    );
+
+    // default floor (0.6): the bag-of-words vectors of Berlin and Lisbon
+    // are far apart, so the pair is never asked and nothing is superseded
+    let db = m.db();
+    db.remember(&format!("{BERLIN} {MAX}"), at("u", d(1))).unwrap();
+    let b = db.remember(&format!("{LISBON} {COFFEE}"), at("u", d(10))).unwrap();
+    assert!(b.superseded.is_empty(), "{b:?}");
+    assert!(b.decisions.iter().all(|x| x.similarity.unwrap_or(1.0) >= 0.6), "{b:?}");
+}
+
+/// Questions, requests and short fragments are stored but take no part in
+/// decisions, on either side; `split: 'none'` decides them as before.
+#[test]
+fn claims_questions_are_not_decided() {
+    let m = Models::new("cq", vec![(BERLIN, LISBON)], vec![]);
+    let db = m.db();
+    let berlin = db.remember(BERLIN, at("u", d(1))).unwrap().id.unwrap();
+    let q = db.remember("Do you know any good bars in Berlin?", at("u", d(2))).unwrap();
+    assert_eq!(q.action, "added");
+    assert!(q.decisions.is_empty(), "{q:?}");
+    let qid = q.id.unwrap();
+    let r = db
+        .remember(
+            "Can you recommend a bar in Berlin. Thanks! I live in Berlin.",
+            RememberOpts { ns: ns("u"), at: Some(d(3)), min_similarity: Some(-1.0), ..Default::default() },
+        )
+        .unwrap();
+    assert_eq!(r.claims.iter().map(|c| c.decided).collect::<Vec<_>>(), vec![false, false, true]);
+    // the declarative claim repeats the old memory (exact rule); the others are stored
+    assert_eq!(r.claims[2].action, "duplicate");
+    assert_eq!(r.claims[2].duplicate_of.as_deref(), Some(berlin.as_str()));
+    assert!(r.decisions.iter().all(|x| x.claim.as_deref() == Some(r.claims[2].id.as_deref().unwrap_or(berlin.as_str()))), "{r:?}");
+    // the question is never a candidate
+    let b = db.remember(LISBON, at("u", d(10))).unwrap();
+    assert_eq!(b.superseded, vec![berlin]);
+    assert!(b.decisions.iter().all(|x| x.candidate != qid), "{b:?}");
+    // split: none decides a question like any statement
+    let n = db
+        .remember(
+            "Do you know any good bars in Berlin?",
+            RememberOpts { ns: ns("u"), at: Some(d(11)), split: Some("none".into()), ..Default::default() },
+        )
+        .unwrap();
+    assert_eq!(n.action, "duplicate", "{n:?}");
+}
+
+/// `forget` (and `set`) of a statement id covers all its claims; a claim
+/// id covers one claim.
+#[test]
+fn claims_forget_a_statement() {
+    let m = Models::new("cforget", vec![], vec![]);
+    let db = m.db();
+    let a = db.remember(&format!("{BERLIN} {MAX} {COFFEE}"), at("u", d(1))).unwrap();
+    let stmt = a.id.clone().unwrap();
+    let ids = claim_ids(&a);
+    db.remember("I play tennis on Saturdays.", at("u", d(2))).unwrap();
+    let s = db
+        .memory_set(SetOpts { ns: ns("u"), id: Some(stmt.clone()), importance: Some(0.9), ..Default::default() })
+        .unwrap();
+    assert_eq!(s["ids"].as_array().unwrap().len(), 3, "{s}");
+    let f = db.forget(ForgetOpts { ns: ns("u"), id: Some(ids[1].clone()), ..Default::default() }).unwrap();
+    assert_eq!(f.ids, vec![ids[1].clone()]);
+    let f = db.forget(ForgetOpts { ns: ns("u"), id: Some(stmt.clone()), ..Default::default() }).unwrap();
+    assert_eq!(f.ids, vec![ids[0].clone(), ids[2].clone()], "the claims still current");
+    assert_eq!(current_texts(&db, "u"), BTreeSet::from(["I play tennis on Saturdays.".to_string()]));
+    let e = db
+        .forget(ForgetOpts { ns: ns("u"), id: Some(stmt.clone()), mode: Some("erase".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(e.ids, ids);
+    assert_eq!(count(&db, &format!("?[id] := *kleos_mem{{ns: 'u', id}}, starts_with(id, '{stmt}')")), 0);
+    assert_eq!(count(&db, &format!("?[id] := *kleos_mem_source{{ns: 'u', id, stmt: '{stmt}'}}")), 0);
+}
+
+/// Entities are linked to the claims that name them, and to every claim
+/// when no claim does (the subject); the same-subject gate is per claim.
+#[test]
+fn claims_link_entities_per_claim() {
+    const ANNA: &str = "My sister Anna lives in Munich.";
+    const ANNA2: &str = "My sister Anna moved to Hamburg.";
+    let m = Models::new("cent", vec![(BERLIN, ANNA2), (ANNA, ANNA2)], vec![]);
+    let db = m.db();
+    let ents = |names: &[&str], t| RememberOpts {
+        ns: ns("u"),
+        at: Some(t),
+        entities: names.iter().map(|s| s.to_string()).collect(),
+        min_similarity: Some(-1.0),
+        ..Default::default()
+    };
+    let a = db.remember(&format!("{BERLIN} {ANNA}"), ents(&["user", "Anna"], d(1))).unwrap();
+    let ids = claim_ids(&a);
+    let by = |n: &str| -> BTreeSet<String> {
+        db.recall("", RecallOpts { ns: ns("u"), entity: Some(n.into()), k: Some(10), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .map(|h| h.id)
+            .collect()
+    };
+    assert_eq!(by("Anna"), BTreeSet::from([ids[1].clone()]));
+    assert_eq!(by("user"), BTreeSet::from([ids[0].clone(), ids[1].clone()]));
+    // Anna's move supersedes Anna's claim, never the user's home (the
+    // gate needs a shared entity; the user's claim does not mention Anna)
+    let b = db.remember(&format!("{ANNA2} I like my coffee black."), ents(&["Anna"], d(5))).unwrap();
+    assert_eq!(b.superseded, vec![ids[1].clone()], "{b:?}");
+    assert!(b.gated.contains(&ids[0]), "{b:?}");
+}
+
+/// Two split statements planned at the same moment, each with a claim that
+/// moves home: the later committer re-plans, sees the earlier claim and
+/// supersedes it, and the claims about other things all stay current.
+#[test]
+fn concurrent_claim_remembers_never_leave_two_current() {
+    let _guard = REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let b = barrier.clone();
+    let (emb, dec) = ("mem_emb_crace", "mem_dec_crace");
+    embed::register_embedder(emb, Arc::new(Words)).unwrap();
+    decide::register_decider(
+        dec,
+        Arc::new(Held {
+            inner: race_nli("mem-nli-crace"),
+            n: 2,
+            calls: Default::default(),
+            wait: Box::new(move |_| {
+                b.wait();
+            }),
+        }),
+        Family::Nano,
+    )
+    .unwrap();
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.memory_init(InitOpts { embedder: Some(emb.into()), decider: Some(dec.into()), ..Default::default() })
+        .unwrap();
+    let opts = |t: Option<i64>| RememberOpts { ns: ns("race"), at: t, min_similarity: Some(-1.0), ..Default::default() };
+    db.remember(&format!("{BERLIN} {MAX}"), opts(Some(d(1)))).unwrap();
+    let results: Vec<_> = std::thread::scope(|sc| {
+        let hs: Vec<_> = [format!("{LISBON} I like jazz."), format!("{PORTO} I like tea.")]
+            .into_iter()
+            .map(|t| {
+                let db = &db;
+                sc.spawn(move || db.remember(&t, opts(None)).unwrap())
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    embed::unregister_embedder(emb);
+    decide::unregister_decider(dec);
+    let cur = current(&db, &[BERLIN, LISBON, PORTO, MAX, "I like jazz.", "I like tea."]);
+    assert_eq!(cur.len(), 4, "one home and the three other claims, got {cur:?}; {results:?}");
+    assert_eq!(cur.iter().filter(|t| [BERLIN, LISBON, PORTO].contains(&t.as_str())).count(), 1, "{cur:?}");
+    let claims: BTreeSet<String> = results.iter().flat_map(|r| r.claims.iter().filter_map(|c| c.id.clone())).collect();
+    assert!(
+        results.iter().any(|r| r.superseded.iter().any(|x| claims.contains(x))),
+        "one move should supersede the other's claim: {results:?}"
+    );
+}
+
+/// Recall ranks a question or request `question_weight` (default 0.05)
+/// below an equally relevant statement; 0 turns it off.
+#[test]
+fn claims_questions_rank_below_statements() {
+    let m = Models::new("cqw", vec![], vec![]);
+    let db = m.db();
+    db.remember("Where should I go on holiday? I go to Spain every summer.", at("u", d(1))).unwrap();
+    let get = |w: Option<f64>| {
+        db.recall(
+            "where do I go on holiday",
+            RecallOpts { ns: ns("u"), question_weight: w, record_access: Some(false), ..Default::default() },
+        )
+        .unwrap()
+    };
+    let (on, off) = (get(None), get(Some(0.0)));
+    let score = |h: &[RecallHit], t: &str| h.iter().find(|x| x.text == t).unwrap().score;
+    let q = "Where should I go on holiday?";
+    let s = "I go to Spain every summer.";
+    assert!((score(&off, q) - score(&on, q) - 0.05).abs() < 1e-6);
+    assert!((score(&off, s) - score(&on, s)).abs() < 1e-6, "recency moves only with the clock");
+    assert!(db
+        .recall("x", RecallOpts { question_weight: Some(-1.0), ..Default::default() })
+        .is_err());
+}

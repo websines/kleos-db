@@ -13,7 +13,7 @@ Tests:
 - `kleos-core/tests/memory.rs`: fake decider and embedder, plus one `#[ignore]` real-model test;
 - `kleos-lib-python/tests/test_memory_api.py`.
 
-Scenario: `scripts/memory-api/life_stream.py` and `kleos-core/examples/memory_scenario.rs`.
+Scenario: `scripts/memory-api/life_stream.py` and `kleos-core/examples/memory_scenario.rs`. Claims on LongMemEval knowledge-update questions: `scripts/memory-api/claims_ku.py`.
 
 ## Goal
 
@@ -65,7 +65,9 @@ Options:
 - `ttl` (µs after `at`) or `expires` (absolute µs): past it, recall leaves the memory out by default;
 - `k`: the number of candidates, default 5;
 - `decider`;
-- `embedder`: only used when this call creates the store.
+- `embedder`: only used when this call creates the store;
+- `split`: `auto` (the default) stores a text of several sentences as one memory per claim (see "Claims"); `none` stores the whole text as one memory, as before claims;
+- `min_similarity`: the cosine below which a claim's candidate is not sent to the decider (default 0.6; claims of a split text only).
 
 Steps:
 1. Embed the text, if the store's embedder is enabled.
@@ -114,6 +116,89 @@ Each decision carries the candidate, template, label, p, band, `decided_by`, rea
 
 **Never deletes.** Supersession ends validity. Nothing in `remember` removes a row.
 
+#### Claims (multi-sentence text)
+
+Status: implemented (wave2/claims). Code: `kleos-core/src/memory_claims.rs` (splitter, declarative test) and `plan_remember` / `remember` in `memory.rs`.
+
+Real agent input is a chat message, not a sentence. In LongMemEval's knowledge-update questions the update is one clause of a long message ("…Currently, my favourite is Kansas City Masterpiece BBQ sauce, but…") and the stale fact is one clause of an older one. Treating the message as one memory fails three ways: the old message is often not among the top-k candidates; "does this whole message supersede that one?" is the wrong question; and superseding the whole old message would also end its unrelated facts. So `remember` works per claim.
+
+**Splitting** (`split: 'auto'`, the default). `memory_claims::split_claims` is rule-based and deterministic:
+- lines first: a list bullet (`-`, `*`, `•`, `1.`, `2)`, `a)`) or a blank line starts a new item; a line that continues an unfinished one (starts in lower case, previous line without closing punctuation) is joined to it;
+- then sentences: `.`, `!`, `?`, `…` (with closing quotes or brackets) followed by whitespace and a capital letter or a digit. A period that is not followed by whitespace never splits (decimals, URLs, e-mail addresses, version numbers). Titles and number words never end a sentence ("Dr.", "St.", "No.", "e.g."); words that may ("etc.", "p.m.", "U.S.", "Inc.", months) only before a capital; one-letter initials ("A. Smith") never; an ellipsis only before a capital;
+- a claim with no letter or digit is dropped, and a repeated claim is kept once.
+
+A text that yields one claim is stored exactly as before: the trimmed text, under the plain statement id.
+
+**Storage.** Each claim is a memory row (with its own vector, TTL row, importance and kind from the call's options). Its id is `<statement id>.<n>`, n from 1; a one-claim statement keeps the plain `m_…` id. Every claim's `kleos_mem_source` row holds the whole statement (`stmt` = statement id), so:
+- recall hits of a claim carry `context`: the statement it came from (absent when it is the memory's own text);
+- `forget` and `set` of a statement id cover all its claims (`forget` of a claim id covers that claim only);
+- a claim that duplicates an existing memory adds a source row to it, as a whole statement did.
+
+**Decisions per claim.**
+- Only **declarative** claims are decided (`memory_claims::is_declarative`): not a question (`?`, or a wh-/auxiliary opening such as "Can you", "Do you", "What … " without a comma clause), not a request ("Please", "Suggest", "Recommend", "I need some ideas", "Any tips"…), not a greeting or thanks, and at least three words. The others are stored and recallable, and never candidates either: candidates are fetched 2k deep and the first k declarative ones are kept. With `split: 'none'` every statement and candidate is decided, as before.
+- Candidates are searched per claim; the decider is **batched across all claims**: one `decide(supersedes)` and one `decide(duplicate)` call per `remember`, through the pair cache.
+- **Similarity floor** (claims of a split text only): a candidate whose vector has cosine < `min_similarity` (default 0.6) with the claim is not sent to the decider. Each decision reports `similarity`.
+- **Review noise** (claims of a split text only): of a claim's pending `supersedes` answers, only the one with the highest p stays pending; the others are recorded as `none`.
+- A supersede ends **only the old claim**; the old statement's other claims stay current. A memory that one claim of the statement duplicates is not ended by another claim of the same statement (that supersede is left pending). Claims of one statement are not compared with each other.
+- **Entities:** names are resolved once per statement. A name is linked to (mentions) the claims whose text contains it (case-insensitive, at word boundaries), or to every claim when no claim does, e.g. the subject `user`. The same-subject gate uses each claim's own entities.
+- A single sentence keeps the old behaviour except that a question, request or fragment is not decided (it would otherwise be compared as if it stated a fact).
+
+**One transaction.** All claims of a `remember` are written in its one script, under the namespace version assert, with one re-plan of the whole statement on conflict. With an Engram model attached, each added claim enqueues its own job (`write` or `supersede` with the old claims it ended, the claim's text, and the entity names linked to it), numbered `v+1 … v+n` from the planned version `v`; the version then advances by `n`, so the last job id is still the commit's version.
+
+**Result.** For a split statement, `id` is the statement id (when any claim was added), `action` is `added` unless every claim was a duplicate, `superseded` is the union, and `claims` lists `{id, text, action, duplicate_of, superseded, decided}` per claim. Each decision names its `claim`. A one-claim statement's result is unchanged (no `claims`).
+
+**Recall.** A question or request is about as relevant to a question as the fact that answers it ("how many stars do I need for gold?" against the stars I have), and chat is full of them. The blend subtracts `question_weight` (default 0.05) from a memory that is not declarative.
+
+##### Results (LongMemEval knowledge-update, native API)
+
+Each user turn of the oracle haystack goes to `remember` whole (`split: 'auto'`, no splitting in Python), with the session date as `at` and the session id as `source`; then `recall(question, k = 10)`. The metric is the prototype's: is the first hit from an answer session the latest answer session? decider-nano (nano-tune-v1) and EmbeddingGemma on Metal, from the Python wheel. Script: `scripts/memory-api/claims_ku.py` (runs and logs in `.bench-data/claims-impl/runs/`); the prototype is `.bench-data/claims-impl/claims_ku_prototype.py` (Python-side sentences, questions dropped).
+
+The 23 held-out, non-abstention questions (`lme_ku_split()`):
+
+| Unit | Decider | Latest first | Stale first | Latest in top 10 | … with `hide_pending` | Superseded / q | Pending / q | `remember` p50 |
+|---|---|---|---|---|---|---|---|---|
+| whole message (prototype) | no | 39% | 61% | | | | | |
+| sentence (prototype) | no | 61% | 39% | | | | | |
+| sentence (prototype) | yes | 83% | 17% | 100% | | 0.57 | 11.5 | 788 ms per sentence (whole message: ~8 s per turn) |
+| **claims (native)** | **yes** | **83%** (19/23) | **17%** | **100%** | **91%** (21/23) | 0.43 | **1.96** (supersedes 1.09, duplicate 0.87) | **144 ms per statement** (p90 574), 55 ms per claim |
+| claims, no similarity floor | yes | 83% | 17% | 100% | 87% | 0.57 | 2.43 | 702 ms per statement (p90 2069) |
+
+- A turn has 2.8 claims on average; 67% of claims are declarative and decided.
+- The four stale-first questions are the prototype's four. Two of them (Instagram followers 1250 → "close to 1300", bird species 27 → 32) are kept as pending supersedes (p 0.94 and 0.98), so `hide_pending` answers them.
+- The floor cuts decider work 3.5× (540 against 1916 `supersedes` questions on these 23) and latency 4.9×. Below it, it would have auto-applied three more supersedes, two of them wrong ("I'll definitely check some of these out" superseded by "I think I'll stop here for now", p 0.997 at cosine 0.45). Every auto-supersede the floor kept had cosine ≥ 0.66.
+- `question_weight` does not change the held-out first hit (83% at 0, 0.02, 0.05 and 0.1) and moves `hide_pending` from 87% to 91%.
+
+**Review noise**, pending decisions per question on the same 23:
+
+| | Pending / q |
+|---|---|
+| prototype (sentences through the old `remember`) | 11.5 |
+| native: questions not decided, floor 0.6, the likeliest pending `supersedes` per claim | 5.96 (2.43 + 3.52 `duplicate`) |
+| + `supersedes` kept only from p 0.9, the likeliest `duplicate` per claim from p 0.5 (final) | **1.96** |
+
+What the pending pairs were: below p 0.9 they were almost all two sentences on one topic that are both true ("I've been taking a course on Coursera" / "I've been using Duolingo", "I'm thinking of trying out a new coffee recipe" / "… a new tea blend"). What is left are mostly near-misses of real updates (followers, species counts, "4 MCU films" → "12 films in the last 3 months", hours on a sculpture) and real paraphrases as duplicates ("I think I'll go with the Brown Butter Sage Sauce" / "I think I'll try the brown butter sage sauce"). The thresholds were chosen on these 23 questions, and no auto decision depends on them. They apply to the claims of split statements only. The life stream's three true misses scored 0.977 to 0.996, above 0.9.
+
+**The 53 trained-on questions** (49 without abstention). decider-nano saw some of their answer pairs in training, so these numbers are flagged and not a held-out result:
+
+| | Latest first | Stale first | Latest in top 10 | … with `hide_pending` | Superseded / q | Pending / q | `remember` p50 |
+|---|---|---|---|---|---|---|---|
+| claims, no decider | 45% | 55% | 100% | 45% | 0.04 | 0 | 27 ms |
+| claims, decider (final) | 57% | 43% | 100% | 65% | 0.47 | 1.43 | 131 ms |
+| … `question_weight: 0` | 55% | 45% | | | | | |
+
+These are harder than the held-out ones on retrieval: in 9 of 49, the top hit was an earlier *question* about the same thing ("how many engineers do I lead in my new role?"), and many true updates score just under τ (p 0.996, pending).
+
+**Life stream** (40 one-sentence turns, so every statement is one claim): unchanged. Main's memory code and this branch, back to back on the same machine:
+
+| | Before | After |
+|---|---|---|
+| Recall, current fact first | 15 / 20 | 15 / 20 |
+| … with `hide_pending` | 19 / 20 | 19 / 20 |
+| Auto-supersede | 12 right, 0 wrong | 12 right, 0 wrong |
+| Pending supersedes | 3 true, 2 false | 3 true, 2 false |
+| Duplicates | 4 right, 0 wrong | 4 right, 0 wrong |
+| `remember` p50 | 343 ms | 344 ms |
+
 #### Template choice (why supersedes + duplicate, not relation)
 
 With the default weights (nano-tune-v1, [decide.md](decide.md)):
@@ -153,7 +238,7 @@ Options:
 - `vector_weight`: default 0.6;
 - `hide_pending`: leave out memories with a pending `supersedes` by a memory valid at the read time. Default false;
 - `include_archived`, `include_expired`: default false;
-- ranking: `blend` (default true), `recency_weight`, `half_life_days`, `importance_weight`, `access_weight` (see "Ranking");
+- ranking: `blend` (default true), `recency_weight`, `half_life_days`, `importance_weight`, `access_weight`, `question_weight` (see "Ranking");
 - `record_access`: count the returned memories as accessed. Default true; read-only `::memory recall` scripts never count.
 
 It is one script:
@@ -163,7 +248,7 @@ It is one script:
 - The result is joined with `kleos_mem` `@ 'NOW'` (or `@ $as_of`), plus the kind and entity filters. Archived memories, and memories whose expiry is at or before the read time, are left out unless asked. The order is by relevance; with the blend on, a window of max(2k + 10, k) is fetched and re-ranked.
 - Both legs over-fetch (4k + 16, and 4× more with a filter), because the indexes also hold stale versions.
 
-Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
+Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`, and `context` (the whole statement) when the memory is one claim of a longer text. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
 
 The vector leg always returns the nearest neighbours, so recall returns up to k memories even when none are relevant. There is no score cutoff.
 
@@ -174,6 +259,7 @@ score = relevance
       + recency_weight    · 2^(−age / half_life)                      age = read time − valid_from
       + importance_weight · (importance − 0.5)                        null importance counts as 0.5
       + access_weight     · min(1, ln(1 + accesses) / ln(1 + 100))
+      − question_weight   · [the memory is a question, request or fragment]
 ```
 
 | Option | Default | Notes |
@@ -183,6 +269,7 @@ score = relevance
 | `half_life_days` | 90 | the read time is `as_of` when given, so past reads decay from then |
 | `importance_weight` | 0.1 | importance 1 → +0.05, 0 → −0.05, unset → 0 |
 | `access_weight` | 0 | recorded, not ranked by default (below) |
+| `question_weight` | 0.05 | subtracted when `memory_claims::is_declarative` is false (see "Claims") |
 
 `relevance` is the `WeightedFusion` score, in [0, 1]. It is returned with every hit, together with `recency`, `importance` and `access_count`, so a caller can re-rank with its own formula. In CozoScript the signals are plain columns: `importance` on `kleos_mem`, `valid_from` from the validity, `n`/`last` on `kleos_mem_access`, `expires`/`archived` on `kleos_mem_life`. For example:
 
@@ -295,6 +382,7 @@ db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "
 ::memory init {embedder: 'gemma', decider: 'nano'}
 ::memory init {engram: 'nano'}             # feature engram: remember/forget enqueue Engram jobs
 ::memory remember 'I moved to Lisbon.' {ns: 'alice', entities: ['Lisbon'], source: 'chat-12'}
+::memory remember 'I moved to Lisbon. My rent is €900.' {ns: 'alice', split: 'none'}   # one memory, not two claims
 ::memory recall 'where do I live?' {ns: 'alice', k: 5, as_of: 1767225600000000}
 ::memory forget $id {ns: 'alice', mode: 'erase'}
 ::memory forget {ns: 'alice', kind: 'preference'}
@@ -307,7 +395,7 @@ db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "
 ```
 
 Output:
-- `recall` returns one row per hit: `id, text, score, kind, valid_from, valid_to, created, source, importance, pending_superseded_by, relevance, recency, access_count, last_access, expires, archived`.
+- `recall` returns one row per hit: `id, text, score, kind, valid_from, valid_to, created, source, importance, pending_superseded_by, relevance, recency, access_count, last_access, expires, archived, context`.
 - The other ops return one row with a column per result field. Lists of plain values become lists; records become JSON.
 - `recall` and `reflect` run in read-only scripts (a read-only recall does not count accesses). The others are refused there, and inside imperative blocks, because they run their own transactions.
 - Unknown options are errors.
@@ -317,6 +405,7 @@ Output:
 ```python
 db.memory_init(embedder="gemma", decider="nano")
 r = db.remember("I moved to Lisbon.", ns="alice", entities=["Lisbon"])   # dict
+db.remember("I moved to Lisbon. My rent is €900.", ns="alice")          # two claims: r["claims"]; split="none" for one memory
 db.recall("where do I live?", ns="alice", k=5, as_of=None)               # list of dicts
 db.forget(r["id"], ns="alice", mode="erase"); db.forget(ns="alice", kind="preference")
 db.reflect("alice"); db.link(a, b, "works_at", ns="alice")
@@ -355,7 +444,8 @@ A read-only principal may only use `recall` and `reflect`.
 - the same-subject gate: the sister's city never supersedes the user's, the user's move does, and a statement without entities is not gated (`entities_gate_supersedes_to_shared_subjects`); two concurrent `remember`s introducing the same new entities leave one row each (`concurrent_remembers_never_leave_two_current`);
 - ranking: recency decay and half-life, importance from `remember` and `set`, blend off = relevance with unchanged scores (`recency_and_importance_rank_and_blend_off_is_relevance`);
 - access counts: buffered, flushed, not counted by read-only scripts, flushes never touch the namespace version, ranked only with `access_weight`, dropped on erase (`access_counts_are_buffered_flushed_and_ranked`);
-- TTL and the archive tier: exclusion, `as_of` before expiry, no duplicate into an expired memory, archiving expired memories, archive and restore by id, TTL set and removed later (`ttl_expiry_and_archive_tier`).
+- TTL and the archive tier: exclusion, `as_of` before expiry, no duplicate into an expired memory, archiving expired memories, archive and restore by id, TTL set and removed later (`ttl_expiry_and_archive_tier`);
+- claims: ids, provenance, `context`, `split: 'none'` and the CozoScript/JSON surfaces (`claims_split_store_and_recall_with_context`); a supersede that ends only the old claim, and the similarity floor (`claims_supersede_only_the_old_claim`); questions and requests never decided on either side (`claims_questions_are_not_decided`); `forget` / `set` of a statement id (`claims_forget_a_statement`); entities per claim and the per-claim gate (`claims_link_entities_per_claim`); two concurrent split statements (`concurrent_claim_remembers_never_leave_two_current`); `question_weight` (`claims_questions_rank_below_statements`); one Engram job per claim with consecutive qids (`claims_enqueue_one_job_each` in `tests/memory_engram.rs`). The splitter's hard cases are unit tests in `memory_claims.rs`.
 
 ### Real scenario
 
@@ -397,6 +487,8 @@ Each turn now passes `entities`: the subject (`user` for first-person statements
 - Not exercised by this stream: importance (no turn sets it) and access counts (weight 0). The deterministic tests cover both.
 
 ## Caveats
+
+- **Claims.** The similarity floor (0.6) and the review thresholds were measured with EmbeddingGemma and decider-nano on 23 questions. Another embedder has another cosine scale; pass `min_similarity` for it. Claims are decided without their neighbours: a claim like "It's better now that it's aligned with my gym days" carries no subject (no coreference is resolved), though recall returns the statement as `context`. Claims of one statement are not compared with each other. A legacy whole-message memory that ends in a question is no longer a candidate in `auto` mode.
 
 - The candidate read and model calls run outside the write transaction (above).
 - The decider sees only the top-k candidates. A stale fact phrased very differently from its update may never be compared. `reflect` surfaces the ones that share an entity.

@@ -39,6 +39,7 @@ use crate::data::value::{DataValue, Validity};
 use crate::decide::{self, rules, Band, Decision, Template};
 use crate::embed;
 use crate::entity::{EntityConfig, Mention, Outcome, ResolveOptions, ENTITY_LINKS, ENTITY_MERGES};
+use crate::memory_claims;
 use crate::memory_engram::{self as engram_hook, Job};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
@@ -85,6 +86,18 @@ const DEFAULT_VECTOR_WEIGHT: f64 = 0.6;
 /// threshold, is kept for review. The tuned decider-nano calibration has
 /// threshold = τ_auto (0.997), so it has no tentative band of its own.
 const REVIEW_P: f64 = 0.5;
+/// Claims of a split statement: a `supersedes` answer is kept for review
+/// only from this p (and only the claim's likeliest one). On the held-out
+/// LongMemEval knowledge-update questions, pending answers below 0.9 were
+/// almost all unrelated sentences on one topic ("I've been using Duolingo"
+/// against "I've been taking a course on Coursera"); the life stream's
+/// three true misses scored 0.977 to 0.996.
+const CLAIM_REVIEW_P: f64 = 0.9;
+/// The same for a tentative `duplicate` answer of a claim.
+const CLAIM_DUP_REVIEW_P: f64 = 0.5;
+/// Claim mode: a candidate whose vector is less similar than this (cosine)
+/// to the claim's is not sent to the decider (see "Claims" in the spec).
+const DEFAULT_MIN_SIMILARITY: f64 = 0.6;
 /// Lock-free planning attempts of a `remember` before it plans under the
 /// in-process commit lock.
 const OPTIMISTIC_ATTEMPTS: usize = 2;
@@ -105,6 +118,10 @@ const DEFAULT_RECENCY_WEIGHT: f64 = 0.03;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 90.0;
 const DEFAULT_IMPORTANCE_WEIGHT: f64 = 0.1;
 const DEFAULT_ACCESS_WEIGHT: f64 = 0.0;
+/// A question or request ("how many stars do I need for gold?") is as
+/// relevant to a question as the fact that answers it, and conversational
+/// text is full of them; the blend ranks it this much lower.
+const DEFAULT_QUESTION_WEIGHT: f64 = 0.05;
 /// Accesses at which the access signal saturates (reaches 1).
 const ACCESS_SATURATION: f64 = 100.0;
 /// Buffered access counts are flushed once this many memories are pending,
@@ -235,12 +252,69 @@ fn ns_gate(ns: &str) -> Arc<NsGate> {
 
 /// Bumps a namespace's `MEM_NS` version (as one `{}` block of a script).
 fn bump_ns_head() -> String {
+    bump_ns_head_by(1)
+}
+
+/// Advances a namespace's `MEM_NS` version by `n` (a `remember` that
+/// enqueues `n` Engram jobs numbers them with the `n` versions it takes).
+fn bump_ns_head_by(n: usize) -> String {
     format!(
         "{{cur[max(s)] := *{MEM_NS}{{ns: $ns, seq: s}} \
            cur[max(s)] := s = 0 \
-           ?[ns, seq] := cur[s0], ns = $ns, seq = s0 + 1 \
+           ?[ns, seq] := cur[s0], ns = $ns, seq = s0 + {n} \
           :put {MEM_NS} {{ns => seq}}}}"
     )
+}
+
+/// The memory id of claim `i` (0-based) of a multi-claim statement.
+fn claim_id(stmt: &str, i: usize) -> String {
+    format!("{stmt}.{}", i + 1)
+}
+
+/// Whether `text` mentions the entity name `name` (case-insensitive, at
+/// word boundaries).
+fn mentions_name(text: &str, name: &str) -> bool {
+    let n = norm_name(name);
+    if n.is_empty() {
+        return false;
+    }
+    let t = text.to_lowercase();
+    let mut from = 0;
+    while let Some(off) = t[from..].find(&n) {
+        let a = from + off;
+        let b = a + n.len();
+        let before = t[..a].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let after = t[b..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        if before && after {
+            return true;
+        }
+        from = a + t[a..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    false
+}
+
+/// A stored vector as f32s.
+fn vec_of(v: &DataValue) -> Option<Vec<f32>> {
+    match v {
+        DataValue::Vec(crate::data::value::Vector::F32(a)) => Some(a.to_vec()),
+        DataValue::Vec(crate::data::value::Vector::F64(a)) => Some(a.iter().map(|x| *x as f32).collect()),
+        DataValue::List(l) => l.iter().map(|x| x.get_float().map(|f| f as f32)).collect(),
+        _ => None,
+    }
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    let (mut d, mut na, mut nb) = (0f64, 0f64, 0f64);
+    for (x, y) in a.iter().zip(b) {
+        d += (*x as f64) * (*y as f64);
+        na += (*x as f64) * (*x as f64);
+        nb += (*y as f64) * (*y as f64);
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        d / (na.sqrt() * nb.sqrt())
+    }
 }
 
 /// A write that lost to a concurrent transaction (storage-level conflict or
@@ -253,13 +327,27 @@ fn is_contention(e: &miette::Report) -> bool {
 /// What a `remember` will do, decided before anything is written.
 struct Plan {
     at: i64,
+    claims: Vec<ClaimPlan>,
+    ents: EntityPlan,
+    res: RememberResult,
+}
+
+/// One claim of a `remember`, planned.
+struct ClaimPlan {
+    /// Memory id it gets when added.
+    id: String,
+    text: String,
+    vec: Option<Vec<f32>>,
+    /// Declarative: takes part in decisions.
+    decided: bool,
     cands: Vec<Cand>,
     sup: Vec<Option<Decision>>,
+    dup: Vec<Option<Decision>>,
     supersede: Vec<usize>,
     duplicate: Option<(usize, f64)>,
     audit: Vec<MemDecision>,
-    ents: EntityPlan,
-    res: RememberResult,
+    /// Indices into the entity plan's `out` of the entities it mentions.
+    ents: Vec<usize>,
 }
 
 fn now_micros() -> i64 {
@@ -383,6 +471,15 @@ pub struct RememberOpts {
     pub decider: Option<String>,
     /// Embedder name for the first `remember` of a new store.
     pub embedder: Option<String>,
+    /// `auto` (default): a text of several sentences is stored as one
+    /// memory per sentence (claim), each decided on its own; `none`: the
+    /// whole text is one memory, decided as one (the behaviour before
+    /// claims). A single sentence is one memory either way.
+    pub split: Option<String>,
+    /// Cosine similarity below which a candidate of a claim is not sent to
+    /// the decider (default 0.6). Only applies to the claims of a split
+    /// statement, when both texts are embedded.
+    pub min_similarity: Option<f64>,
 }
 
 /// Options of [`Db::recall`].
@@ -416,6 +513,9 @@ pub struct RecallOpts {
     pub importance_weight: Option<f64>,
     /// Blend weight of the access count (default 0: recorded, not ranked).
     pub access_weight: Option<f64>,
+    /// Subtracted from the blended score of a memory that is a question or
+    /// a request rather than a statement (default 0.05; see "Claims").
+    pub question_weight: Option<f64>,
     /// Also return archived memories (default false).
     pub include_archived: bool,
     /// Also return memories past their TTL (default false).
@@ -526,6 +626,31 @@ pub struct MemDecision {
     pub reason: Option<String>,
     /// `superseded`, `duplicate`, `pending` or `none`.
     pub action: String,
+    /// The claim (memory id) this decision is about, when the statement was
+    /// split into several claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    /// Cosine similarity of the two texts' vectors, when both are embedded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
+}
+
+/// What `remember` did with one claim of a multi-sentence statement.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClaimResult {
+    /// The claim's memory id (`<statement id>.<n>`); `None` for a duplicate.
+    pub id: Option<String>,
+    /// The claim's text.
+    pub text: String,
+    /// `added` or `duplicate`.
+    pub action: String,
+    /// The existing memory this claim duplicates.
+    pub duplicate_of: Option<String>,
+    /// Memories whose validity this claim ended.
+    pub superseded: Vec<String>,
+    /// Whether the claim took part in supersede / duplicate decisions (a
+    /// declarative claim: not a question, request or short fragment).
+    pub decided: bool,
 }
 
 /// How a name passed in `entities` was resolved.
@@ -576,6 +701,10 @@ pub struct RememberResult {
     pub embedded: bool,
     /// Decider used (`None`: model-free rules only).
     pub decider: Option<String>,
+    /// The claims, when the text was split into several (`id` is then the
+    /// statement id: `forget` of it covers every claim).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<ClaimResult>,
 }
 
 /// One recalled memory.
@@ -616,6 +745,10 @@ pub struct RecallHit {
     /// Memories valid at the read time that may have superseded this one
     /// (pending `supersedes` decisions, see `reflect`).
     pub pending_superseded_by: Vec<String>,
+    /// The whole statement this memory was split from, when it is one claim
+    /// of a longer text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
 }
 
 /// What [`Db::forget`] did.
@@ -773,6 +906,8 @@ struct EntityPlan {
     /// New `kleos_entity_link` review rows.
     links: Vec<DataValue>,
     out: Vec<EntityLink>,
+    /// Per entry of `out`: the canonical entities that name may also be.
+    maybe_of: Vec<BTreeSet<String>>,
     /// Canonical entities of the statement.
     sure: BTreeSet<String>,
     /// Canonical entities its names may also be (auto or tentative
@@ -803,6 +938,8 @@ struct Cand {
     /// Archived, or expired at the new statement's time: never a duplicate
     /// target (the restatement would vanish into a hidden memory).
     hidden: bool,
+    /// Cosine similarity to the new claim (both embedded).
+    sim: Option<f64>,
 }
 
 fn mem_decision(c: &Cand, d: &Decision, action: &str) -> MemDecision {
@@ -816,6 +953,8 @@ fn mem_decision(c: &Cand, d: &Decision, action: &str) -> MemDecision {
         decided_by: d.decided_by(),
         reason: d.reason.clone(),
         action: action.to_string(),
+        claim: None,
+        similarity: c.sim,
     }
 }
 
@@ -1107,6 +1246,17 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
     }
 
+    /// Embed every text with `name` in one batch if it is enabled.
+    fn embed_all_if_on(&self, name: Option<&str>, texts: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
+        match name {
+            Some(n) if embed::is_embedder_enabled(n) => {
+                let refs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
+                Ok(embed::embed_texts(n, &refs)?.into_iter().map(|v| Some(v.to_vec())).collect())
+            }
+            _ => Ok(vec![None; texts.len()]),
+        }
+    }
+
     /// The decider `remember` uses: the call's, the store's, else the first
     /// enabled one; `None` when that one is off (rules only).
     fn pick_decider(&self, call: Option<&str>, cfg: &MemConfig) -> Option<String> {
@@ -1368,9 +1518,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                     ]));
                 }
             }
+            let mut maybe = BTreeSet::new();
             for c in &review {
-                plan.maybe.extend(canon_of(&c.entity));
+                maybe.extend(canon_of(&c.entity));
             }
+            plan.maybe.extend(maybe.iter().cloned());
+            plan.maybe_of.push(maybe);
             plan.sure.insert(canonical.clone());
             plan.out.push(EntityLink {
                 name: name.clone(),
@@ -1383,6 +1536,33 @@ impl<'s, S: Storage<'s>> Db<S> {
             });
         }
         Ok(plan)
+    }
+
+    /// `ids` plus the claims of each that is a statement id (`<id>.<n>`):
+    /// a statement split into claims is forgotten or set as a whole.
+    fn with_claims(&'s self, ns: &str, mut ids: Vec<String>) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        let prefixes: Vec<String> = ids.iter().filter(|i| !i.contains('.')).map(|i| format!("{i}.")).collect();
+        if prefixes.is_empty() {
+            return Ok(ids);
+        }
+        // claim ids sort right after their statement id: one key range each
+        for r in self
+            .mem_q(
+                &format!(
+                    "?[id] := p in $ps, *{MEM}{{ns: $ns, id}}, id > p, id < concat(p, '~'), starts_with(id, p)"
+                ),
+                vec![("ns", s(ns)), ("ps", str_list(&prefixes))],
+            )?
+            .rows
+        {
+            ids.extend(cell_str(&r[0]));
+        }
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     /// `(expires, archived)` of the ids that have a `kleos_mem_life` row.
@@ -1401,44 +1581,92 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect())
     }
 
-    /// The read-only half of `remember`: candidates, decisions and the
-    /// actions they imply. Nothing is written.
+    /// The read-only half of `remember`: per claim, the candidates, the
+    /// decisions (batched across all claims: one decider call per template)
+    /// and the actions they imply. Nothing is written.
+    #[allow(clippy::too_many_arguments)]
     fn plan_remember(
         &'s self,
         cfg: &MemConfig,
         ns: &str,
-        text: &str,
-        vec: &Option<Vec<f32>>,
+        claims: &[(String, String, Option<Vec<f32>>)],
         at: i64,
         opts: &RememberOpts,
+        auto: bool,
+        floor: f64,
     ) -> Result<Plan> {
-        // candidates: current memories of the namespace, hybrid-ranked
-        let rows = self.mem_search(
-            &cfg,
-            &ns,
-            text,
-            vec.clone(),
-            opts.k.unwrap_or(DEFAULT_K).max(1),
-            opts.k.unwrap_or(DEFAULT_K).max(1),
-            None,
-            None,
-            None,
-            DEFAULT_VECTOR_WEIGHT,
-            false,
-            None,
-        )?;
-        let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
-        let iv = intervals(&self.mem_history(&ns, &ids)?, i64::MAX);
-        let life = self.life_of(ns, &ids)?;
-        let decider = self.pick_decider(opts.decider.as_deref(), &cfg);
+        let k = opts.k.unwrap_or(DEFAULT_K).max(1);
+        let multi = claims.len() > 1;
+        let decider = self.pick_decider(opts.decider.as_deref(), cfg);
 
-        // entities: resolve the statement's names, and read the candidates'
+        // entities: resolve the statement's names once; a name is linked to
+        // the claims that mention it, or to every claim when none does
+        // (the subject, e.g. `user`, is rarely written out)
         let view = if opts.entities.is_empty() {
             EntityView::default()
         } else {
             self.entity_view(ns)?
         };
         let ents = self.plan_entities(ns, &opts.entities, decider.as_deref(), &view)?;
+        let mut claim_ents: Vec<Vec<usize>> = vec![vec![]; claims.len()];
+        for (ei, e) in ents.out.iter().enumerate() {
+            let hit: Vec<usize> = if multi {
+                (0..claims.len()).filter(|&c| mentions_name(&claims[c].1, &e.name)).collect()
+            } else {
+                vec![]
+            };
+            let to: Vec<usize> = if hit.is_empty() { (0..claims.len()).collect() } else { hit };
+            for c in to {
+                claim_ents[c].push(ei);
+            }
+        }
+
+        // candidates per claim; only declarative claims (and candidates)
+        // take part in decisions in `auto` mode
+        let decided: Vec<bool> = claims
+            .iter()
+            .map(|c| !auto || memory_claims::is_declarative(&c.1))
+            .collect();
+        let mut rows_per: Vec<Vec<Vec<DataValue>>> = Vec::with_capacity(claims.len());
+        for (ci, (_, text, vec)) in claims.iter().enumerate() {
+            if !decided[ci] {
+                rows_per.push(vec![]);
+                continue;
+            }
+            let window = if auto { 2 * k } else { k };
+            let rows = self.mem_search(
+                cfg,
+                ns,
+                text,
+                vec.clone(),
+                k,
+                window,
+                None,
+                None,
+                None,
+                DEFAULT_VECTOR_WEIGHT,
+                false,
+                None,
+            )?;
+            let rows: Vec<Vec<DataValue>> = if auto {
+                rows.into_iter()
+                    .filter(|r| r[2].get_str().is_some_and(memory_claims::is_declarative))
+                    .take(k)
+                    .collect()
+            } else {
+                rows
+            };
+            rows_per.push(rows);
+        }
+        let ids: Vec<String> = rows_per
+            .iter()
+            .flatten()
+            .filter_map(|r| cell_str(&r[0]))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let iv = intervals(&self.mem_history(ns, &ids)?, i64::MAX);
+        let life = self.life_of(ns, &ids)?;
         let mut cand_ents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         if !ents.sure.is_empty() && !ids.is_empty() {
             for r in self
@@ -1453,174 +1681,265 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
             }
         }
-        let cands: Vec<Cand> = rows
-            .iter()
-            .filter_map(|r| {
-                let id = cell_str(&r[0])?;
-                let hidden = life
-                    .get(&id)
-                    .is_some_and(|(e, a)| a.is_some() || e.is_some_and(|e| e <= at));
-                Some(Cand {
-                    from: iv.get(&id).map(|x| x.0).unwrap_or(0),
-                    ents: cand_ents.remove(&id).unwrap_or_default(),
-                    hidden,
-                    id,
-                    text: cell_str(&r[2])?,
-                })
-            })
-            .collect();
-
-        // same-subject gate: when both statements name entities, a
-        // supersede needs a shared one; sharing only a possible match
-        // (review band) caps it at pending
-        let mut gated = vec![false; cands.len()];
-        let mut capped = vec![false; cands.len()];
-        for (i, c) in cands.iter().enumerate() {
-            if ents.sure.is_empty() || c.ents.is_empty() || !c.ents.is_disjoint(&ents.sure) {
-                continue;
-            }
-            if c.ents.is_disjoint(&ents.maybe) {
-                gated[i] = true;
-            } else {
-                capped[i] = true;
+        // the candidates' vectors, for the similarity floor and the audit
+        let mut cand_vecs: BTreeMap<String, Vec<f32>> = BTreeMap::new();
+        if cfg.dim.is_some() && !ids.is_empty() && claims.iter().any(|c| c.2.is_some()) {
+            for r in self
+                .mem_q(
+                    &format!("?[id, vec] := id in $ids, *{MEM_VEC}{{ns: $ns, id, vec}}"),
+                    vec![("ns", s(ns)), ("ids", str_list(&ids))],
+                )?
+                .rows
+            {
+                if let (Some(id), Some(v)) = (cell_str(&r[0]), vec_of(&r[1])) {
+                    cand_vecs.insert(id, v);
+                }
             }
         }
 
-        // decisions
-        let key = norm_text(text);
-        let mut sup: Vec<Option<Decision>> = vec![None; cands.len()];
-        let mut dup: Vec<Option<Decision>> = vec![None; cands.len()];
-        let mut todo = vec![];
-        for (i, c) in cands.iter().enumerate() {
-            if norm_text(&c.text) == key {
-                dup[i] = Some(rule_decision(
-                    Template::Duplicate,
-                    "kleos",
-                    "exact",
-                    "same words after normalisation".to_string(),
-                ));
-            } else {
-                todo.push(i);
-            }
-        }
-        // the supersedes question is not asked across subjects
-        let sup_todo: Vec<usize> = todo.iter().copied().filter(|&i| !gated[i]).collect();
-        if !todo.is_empty() {
-            match &decider {
-                Some(name) => {
-                    let pairs = |which: &[usize]| -> Vec<(&str, &str)> {
-                        which.iter().map(|&i| (cands[i].text.as_str(), text)).collect()
+        let mut plans: Vec<ClaimPlan> = vec![];
+        let mut sup_todo: Vec<(usize, usize)> = vec![];
+        let mut dup_todo: Vec<(usize, usize)> = vec![];
+        let mut capped_all: Vec<Vec<bool>> = vec![];
+        let mut gated_ids: Vec<String> = vec![];
+        for (ci, ((id, text, vec), rows)) in claims.iter().zip(rows_per).enumerate() {
+            let cands: Vec<Cand> = rows
+                .iter()
+                .filter_map(|r| {
+                    let id = cell_str(&r[0])?;
+                    let hidden = life
+                        .get(&id)
+                        .is_some_and(|(e, a)| a.is_some() || e.is_some_and(|e| e <= at));
+                    let sim = match (vec, cand_vecs.get(&id)) {
+                        (Some(a), Some(b)) => Some(cosine(a, b)),
+                        _ => None,
                     };
-                    if !sup_todo.is_empty() {
-                        let s_ds = decide::decide(name, Template::Supersedes, &pairs(&sup_todo))?;
-                        for (&i, a) in sup_todo.iter().zip(s_ds) {
-                            sup[i] = Some(a);
-                        }
-                    }
-                    let d_ds = decide::decide(name, Template::Duplicate, &pairs(&todo))?;
-                    for (&i, b) in todo.iter().zip(d_ds) {
-                        dup[i] = Some(b);
+                    Some(Cand {
+                        from: iv.get(&id).map(|x| x.0).unwrap_or(0),
+                        ents: cand_ents.get(&id).cloned().unwrap_or_default(),
+                        hidden,
+                        sim,
+                        id,
+                        text: cell_str(&r[2])?,
+                    })
+                })
+                .collect();
+            // same-subject gate: when both statements name entities, a
+            // supersede needs a shared one; sharing only a possible match
+            // (review band) caps it at pending
+            let sure: BTreeSet<String> = claim_ents[ci].iter().map(|&e| ents.out[e].canonical.clone()).collect();
+            let maybe: BTreeSet<String> = claim_ents[ci].iter().flat_map(|&e| ents.maybe_of[e].iter().cloned()).collect();
+            let mut gated = vec![false; cands.len()];
+            let mut capped = vec![false; cands.len()];
+            for (i, c) in cands.iter().enumerate() {
+                if sure.is_empty() || c.ents.is_empty() || !c.ents.is_disjoint(&sure) {
+                    continue;
+                }
+                if c.ents.is_disjoint(&maybe) {
+                    gated[i] = true;
+                    gated_ids.push(c.id.clone());
+                } else {
+                    capped[i] = true;
+                }
+            }
+            let key = norm_text(text);
+            let mut dup: Vec<Option<Decision>> = vec![None; cands.len()];
+            for (i, c) in cands.iter().enumerate() {
+                if norm_text(&c.text) == key {
+                    dup[i] = Some(rule_decision(
+                        Template::Duplicate,
+                        "kleos",
+                        "exact",
+                        "same words after normalisation".to_string(),
+                    ));
+                } else if decider.is_none() || !multi || c.sim.map_or(true, |x| x >= floor) {
+                    // the decider only sees a claim's candidates above the
+                    // floor (a single statement is decided as before)
+                    dup_todo.push((ci, i));
+                    if !gated[i] {
+                        sup_todo.push((ci, i));
                     }
                 }
-                None => {
-                    // model-free: the value pre-check alone (decide::rules)
-                    for &i in &sup_todo {
-                        if let rules::ValueRule::Update(r) = rules::value_rule(&cands[i].text, text) {
-                            sup[i] = Some(rule_decision(
-                                Template::Supersedes,
-                                "rules",
-                                "rule",
-                                format!("value rule: {r}"),
-                            ));
-                        }
+            }
+            capped_all.push(capped);
+            plans.push(ClaimPlan {
+                id: id.clone(),
+                text: text.clone(),
+                vec: vec.clone(),
+                decided: decided[ci],
+                sup: vec![None; cands.len()],
+                dup,
+                cands,
+                supersede: vec![],
+                duplicate: None,
+                audit: vec![],
+                ents: claim_ents[ci].clone(),
+            });
+        }
+
+        // decisions: one batched call per template across every claim
+        match &decider {
+            Some(name) => {
+                let pairs = |which: &[(usize, usize)]| -> Vec<(String, String)> {
+                    which
+                        .iter()
+                        .map(|&(ci, i)| (plans[ci].cands[i].text.clone(), plans[ci].text.clone()))
+                        .collect()
+                };
+                let sp = pairs(&sup_todo);
+                let dp = pairs(&dup_todo);
+                if !sp.is_empty() {
+                    let refs: Vec<(&str, &str)> = sp.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                    for (&(ci, i), a) in sup_todo.iter().zip(decide::decide(name, Template::Supersedes, &refs)?) {
+                        plans[ci].sup[i] = Some(a);
+                    }
+                }
+                if !dp.is_empty() {
+                    let refs: Vec<(&str, &str)> = dp.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                    for (&(ci, i), b) in dup_todo.iter().zip(decide::decide(name, Template::Duplicate, &refs)?) {
+                        plans[ci].dup[i] = Some(b);
+                    }
+                }
+            }
+            None => {
+                // model-free: the value pre-check alone (decide::rules)
+                for &(ci, i) in &sup_todo {
+                    if let rules::ValueRule::Update(r) = rules::value_rule(&plans[ci].cands[i].text, &plans[ci].text) {
+                        plans[ci].sup[i] = Some(rule_decision(
+                            Template::Supersedes,
+                            "rules",
+                            "rule",
+                            format!("value rule: {r}"),
+                        ));
                     }
                 }
             }
         }
 
-        // actions
+        // actions per claim
+        for (cp, capped) in plans.iter_mut().zip(&capped_all) {
+            let mut supersede = vec![];
+            let mut duplicate: Option<(usize, f64)> = None;
+            for (i, c) in cp.cands.iter().enumerate() {
+                let s_auto = cp.sup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto)) && !capped[i];
+                let d_auto = cp.dup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto)) && !c.hidden;
+                if d_auto && !s_auto {
+                    let p = cp.dup[i].as_ref().unwrap().p;
+                    if duplicate.map_or(true, |(_, q)| p > q) {
+                        duplicate = Some((i, p));
+                    }
+                } else if s_auto && !d_auto && c.from <= at {
+                    supersede.push(i);
+                }
+            }
+            cp.supersede = supersede;
+            cp.duplicate = duplicate;
+        }
+        // a memory one claim repeats is not ended by another claim of the
+        // same statement (that supersede is left pending)
+        let kept: BTreeSet<String> = plans
+            .iter()
+            .filter_map(|cp| cp.duplicate.map(|(i, _)| cp.cands[i].id.clone()))
+            .collect();
+        for cp in plans.iter_mut() {
+            let cands = &cp.cands;
+            cp.supersede.retain(|&i| !kept.contains(&cands[i].id));
+        }
+
         let mut res = RememberResult {
             ns: ns.to_string(),
             decider: decider.clone(),
-            embedded: vec.is_some(),
-            gated: cands
-                .iter()
-                .zip(&gated)
-                .filter(|(_, g)| **g)
-                .map(|(c, _)| c.id.clone())
-                .collect(),
+            embedded: claims.iter().any(|c| c.2.is_some()),
+            gated: gated_ids.into_iter().unique().collect(),
             ..Default::default()
         };
-        let mut supersede = vec![];
-        let mut duplicate: Option<(usize, f64)> = None;
-        for (i, c) in cands.iter().enumerate() {
-            let s_auto = sup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto)) && !capped[i];
-            let d_auto = dup[i].as_ref().is_some_and(|d| is_yes(d, Band::Auto)) && !c.hidden;
-            if d_auto && !s_auto {
-                let p = dup[i].as_ref().unwrap().p;
-                if duplicate.map_or(true, |(_, q)| p > q) {
-                    duplicate = Some((i, p));
-                }
-            } else if s_auto && !d_auto && c.from <= at {
-                supersede.push(i);
-            }
-        }
-        let mut audit = vec![];
-        let mut push = |res: &mut RememberResult, i: usize, d: &Decision, action: &str| {
-            let md = mem_decision(&cands[i], d, action);
-            if action != "none" {
-                audit.push(md.clone());
-            }
-            if action == "pending" {
-                res.tentative.push(md.clone());
-            }
-            res.decisions.push(md);
-        };
-        for (i, _) in cands.iter().enumerate() {
-            for d in [&sup[i], &dup[i]].into_iter().flatten() {
-                let applied = (duplicate.map(|x| x.0) == Some(i) && d.template == "duplicate")
-                    || (duplicate.is_none() && supersede.contains(&i) && d.template == "supersedes");
-                let action = if applied {
-                    if d.template == "duplicate" {
-                        "duplicate"
+        for cp in plans.iter_mut() {
+            // review noise (claims of a split statement only): of each
+            // template, only the claim's likeliest answer that would be left
+            // pending is kept for review, and only at p >= CLAIM_REVIEW_P;
+            // the rest are recorded as `none`. A single statement keeps
+            // every pending answer, as before.
+            let best = |template: &str| -> Option<usize> {
+                let col = if template == "supersedes" { &cp.sup } else { &cp.dup };
+                (0..cp.cands.len())
+                    .filter(|&i| {
+                        col[i].as_ref().is_some_and(|d| {
+                            let min = if template == "supersedes" { CLAIM_REVIEW_P } else { CLAIM_DUP_REVIEW_P };
+                            d.p >= min && ((d.label == "yes" && d.band != Band::None) || d.p >= REVIEW_P)
+                        })
+                    })
+                    .max_by(|&a, &b| {
+                        let pa = col[a].as_ref().unwrap().p;
+                        let pb = col[b].as_ref().unwrap().p;
+                        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            };
+            let best_sup = best("supersedes");
+            let best_dup = best("duplicate");
+            let claim_id = multi.then(|| match cp.duplicate {
+                Some((i, _)) => cp.cands[i].id.clone(),
+                None => cp.id.clone(),
+            });
+            for i in 0..cp.cands.len() {
+                for d in [&cp.sup[i], &cp.dup[i]].into_iter().flatten() {
+                    let applied = (cp.duplicate.map(|x| x.0) == Some(i) && d.template == "duplicate")
+                        || (cp.duplicate.is_none() && cp.supersede.contains(&i) && d.template == "supersedes");
+                    let action = if applied {
+                        if d.template == "duplicate" {
+                            "duplicate"
+                        } else {
+                            "superseded"
+                        }
+                    } else if (d.label == "yes" && d.band != Band::None)
+                        || (d.template == "supersedes" && d.p >= REVIEW_P)
+                    {
+                        // tentative, a likely supersede below the calibrated
+                        // threshold, an auto answer that conflicts with the
+                        // other template, a late arrival, or an auto
+                        // supersede left undone because the statement is a
+                        // duplicate
+                        let keep = if d.template == "supersedes" { best_sup } else { best_dup };
+                        if multi && keep != Some(i) {
+                            "none"
+                        } else {
+                            "pending"
+                        }
                     } else {
-                        "superseded"
+                        "none"
+                    };
+                    let mut md = mem_decision(&cp.cands[i], d, action);
+                    md.claim = claim_id.clone();
+                    if action != "none" {
+                        cp.audit.push(md.clone());
                     }
-                } else if (d.label == "yes" && d.band != Band::None)
-                    || (d.template == "supersedes" && d.p >= REVIEW_P)
-                {
-                    // tentative, a likely supersede below the calibrated
-                    // threshold, an auto answer that conflicts with the
-                    // other template, a late arrival, or an auto supersede
-                    // left undone because the statement is a duplicate
-                    "pending"
-                } else {
-                    "none"
-                };
-                push(&mut res, i, d, action);
+                    if action == "pending" {
+                        res.tentative.push(md.clone());
+                    }
+                    res.decisions.push(md);
+                }
             }
         }
 
         Ok(Plan {
             at,
-            cands,
-            sup,
-            supersede,
-            duplicate,
-            audit,
+            claims: plans,
             ents,
             res,
         })
     }
 
-    /// Store `text` as a memory. Finds the top-k similar current memories of
-    /// the namespace, decides `supersedes` and `duplicate` for all of them in
-    /// one batch each, and acts on the band: `auto` supersedes (ends the old
-    /// memory's validity) or skips a duplicate (recording the statement as
-    /// another source of the existing memory); `tentative` inserts and
-    /// records a pending decision; `none` inserts. Never deletes. Without a
-    /// decider it uses the exact-text and value rules only; without an
-    /// embedder, FTS candidates only.
+    /// Store `text` as memories. A text of several sentences is split into
+    /// claims (`split: 'auto'`, the default), one memory each, with ids
+    /// `<statement id>.<n>`; one sentence is one memory with the statement
+    /// id. For each declarative claim, finds the top-k similar current
+    /// memories of the namespace, decides `supersedes` and `duplicate`
+    /// (batched over all claims, one call per template), and acts on the
+    /// band: `auto` supersedes (ends the old memory's validity) or skips a
+    /// duplicate (recording the statement as another source of the existing
+    /// memory); `tentative` inserts and records a pending decision; `none`
+    /// inserts. Every claim of one call is written in one transaction. Never
+    /// deletes. Without a decider it uses the exact-text and value rules
+    /// only; without an embedder, FTS candidates only.
     pub fn remember(&'s self, text: &str, opts: RememberOpts) -> Result<RememberResult> {
         let text = text.trim();
         if text.is_empty() {
@@ -1631,10 +1950,31 @@ impl<'s, S: Storage<'s>> Db<S> {
                 bail!("`remember` option importance must be in [0, 1], got {x}");
             }
         }
+        let auto = match opts.split.as_deref() {
+            None | Some("auto") => true,
+            Some("none") => false,
+            Some(x) => bail!("`remember` option split must be 'auto' or 'none', got '{x}'"),
+        };
+        let floor = opts.min_similarity.unwrap_or(DEFAULT_MIN_SIMILARITY);
+        if !(-1.0..=1.0).contains(&floor) {
+            bail!("`remember` option min_similarity must be in [-1, 1], got {floor}");
+        }
         let cfg = self.mem_ready(opts.embedder.as_deref())?;
         let ns = ns_of(&opts.ns);
         let stmt = new_id("m");
-        let vec = self.embed_if_on(cfg.embedder.as_deref(), text)?;
+        let parts = if auto {
+            memory_claims::split_claims(text)
+        } else {
+            vec![text.to_string()]
+        };
+        let multi = parts.len() > 1;
+        let vecs = self.embed_all_if_on(cfg.embedder.as_deref(), &parts)?;
+        let claims: Vec<(String, String, Option<Vec<f32>>)> = parts
+            .into_iter()
+            .zip(vecs)
+            .enumerate()
+            .map(|(i, (t, v))| (if multi { claim_id(&stmt, i) } else { stmt.clone() }, t, v))
+            .collect();
 
         // concurrency: plan without holding anything, then write in one
         // transaction that asserts the namespace version planned against is
@@ -1644,13 +1984,13 @@ impl<'s, S: Storage<'s>> Db<S> {
         // also the later one in valid time.
         let gate = ns_gate(&ns);
         let mut attempt = 0;
-        let (mut res, duplicate) = loop {
+        let mut res = loop {
             let locked = attempt >= OPTIMISTIC_ATTEMPTS;
             let held = if locked { Some(gate.commit()) } else { None };
             let local = gate.seq();
             let seen = self.ns_head(&ns)?;
             let at = opts.at.unwrap_or_else(now_micros);
-            let plan = self.plan_remember(&cfg, &ns, text, &vec, at, &opts)?;
+            let plan = self.plan_remember(&cfg, &ns, &claims, at, &opts, auto, floor)?;
             let commit = match held {
                 Some(c) => c,
                 None => gate.commit(),
@@ -1663,127 +2003,179 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             let Plan {
                 at,
-                cands,
-                sup,
-                supersede,
-                duplicate,
-                audit,
+                claims: plans,
                 ents,
                 mut res,
             } = plan;
 
-            let mem_id = match duplicate {
-                Some((i, _)) => cands[i].id.clone(),
-                None => stmt.clone(),
-            };
             let now = now_micros();
+            let kind = s(opts.kind.as_deref().unwrap_or(DEFAULT_KIND));
+            let importance = opts.importance.map(DataValue::from).unwrap_or(DataValue::Null);
+            let expires = opts.expires.or(opts.ttl.map(|t| at.saturating_add(t)));
+            let mut mems = vec![];
+            let mut lives = vec![];
+            let mut vec_rows = vec![];
+            let mut old_all: Vec<String> = vec![];
+            let mut links = vec![];
+            let mut sources = vec![];
+            let mut audit_rows = vec![];
+            let mut mentions: Vec<DataValue> = vec![];
+            // (mem id, old it ended, text, entity names) of each added claim
+            let mut jobs: Vec<(Vec<String>, Vec<String>, String, Vec<String>)> = vec![];
+            let mut out: Vec<ClaimResult> = vec![];
+            for cp in &plans {
+                let mem_id = match cp.duplicate {
+                    Some((i, _)) => cp.cands[i].id.clone(),
+                    None => cp.id.clone(),
+                };
+                let mut cr = ClaimResult {
+                    id: None,
+                    text: cp.text.clone(),
+                    action: "added".to_string(),
+                    duplicate_of: None,
+                    superseded: vec![],
+                    decided: cp.decided,
+                };
+                if cp.duplicate.is_none() {
+                    cr.id = Some(mem_id.clone());
+                    mems.push(DataValue::List(vec![
+                        s(&ns),
+                        s(&mem_id),
+                        DataValue::Validity(Validity::from((at, true))),
+                        s(&cp.text),
+                        kind.clone(),
+                        opt_s(&opts.source),
+                        DataValue::from(now),
+                        importance.clone(),
+                    ]));
+                    if let Some(e) = expires {
+                        lives.push(DataValue::List(vec![s(&ns), s(&mem_id), DataValue::from(e), DataValue::Null]));
+                    }
+                    if let (Some(v), Some(_)) = (&cp.vec, cfg.dim) {
+                        vec_rows.push(DataValue::List(vec![
+                            s(&ns),
+                            s(&mem_id),
+                            DataValue::Bool(true),
+                            DataValue::List(v.iter().map(|x| DataValue::from(*x as f64)).collect()),
+                        ]));
+                    }
+                    let mut mine = vec![];
+                    for &i in &cp.supersede {
+                        let c = &cp.cands[i];
+                        let d = cp.sup[i].as_ref().unwrap();
+                        links.push(DataValue::List(vec![
+                            s(&ns),
+                            s(&mem_id),
+                            s("supersedes"),
+                            s(&c.id),
+                            DataValue::from(now),
+                            DataValue::from(d.p),
+                            s(&d.decided_by()),
+                        ]));
+                        cr.superseded.push(c.id.clone());
+                        if !old_all.contains(&c.id) {
+                            old_all.push(c.id.clone());
+                            mine.push(c.id.clone());
+                        }
+                    }
+                    let names: Vec<String> = if multi {
+                        cp.ents.iter().map(|&e| ents.out[e].name.clone()).collect()
+                    } else {
+                        opts.entities.clone()
+                    };
+                    jobs.push((vec![mem_id.clone()], mine, cp.text.clone(), names));
+                } else {
+                    cr.action = "duplicate".to_string();
+                    cr.duplicate_of = Some(mem_id.clone());
+                }
+                // every statement is a source row of the memories it ended
+                // up in, with the whole statement's text
+                sources.push(DataValue::List(vec![
+                    s(&ns),
+                    s(&mem_id),
+                    DataValue::from(at),
+                    s(&stmt),
+                    opt_s(&opts.source),
+                    s(text),
+                ]));
+                for d in &cp.audit {
+                    audit_rows.push(DataValue::List(vec![
+                        s(&ns),
+                        s(&mem_id),
+                        s(&d.candidate),
+                        s(&d.template),
+                        s(&d.label),
+                        DataValue::from(d.p),
+                        s(&d.band),
+                        s(&d.decided_by),
+                        opt_s(&d.reason),
+                        s(if d.action == "pending" { "pending" } else { "applied" }),
+                        DataValue::from(now),
+                    ]));
+                }
+                for &e in &cp.ents {
+                    let m = DataValue::List(vec![s(&ns), s(&mem_id), s(&ents.out[e].eid)]);
+                    if !mentions.contains(&m) {
+                        mentions.push(m);
+                    }
+                }
+                out.push(cr);
+            }
+
             let mut script = String::new();
-            let mut p = vec![
-                ("ns", s(&ns)),
-                ("id", s(&mem_id)),
-                ("stmt", s(&stmt)),
-                ("at", DataValue::from(at)),
-                ("now", DataValue::from(now)),
-                ("text", s(text)),
-                ("source", opt_s(&opts.source)),
-            ];
-            if duplicate.is_none() {
+            let mut p: Vec<(&str, DataValue)> = vec![("ns", s(&ns))];
+            if !mems.is_empty() {
                 script.push_str(&format!(
-                    "{{?[ns, id, vt, text, kind, source, created, importance] <- [[$ns, $id, [$at, true], $text, $kind, $source, $now, $importance]] \
+                    "{{?[ns, id, vt, text, kind, source, created, importance] <- $mems \
                       :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
                 ));
-                p.push(("kind", s(opts.kind.as_deref().unwrap_or(DEFAULT_KIND))));
-                p.push((
-                    "importance",
-                    opts.importance.map(DataValue::from).unwrap_or(DataValue::Null),
-                ));
-                let expires = opts.expires.or(opts.ttl.map(|t| at.saturating_add(t)));
-                if let Some(e) = expires {
-                    script.push_str(&format!(
-                        "{{?[ns, id, expires, archived] <- [[$ns, $id, $expires, null]] :put {MEM_LIFE} {{ns, id => expires, archived}}}}"
-                    ));
-                    p.push(("expires", DataValue::from(e)));
-                }
-                if let (Some(v), Some(_)) = (&vec, cfg.dim) {
-                    script.push_str(&format!(
-                        "{{?[ns, id, current, vec] <- [[$ns, $id, true, $vec]] :put {MEM_VEC} {{ns, id => current, vec}}}}"
-                    ));
-                    p.push((
-                        "vec",
-                        DataValue::List(v.iter().map(|x| DataValue::from(*x as f64)).collect()),
-                    ));
-                }
-                if !supersede.is_empty() {
-                    let old: Vec<String> = supersede.iter().map(|&i| cands[i].id.clone()).collect();
-                    // E1 semantics: end the old memory's validity by appending a
-                    // retraction row (values copied); nothing is deleted
-                    script.push_str(&format!(
-                        "{{?[ns, id, vt, text, kind, source, created, importance] := *{MEM}{{ns, id, text, kind, source, created, importance @ 'NOW'}}, \
-                           ns = $ns, id in $old, vt = [$at, false] \
-                          :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
-                    ));
-                    if cfg.dim.is_some() {
-                        script.push_str(&format!(
-                            "{{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $old, current = false \
-                              :update {MEM_VEC} {{ns, id => current}}}}"
-                        ));
-                    }
-                    let links: Vec<DataValue> = supersede
-                        .iter()
-                        .map(|&i| {
-                            let d = sup[i].as_ref().unwrap();
-                            DataValue::List(vec![
-                                s(&ns),
-                                s(&mem_id),
-                                s("supersedes"),
-                                s(&cands[i].id),
-                                DataValue::from(now),
-                                DataValue::from(d.p),
-                                s(&d.decided_by()),
-                            ])
-                        })
-                        .collect();
-                    script.push_str(&format!(
-                        "{{?[ns, src, rel, dst, created, p, decided_by] <- $links \
-                          :put {MEM_LINK} {{ns, src, rel, dst => created, p, decided_by}}}}"
-                    ));
-                    p.push(("old", str_list(&old)));
-                    p.push(("links", DataValue::List(links)));
-                    res.superseded = old;
-                }
-            } else {
-                res.duplicate_of = Some(mem_id.clone());
+                p.push(("mems", DataValue::List(mems)));
             }
-            // every statement is a source row of the memory it ended up in
+            if !lives.is_empty() {
+                script.push_str(&format!(
+                    "{{?[ns, id, expires, archived] <- $lives :put {MEM_LIFE} {{ns, id => expires, archived}}}}"
+                ));
+                p.push(("lives", DataValue::List(lives)));
+            }
+            if !vec_rows.is_empty() {
+                script.push_str(&format!(
+                    "{{?[ns, id, current, vec] <- $vecs :put {MEM_VEC} {{ns, id => current, vec}}}}"
+                ));
+                p.push(("vecs", DataValue::List(vec_rows)));
+            }
+            if !old_all.is_empty() {
+                // E1 semantics: end the old memory's validity by appending a
+                // retraction row (values copied); nothing is deleted
+                script.push_str(&format!(
+                    "{{?[ns, id, vt, text, kind, source, created, importance] := *{MEM}{{ns, id, text, kind, source, created, importance @ 'NOW'}}, \
+                       ns = $ns, id in $old, vt = [$at, false] \
+                      :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
+                ));
+                if cfg.dim.is_some() {
+                    script.push_str(&format!(
+                        "{{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $old, current = false \
+                          :update {MEM_VEC} {{ns, id => current}}}}"
+                    ));
+                }
+                script.push_str(&format!(
+                    "{{?[ns, src, rel, dst, created, p, decided_by] <- $links \
+                      :put {MEM_LINK} {{ns, src, rel, dst => created, p, decided_by}}}}"
+                ));
+                p.push(("old", str_list(&old_all)));
+                p.push(("at", DataValue::from(at)));
+                p.push(("links", DataValue::List(links)));
+            }
             script.push_str(&format!(
-                "{{?[ns, id, at, stmt, source, text] <- [[$ns, $id, $at, $stmt, $source, $text]] \
+                "{{?[ns, id, at, stmt, source, text] <- $sources \
                   :put {MEM_SOURCE} {{ns, id, at, stmt => source, text}}}}"
             ));
-            if !audit.is_empty() {
-                let new_of = mem_id.clone();
-                let rows: Vec<DataValue> = audit
-                    .iter()
-                    .map(|d| {
-                        DataValue::List(vec![
-                            s(&ns),
-                            s(&new_of),
-                            s(&d.candidate),
-                            s(&d.template),
-                            s(&d.label),
-                            DataValue::from(d.p),
-                            s(&d.band),
-                            s(&d.decided_by),
-                            opt_s(&d.reason),
-                            s(if d.action == "pending" { "pending" } else { "applied" }),
-                            DataValue::from(now),
-                        ])
-                    })
-                    .collect();
+            p.push(("sources", DataValue::List(sources)));
+            if !audit_rows.is_empty() {
                 script.push_str(&format!(
                     "{{?[ns, new, cand, template, label, p, band, decided_by, reason, status, at] <- $audit \
                       :put {MEM_DECISION} {{ns, new, cand, template => label, p, band, decided_by, reason, status, at}}}}"
                 ));
-                p.push(("audit", DataValue::List(rows)));
+                p.push(("audit", DataValue::List(audit_rows)));
             }
             // entities: new rows, merges and review links, and the mentions
             if !ents.rows.is_empty() {
@@ -1806,12 +2198,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 ));
                 p.push(("elinks", DataValue::List(ents.links.clone())));
             }
-            if !ents.out.is_empty() {
-                let mentions = ents
-                    .out
-                    .iter()
-                    .map(|e| DataValue::List(vec![s(&ns), s(&mem_id), s(&e.eid)]))
-                    .collect();
+            if !mentions.is_empty() {
                 script.push_str(&format!(
                     "{{?[ns, id, eid] <- $mentions :put {MEM_MENTION} {{ns, id, eid}}}}"
                 ));
@@ -1819,30 +2206,44 @@ impl<'s, S: Storage<'s>> Db<S> {
                 res.entities = ents.out.iter().map(|e| e.eid.clone()).collect();
                 res.entity_links = ents.out.clone();
             }
-            if duplicate.is_none() {
-                let old: Vec<String> = supersede.iter().map(|&i| cands[i].id.clone()).collect();
-                let job = Job {
+            // Engram: one job per added claim, numbered with the versions
+            // this commit produces (the bump below advances by the count)
+            let job_list: Vec<Job<'_>> = jobs
+                .iter()
+                .map(|(ids, old, t, names)| Job {
                     op: if old.is_empty() { "write" } else { "supersede" },
-                    mem_ids: std::slice::from_ref(&mem_id),
-                    old: &old,
-                    text: Some(text),
+                    mem_ids: ids,
+                    old,
+                    text: Some(t.as_str()),
                     at,
-                    entities: &opts.entities,
-                };
-                if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
-                    script.push_str(&frag);
-                    p.extend(ps);
-                }
+                    entities: names,
+                })
+                .collect();
+            let mut bump = 1;
+            if let Some((frag, ps, n)) = engram_hook::enqueue_jobs(&cfg, &job_list) {
+                script.push_str(&frag);
+                p.extend(ps);
+                bump = n.max(1);
             }
             // the version this plan was made against must still hold
             script.insert_str(
                 0,
                 &format!("{{?[seq] := *{MEM_NS}{{ns: $ns, seq}}, seq != $seen :assert none}}"),
             );
-            script.push_str(&bump_ns_head());
+            script.push_str(&bump_ns_head_by(bump));
             p.push(("seen", DataValue::from(seen)));
             match self.mem_q(&script, p) {
-                Ok(_) => break (res, duplicate),
+                Ok(_) => {
+                    res.superseded = old_all;
+                    let added = out.iter().any(|c| c.action == "added");
+                    res.action = if added { "added" } else { "duplicate" }.to_string();
+                    res.id = added.then(|| stmt.clone());
+                    res.duplicate_of = if added { None } else { out[0].duplicate_of.clone() };
+                    if multi {
+                        res.claims = out;
+                    }
+                    break res;
+                }
                 Err(e) => {
                     drop(commit);
                     let moved = self.ns_head(&ns).map_or(false, |h| h != seen);
@@ -1858,9 +2259,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
             }
         };
-
-        res.action = if duplicate.is_some() { "duplicate" } else { "added" }.to_string();
-        res.id = if duplicate.is_some() { None } else { Some(stmt) };
+        res.ns = ns;
         Ok(res)
     }
 
@@ -1885,7 +2284,13 @@ impl<'s, S: Storage<'s>> Db<S> {
         let half_life = opts.half_life_days.unwrap_or(DEFAULT_HALF_LIFE_DAYS);
         let wi = opts.importance_weight.unwrap_or(DEFAULT_IMPORTANCE_WEIGHT);
         let wa = opts.access_weight.unwrap_or(DEFAULT_ACCESS_WEIGHT);
-        for (name, x) in [("recency_weight", wr), ("importance_weight", wi), ("access_weight", wa)] {
+        let wq = opts.question_weight.unwrap_or(DEFAULT_QUESTION_WEIGHT);
+        for (name, x) in [
+            ("recency_weight", wr),
+            ("importance_weight", wi),
+            ("access_weight", wa),
+            ("question_weight", wq),
+        ] {
             if !x.is_finite() || x < 0.0 {
                 bail!("`recall` option {name} must be a non-negative number, got {x}");
             }
@@ -1937,15 +2342,19 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut pending: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut access: BTreeMap<String, (i64, i64)> = BTreeMap::new();
         let mut life: BTreeMap<String, (Option<i64>, Option<i64>)> = BTreeMap::new();
+        // the statement each memory came from first (its own)
+        let mut origin: BTreeMap<String, (i64, String)> = BTreeMap::new();
         if !ids.is_empty() {
-            // pending supersedes, access counts and the tier, in one read
+            // pending supersedes, access counts, the tier and the origin
+            // statement, in one read
             for r in self
                 .mem_q(
                     &format!(
                         "?[tag, id, a, b] := *{MEM_DECISION}{{ns: $ns, new, cand: id, template: 'supersedes', status: 'pending'}}, \
                            id in $ids, *{MEM}{{ns: $ns, id: new @ $at}}, tag = 'p', a = new, b = null\n\
                          ?[tag, id, a, b] := id in $ids, *{MEM_ACCESS}{{ns: $ns, id, n: a, last: b}}, tag = 'a'\n\
-                         ?[tag, id, a, b] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires: a, archived: b}}, tag = 'l'"
+                         ?[tag, id, a, b] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires: a, archived: b}}, tag = 'l'\n\
+                         ?[tag, id, a, b] := id in $ids, *{MEM_SOURCE}{{ns: $ns, id, at: b, text: a}}, tag = 's'"
                     ),
                     vec![("ns", s(&ns)), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
                 )?
@@ -1959,6 +2368,13 @@ impl<'s, S: Storage<'s>> Db<S> {
                     }
                     Some("l") => {
                         life.insert(id, (r[2].get_int(), r[3].get_int()));
+                    }
+                    Some("s") => {
+                        if let (Some(t), Some(at)) = (cell_str(&r[2]), r[3].get_int()) {
+                            if origin.get(&id).map_or(true, |(a0, _)| at < *a0) {
+                                origin.insert(id, (at, t));
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -1980,12 +2396,16 @@ impl<'s, S: Storage<'s>> Db<S> {
                     last = Some(last.map_or(bl, |l| l.max(bl)));
                 }
                 let (expires, archived) = life.get(&id).copied().unwrap_or((None, None));
+                let text = cell_str(&r[2])?;
+                // a claim of a longer statement: the statement is its context
+                let context = origin.remove(&id).map(|x| x.1).filter(|t| t.trim() != text.trim());
                 let relevance = r[1].get_float().unwrap_or(0.0);
                 let importance = r[6].get_float();
                 let recency = 0.5f64.powf((read_at - from).max(0) as f64 / half_life_us);
                 let acc = ((1.0 + n as f64).ln() / (1.0 + ACCESS_SATURATION).ln()).min(1.0);
                 let score = if blend {
-                    relevance + wr * recency + wi * (importance.unwrap_or(0.5) - 0.5) + wa * acc
+                    let q = if wq > 0.0 && !memory_claims::is_declarative(&text) { wq } else { 0.0 };
+                    relevance + wr * recency + wi * (importance.unwrap_or(0.5) - 0.5) + wa * acc - q
                 } else {
                     relevance
                 };
@@ -1998,7 +2418,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                     last_access: last,
                     expires,
                     archived: archived.is_some(),
-                    text: cell_str(&r[2])?,
+                    text,
+                    context,
                     kind: cell_str(&r[3]).unwrap_or_default(),
                     source: cell_str(&r[4]),
                     created: r[5].get_int().unwrap_or(0),
@@ -2067,6 +2488,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let ns = ns_of(&opts.ns);
         let mut ids = opts.ids.clone();
         ids.extend(opts.id.clone());
+        let mut ids = self.with_claims(&ns, ids)?;
         ids.sort();
         ids.dedup();
         if ids.is_empty() {
@@ -2174,6 +2596,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let _commit = gate.commit();
         let mut ids: Vec<String> = opts.ids.clone();
         ids.extend(opts.id.clone());
+        let mut ids = self.with_claims(&ns, ids)?;
         let by_filter = opts.kind.is_some() || opts.entity.is_some() || opts.expired;
         if ids.is_empty() && !by_filter && !opts.all {
             bail!("`forget` needs an id, ids, a kind, entity or expired filter, or all: true");
@@ -2625,6 +3048,7 @@ pub(crate) fn memory_rows(op: &str, v: JsonValue) -> NamedRows {
             let cols: Vec<String> = [
                 "id", "text", "score", "kind", "valid_from", "valid_to", "created", "source", "importance",
                 "pending_superseded_by", "relevance", "recency", "access_count", "last_access", "expires", "archived",
+                "context",
             ]
             .iter()
             .map(|s| s.to_string())

@@ -293,3 +293,57 @@ fn erase_fact_does_not_resurrect_an_ended_fact() {
     assert_eq!((at(d(1)), at(d(2)), at(d(4))), (1, 1, 0), "A's row until A ended, then base");
     assert_eq!(run("::engram materialize nano {ns: 'u'}", serde_json::json!({})).len(), 0);
 }
+
+/// Claims (docs/specs/memory-api.md, "Claims"): a multi-sentence statement
+/// enqueues one job per claim it adds, each with the claim's own text, in
+/// the one transaction, numbered with consecutive versions that end at the
+/// namespace version; a claim that supersedes enqueues `supersede` with
+/// only the old claim it ended.
+#[test]
+fn claims_enqueue_one_job_each() {
+    let db = attached();
+    let a = db
+        .remember(
+            "My rent is $1,800 per month. I have a dog named Max. Can you suggest a vet?",
+            RememberOpts { ns: ns("c"), at: Some(d(1)), entities: vec!["Max".into()], ..Default::default() },
+        )
+        .unwrap();
+    let stmt = a.id.clone().unwrap();
+    let ids: Vec<String> = a.claims.iter().map(|c| c.id.clone().unwrap()).collect();
+    assert_eq!(ids, vec![format!("{stmt}.1"), format!("{stmt}.2"), format!("{stmt}.3")]);
+    let j = jobs(&db, "c");
+    assert_eq!(j.len(), 3, "{j:?}");
+    for (i, job) in j.iter().enumerate() {
+        assert_eq!((job.1.as_str(), &job.2, job.5), ("write", &vec![ids[i].clone()], d(1)));
+        assert_eq!(job.4.as_deref(), Some(a.claims[i].text.as_str()));
+    }
+    assert_eq!(j.iter().map(|x| x.0).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(ns_seq(&db, "c"), 3, "the version advances by the number of jobs");
+    // the entity hint goes with the claim that names it
+    let meta = q(&db, "?[qid, m] := *kleos_engram_queue{ns: 'c', qid, meta: m}, !is_null(m)");
+    assert_eq!(meta.len(), 1, "{meta:?}");
+    assert_eq!(meta[0][0].get_int(), Some(2));
+
+    // one claim updates the rent (value rule), the other is new
+    let b = db
+        .remember(
+            "My rent is $2,100 per month. I have a cat named Tom.",
+            RememberOpts { ns: ns("c"), at: Some(d(5)), ..Default::default() },
+        )
+        .unwrap();
+    assert_eq!(b.superseded, vec![ids[0].clone()]);
+    let b1 = b.claims[0].id.clone().unwrap();
+    let b2 = b.claims[1].id.clone().unwrap();
+    let j = jobs(&db, "c");
+    assert_eq!(j.len(), 5);
+    assert_eq!((j[3].1.as_str(), &j[3].2, &j[3].3), ("supersede", &vec![b1], &vec![ids[0].clone()]));
+    assert_eq!((j[4].1.as_str(), &j[4].2, &j[4].3), ("write", &vec![b2], &vec![]));
+    assert_eq!(j.last().unwrap().0, ns_seq(&db, "c"));
+
+    // erasing the first statement erases each of its claims in one job
+    let r = db.forget(ForgetOpts { ns: ns("c"), id: Some(stmt), mode: Some("erase".into()), ..Default::default() }).unwrap();
+    assert_eq!(r.ids, ids);
+    let j = jobs(&db, "c");
+    assert_eq!((j[5].1.as_str(), &j[5].2), ("erase", &ids));
+    assert_eq!(j[0].4, None, "erased claim texts are dropped from earlier jobs");
+}

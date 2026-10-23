@@ -1462,9 +1462,12 @@ impl CozoDbPy {
     /// Store a memory. Options: `ns`, `kind`, `source`, `importance`,
     /// `entities` (names, resolved to the namespace's entities; include the
     /// subject, e.g. "user"), `at` (valid-from µs), `ttl` / `expires` (µs),
-    /// `k`, `decider`, `embedder`. Returns `{action, id, superseded,
-    /// duplicate_of, tentative, decisions, gated, entities, entity_links,
-    /// embedded, decider, ns}`; decisions carry `decided_by`.
+    /// `k`, `decider`, `embedder`, `split` (`"auto"`, the default: a text of
+    /// several sentences becomes one memory per claim; `"none"`: one memory),
+    /// `min_similarity`. Returns `{action, id, superseded, duplicate_of,
+    /// tentative, decisions, gated, entities, entity_links, embedded,
+    /// decider, ns}`, plus `claims` when the text was split; decisions carry
+    /// `decided_by`.
     #[pyo3(signature = (text, **opts))]
     pub fn remember(&self, py: Python<'_>, text: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "remember", vec![("text", json!(text))], opts)
@@ -1473,8 +1476,9 @@ impl CozoDbPy {
     /// Options: `ns`, `k`, `kind`, `entity`, `as_of`, `vector_weight`,
     /// `hide_pending`, `include_archived`, `include_expired`, `record_access`,
     /// and the ranking blend: `blend`, `recency_weight`, `half_life_days`,
-    /// `importance_weight`, `access_weight`. Returns a list of `{id, text,
-    /// score, relevance, recency, access_count, kind, valid_from, ...}`.
+    /// `importance_weight`, `access_weight`, `question_weight`. Returns a
+    /// list of `{id, text, score, relevance, recency, access_count, kind,
+    /// valid_from, ...}`, plus `context` (the whole statement) for a claim.
     #[pyo3(signature = (query, **opts))]
     pub fn recall(&self, py: Python<'_>, query: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "recall", vec![("query", json!(query))], opts)
