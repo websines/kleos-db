@@ -125,7 +125,24 @@ Real agent input is a chat message, not a sentence. In LongMemEval's knowledge-u
 **Splitting** (`split: 'auto'`, the default). `memory_claims::split_claims` is rule-based and deterministic:
 - lines first: a list bullet (`-`, `*`, `•`, `1.`, `2)`, `a)`) or a blank line starts a new item; a line that continues an unfinished one (starts in lower case, previous line without closing punctuation) is joined to it;
 - then sentences: `.`, `!`, `?`, `…` (with closing quotes or brackets) followed by whitespace and a capital letter or a digit. A period that is not followed by whitespace never splits (decimals, URLs, e-mail addresses, version numbers). Titles and number words never end a sentence ("Dr.", "St.", "No.", "e.g."); words that may ("etc.", "p.m.", "U.S.", "Inc.", months) only before a capital; one-letter initials ("A. Smith") never; an ellipsis only before a capital;
-- a claim with no letter or digit is dropped, and a repeated claim is kept once.
+- a claim with no letter or digit is dropped, and a repeated claim is kept once;
+- **no content-free claims:** a sentence with fewer than two content words (words outside a function-word list: "Yes, I did.", "Cool!", "I loved it.", "How have you been?") joins the next sentence, or the previous claim when it is the last. "I live in Berlin." (two) stays a claim of its own;
+- **speakers:** a speaker label at the start of the text ("Caroline: …", one to three capitalised words and a colon) is repeated on every claim, so "Caroline: I researched adoption agencies." keeps who said it. `is_declarative` looks past the label, and a claim of several sentences is declarative when any of them is.
+
+Why (wave3/claims-fix): on LoCoMo, whose turns are "Name: text", plain sentence claims halved hybrid R@5. A short first sentence ("Caroline: Yes, I did.") became a memory whose vector was mostly the speaker's name, so it scored high for every question about Caroline and filled the top k; the claims after the first lost the name altogether. Measured on LoCoMo hybrid (categories 1–4, 1,536 questions) and the 23 held-out LongMemEval knowledge-update questions (latest answer first):
+
+| Rules | LoCoMo R@5 | R@10 | KU latest first |
+|---|---|---|---|
+| whole turns, before claims (6f9711f) | 0.661 | 0.749 | 39% (prototype, whole messages) |
+| sentence claims (92ef789) | 0.423 | 0.479 | 83% |
+| join under 4 content words, no speaker label | 0.542 | 0.620 | |
+| don't split under 25 words, join under 3, speaker label | 0.683 | 0.763 | 78%¹ |
+| join under 4, speaker label | **0.691** | **0.775** | 74%¹; 83% with the declarative fix |
+| **join under 2, speaker label (default)** | 0.678 | 0.765 | **83%** |
+
+¹ Before the declarative fix: a question joined to a statement ("Can you recommend some options? By the way, I've found that 1 tablespoon…") made the claim non-declarative, so it was never decided. Now a claim is declarative when any of its sentences is.
+
+The speaker label is most of the fix (0.542 → 0.691 at the same joining). Joining under 4 content words scores 0.013 higher on LoCoMo than under 2, but it merges short facts ("I live in Berlin. I have a dog named Max." becomes one claim), and superseding that claim would end the unrelated fact as well, which claims exist to prevent. So the default is 2. `SplitRules` and `split_claims_with` take other values.
 
 A text that yields one claim is stored exactly as before: the trimmed text, under the plain statement id.
 
@@ -187,6 +204,8 @@ What the pending pairs were: below p 0.9 they were almost all two sentences on o
 | … `question_weight: 0` | 55% | 45% | | | | | |
 
 These are harder than the held-out ones on retrieval: in 9 of 49, the top hit was an earlier *question* about the same thing ("how many engineers do I lead in my new role?"), and many true updates score just under τ (p 0.996, pending).
+
+**After the LoCoMo fix** (joining, speaker labels; same 23 questions, wave3/claims-fix): latest first 83%, stale first 17%, latest in top 10 100%, 91% with `hide_pending`, 0.43 superseded and 1.83 pending per question (1.09 supersedes, 0.74 duplicate); 2.6 claims per message instead of 2.8. Latency was measured on a machine shared with three other benchmark runs (p50 300 ms per message), so it is not comparable with the 144 ms above.
 
 **Life stream** (40 one-sentence turns, so every statement is one claim): unchanged. Main's memory code and this branch, back to back on the same machine:
 
