@@ -1,15 +1,15 @@
 # Memory branches: fork, rewind, merge, diff
 
-Status: spec (wave4/fork, 2026-10-24). Implementation follows on the same branch; sections marked *design only* are not built yet.
+Status: implemented (wave4/fork, 2026-10-24), except the section marked *design only* (edit history tied to conversations).
 
-Code (planned):
+Code:
 - `kleos-core/src/memory_branch.rs`: lineage, copy-up, and the `fork`, `rewind`, `merge`, `diff`, `discard` and `branches` ops;
 - small hooks in `kleos-core/src/memory.rs`: each read is routed through the lineage, and each write that touches an inherited memory copies it up first;
 - `kleos-core/src/entity.rs`: the entity snapshot reads several scopes, each up to a creation time;
 - `kleos-core/src/engram.rs` (feature `engram`): overlay reads and writes follow the lineage;
 - surfaces: `::memory fork | rewind | merge | diff | discard | branches`, `Db::memory_call`, Python methods, `POST /memory/:op`.
 
-Tests (planned): `kleos-core/tests/memory_branch.rs` (fake models). End to end, with real models: `scripts/branches/branches_demo.py`.
+Tests: `kleos-core/tests/memory_branch.rs` (12 tests, fake models) and `kleos-core/tests/engram.rs::branches_read_through_and_copy_up` (feature `engram`). End to end, with real models: `scripts/branches/branches_demo.py`. Costs: `kleos-core/examples/memory_branch_bench.rs`.
 
 ## Goal
 
@@ -218,6 +218,42 @@ Engram overlays are per namespace (`kleos_engram_facts` and `kleos_engram_rows` 
 - **Branch writes:** a copy-up per inherited memory touched, a few rows each.
 - **Storage:** what the branch adds or changes; nothing for what it only reads.
 
+## Results
+
+### Costs (`examples/memory_branch_bench.rs`)
+
+Release build, model-free: 64-dimension hashed bag-of-words vectors, no decider. The machine was shared with other agents' training runs (load average 13–45), so absolute times are inflated. The recall timings are **interleaved** (each query runs on every namespace in turn), so the ratios hold.
+
+The namespaces measured:
+- `fork`: a fresh fork of `main`;
+- `work`: a fork with 5% memories of its own and 1% inherited ones copied up;
+- `depth 3`: a fork of a fork of `work`.
+
+| Engine | Memories | fork p50 / max (ms) | recall p50 (ms): plain | fork | work | depth 3 |
+|---|---|---|---|---|---|---|
+| mem | 1,000 | 0.51 / 5.3 | 43.8 | 47.2 (+8%) | 47.7 (+9%) | 56.4 (+29%) |
+| mem | 5,000 | 0.73 / 6.6 | 225.2 | 239.7 (+6%) | 240.2 (+7%) | 289.2 (+28%) |
+| SQLite (USB 2.0 disk) | 1,000 | 10.7 / 33.7 | 450.4 | 472.5 (+5%) | 486.5 (+8%) | 556.5 (+24%) |
+
+- **Fork is O(1).** It stays under a millisecond on mem at 1k and 5k memories: one small transaction. On SQLite it is about 11 ms, the commit's sync to a USB 2.0 disk.
+- **Recall on a branch** costs +5–9% at depth 1 and about +25–29% at depth 3. The extras are the lineage lookup, the ancestors' rows masked after the search, and one metadata read per owning level.
+- **Plain namespaces are unchanged.** A plain-recall A/B with main (0e4b586) gave 78.0 vs 79.0 ms, and 112.4 vs 111.8 ms, at 2,000 memories. That recall grows with store size on this synthetic set (its question words match about a tenth of the memories each) is a property of main, not of branches.
+
+### End to end (`scripts/branches/branches_demo.py`)
+
+The demo runs on real models (EmbeddingGemma and kleos-decider-nano, on Metal from the Python bindings) against a SQLite store, and passes 14/14 checks:
+1. `main` holds five facts. It forks into `try-berlin` and `try-lisbon`.
+2. Each branch learns where the user lives now. The decider supersedes the inherited "I live in Paris." inside each branch only.
+3. Recall answers Paris, Berlin and Lisbon on the three namespaces.
+4. `diff main → try-lisbon` shows two memories added and Paris superseded.
+5. The dry-run merge plans the supersede and changes nothing. The real merge supersedes Paris in `main` through the decider.
+6. `try-berlin` is discarded, and only `try-lisbon` remains.
+7. Rewinding `main` to before the session brings Paris back; the undo brings Lisbon back.
+
+Under heavy load, recall p50 was 5.4 ms on `main`, 6.9 ms on a depth-1 fork and 10.1 ms at depth 2. A dry-run merge of two statements took 1.2 s; it includes a scratch fork, two `remember` calls with model decisions, a diff and a discard.
+
+**Phrasing note.** "I moved to Berlin last week." against "I live in Paris." scores p = 0.9963, just under decider-nano's auto threshold (0.997). It is left pending, identically on a plain namespace and on a branch. The demo uses "I live in Berlin now." (p 0.9995).
+
 ## Edit history tied to conversations (design only)
 
 DeltaDB's core idea: every edit to a document (code or text) is a small delta with an author, human or agent, linked to the conversation that produced it. A file can be rebuilt at any version, and blame leads from a line to the conversation that wrote it. For kleos this is wave 4's code memory, and it reuses the memory tables for the "why" side.
@@ -261,4 +297,5 @@ Either way, kleos stores the op log as rows, so history, blame and links stay qu
 - **Entity merges are global.** A merge decided in the parent after the fork is visible to the branch's entity resolution. Merge rows are keyed by entity id, not namespace, and are read as of now. Recall's views read them per level at the cut, so only resolution of new names sees the later merge.
 - **Metadata is not versioned.** Importance, expiry and the archive tier are copied as they are when a memory is copied up, not as they were at the cut.
 - **Accesses of inherited memories** in a branch are not counted.
+- **Boolean literals in rule bodies.** A literal binding such as `current = true` in a CozoScript rule body was silently lost in two shapes: an `:update` after a stored-relation atom, and two rules for one head binding `true` and `false`. Every row came out `false`. Parameters (`current = $yes`) work, so the branch code binds booleans as parameters. This is an engine issue to look at separately; no existing memory query used the failing shapes.
 - **Merge replays statements, not decisions.** The outcome in `into` is decided again against `into`'s memories, by design: the decider settles conflicts against what `into` holds now. Pending decisions of the branch are not carried over as such; the replay produces its own.

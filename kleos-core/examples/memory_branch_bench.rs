@@ -68,7 +68,9 @@ fn p50(mut v: Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
-fn recall_p50(db: &DbInstance, ns: &str, queries: &[String]) -> f64 {
+/// Recall p50 (ms) per namespace, interleaved: each query runs on every
+/// namespace in turn, so load drift on a shared machine hits all alike.
+fn recall_p50s(db: &DbInstance, nss: &[&str], queries: &[String]) -> Vec<f64> {
     let opts = |ns: &str| RecallOpts {
         ns: Some(ns.to_string()),
         k: Some(10),
@@ -76,16 +78,19 @@ fn recall_p50(db: &DbInstance, ns: &str, queries: &[String]) -> f64 {
         ..Default::default()
     };
     for q in queries.iter().take(5) {
-        db.recall(q, opts(ns)).unwrap();
+        for ns in nss {
+            db.recall(q, opts(ns)).unwrap();
+        }
     }
-    p50(queries
-        .iter()
-        .map(|q| {
+    let mut ms: Vec<Vec<f64>> = vec![vec![]; nss.len()];
+    for q in queries {
+        for (i, ns) in nss.iter().enumerate() {
             let t = Instant::now();
             db.recall(q, opts(ns)).unwrap();
-            t.elapsed().as_secs_f64() * 1e3
-        })
-        .collect())
+            ms[i].push(t.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    ms.into_iter().map(p50).collect()
 }
 
 fn main() -> miette::Result<()> {
@@ -130,7 +135,7 @@ fn main() -> miette::Result<()> {
             })?;
         }
         let ids: Vec<String> = db
-            .recall("car phone flat bike", RecallOpts { ns: Some("main".into()), k: (n / 100).max(1), diversity: Some(false), record_access: Some(false), ..Default::default() })?
+            .recall("car phone flat bike", RecallOpts { ns: Some("main".into()), k: Some((n / 100).max(1)), diversity: Some(false), record_access: Some(false), ..Default::default() })?
             .into_iter()
             .map(|h| h.id)
             .collect();
@@ -140,6 +145,7 @@ fn main() -> miette::Result<()> {
         let queries: Vec<String> = (0..60)
             .map(|i| format!("What colour is {}'s {}?", NAMES[(i * 5) % NAMES.len()], THINGS[(i * 3) % THINGS.len()]))
             .collect();
+        let lat = recall_p50s(&db, &["main", "f0", "work", "deep2"], &queries);
         let r = json!({
             "memories": n,
             "engine": engine,
@@ -147,10 +153,10 @@ fn main() -> miette::Result<()> {
             "fork_ms_p50": (p50(fork_ms.clone()) * 1000.0).round() / 1000.0,
             "fork_ms_max": (fork_ms.iter().cloned().fold(0.0, f64::max) * 1000.0).round() / 1000.0,
             "recall_ms_p50": {
-                "plain": (recall_p50(&db, "main", &queries) * 100.0).round() / 100.0,
-                "fork_depth1": (recall_p50(&db, "f0", &queries) * 100.0).round() / 100.0,
-                "work_depth1_5pct_own": (recall_p50(&db, "work", &queries) * 100.0).round() / 100.0,
-                "depth3": (recall_p50(&db, "deep2", &queries) * 100.0).round() / 100.0,
+                "plain": (lat[0] * 100.0).round() / 100.0,
+                "fork_depth1": (lat[1] * 100.0).round() / 100.0,
+                "work_depth1_5pct_own": (lat[2] * 100.0).round() / 100.0,
+                "depth3": (lat[3] * 100.0).round() / 100.0,
             },
             "copied_up": ids.len(),
         });

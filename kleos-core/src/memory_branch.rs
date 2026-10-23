@@ -523,6 +523,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let mut copied = vec![];
         let now = now_micros();
+        // booleans go in as parameters: a literal `x = true` in a rule body
+        // is not bound reliably (see the spec's caveats)
+        p.push(("cu_yes", DataValue::Bool(true)));
+        p.push(("cu_no", DataValue::Bool(false)));
         for (l, group) in self.by_owner(sc, ids)? {
             if l == 0 {
                 continue;
@@ -539,8 +543,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             if cfg.dim.is_some() {
                 script.push_str(&format!(
                     "{{cur[id] := id in ${i}, *{MEM}{{ns: ${o}, id @ ${c}}}\n\
-                      ?[ns, id, current, vec] := id in ${i}, *{MEM_VEC}{{ns: ${o}, id, vec}}, ns = $ns, cur[id], current = true\n\
-                      ?[ns, id, current, vec] := id in ${i}, *{MEM_VEC}{{ns: ${o}, id, vec}}, ns = $ns, not cur[id], current = false \
+                      ?[ns, id, current, vec] := id in ${i}, *{MEM_VEC}{{ns: ${o}, id, vec}}, ns = $ns, cur[id], current = $cu_yes\n\
+                      ?[ns, id, current, vec] := id in ${i}, *{MEM_VEC}{{ns: ${o}, id, vec}}, ns = $ns, not cur[id], current = $cu_no \
                      :put {MEM_VEC} {{ns, id => current, vec}}}}"
                 ));
             }
@@ -889,15 +893,17 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         if cfg.dim.is_some() {
             script.push_str(&format!(
-                "{{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $ret, current = false \
+                "{{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $ret, current = $rw_no \
                   :update {MEM_VEC} {{ns, id => current}}}}\
-                 {{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $res, current = true \
+                 {{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $res, current = $rw_yes \
                   :update {MEM_VEC} {{ns, id => current}}}}"
             ));
             if retracted.is_empty() {
                 p.push(("ret", DataValue::List(vec![])));
             }
             p.push(("res", str_list(&restored)));
+            p.push(("rw_yes", DataValue::Bool(true)));
+            p.push(("rw_no", DataValue::Bool(false)));
         }
         p.push(("at", DataValue::from(at)));
         // Engram: the retracted memories end, the restored ones are written again

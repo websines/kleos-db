@@ -943,13 +943,13 @@ impl<'s, S: Storage<'s>> Db<S> {
                 // a branch: every level's rows, an ancestor's up to its cut
                 binds.push(format!("{col}: scv, created: scc"));
                 prelude.push_str("lin[scv, cut] <- $lineage\n");
-                cond.push_str(", lin[scv, cut], is_null(cut) || scc <= cut");
+                cond.push_str(", lin[scv, cut], scc <= cut");
                 scope_param.insert(
                     "lineage".to_string(),
                     DataValue::List(
                         cfg.lineage
                             .iter()
-                            .map(|(v, c)| DataValue::List(vec![v.clone(), c.map_or(DataValue::Null, DataValue::from)]))
+                            .map(|(v, c)| DataValue::List(vec![v.clone(), DataValue::from(c.unwrap_or(i64::MAX))]))
                             .collect(),
                     ),
                 );

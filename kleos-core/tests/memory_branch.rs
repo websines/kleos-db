@@ -267,6 +267,10 @@ fn branch_forget_is_a_tombstone_with_history() {
     };
     assert_eq!(imp("br"), Some(0.9));
     assert_eq!(imp("main"), None);
+    // the copy's vector is current (it still competes in the vector leg);
+    // the forgotten one's is not
+    assert_eq!(count(&db, &format!("?[c] := *kleos_mem_vec{{ns: 'br', id: '{c}', current: c}}, c")), 1);
+    assert_eq!(count(&db, &format!("?[c] := *kleos_mem_vec{{ns: 'br', id: '{p}', current: c}}, !c")), 1);
 }
 
 #[test]
@@ -304,6 +308,12 @@ fn rewind_and_undo() {
     let r = db.memory_rewind(RewindOpts { ns: ns("main"), to: d(2) + 1, at: None }).unwrap();
     assert_eq!((r.retracted.len(), r.restored.len()), (1, 1));
     assert_eq!(current(&db, "main", None), set(&[PARIS, COFFEE]));
+    // the restored memory competes in the vector leg again
+    assert_eq!(
+        count(&db, "?[id] := *kleos_mem_vec{ns: 'main', id, current: true}"),
+        2,
+        "restored vectors must be current"
+    );
     // history is intact: the state before the rewind is still readable
     assert_eq!(current(&db, "main", Some(r.undo)), set(&[COFFEE, BERLIN]));
     let u = db.memory_rewind(RewindOpts { ns: ns("main"), to: r.undo, at: None }).unwrap();
@@ -438,11 +448,17 @@ fn entities_resolve_against_the_lineage() {
     assert!(r.gated.is_empty());
     assert_eq!(r.superseded.len(), 1);
     assert_eq!(count(&db, "?[eid] := *kleos_mem_entity{ns: 'br', eid}"), 0);
+    // once the branch has entities of its own, resolution reads both
+    let rome = db.remember("Rome is warm in May.", RememberOpts { ns: ns("br"), entities: vec!["Rome".into()], ..Default::default() }).unwrap();
+    assert_eq!(rome.entity_links[0].outcome, "new");
+    let again = db.remember("I visited Rome.", RememberOpts { ns: ns("br"), entities: vec!["Rome".into(), "Anna".into()], ..Default::default() }).unwrap();
+    assert_eq!(again.entity_links.iter().map(|e| e.outcome.as_str()).collect::<Vec<_>>(), vec!["match", "match"]);
     // the entity filter of recall works on the branch
     let hits = db
         .recall("where?", RecallOpts { ns: ns("br"), entity: Some("Anna".into()), ..Default::default() })
         .unwrap();
-    assert_eq!(hits.iter().map(|h| h.memory_text()).collect::<Vec<_>>(), vec![ANNA_ROME]);
+    let anna: Vec<&str> = hits.iter().map(|h| h.memory_text()).collect();
+    assert!(anna.contains(&ANNA_ROME) && !anna.contains(&ANNA_PARIS), "{anna:?}");
 }
 
 #[test]

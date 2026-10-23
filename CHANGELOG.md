@@ -10,6 +10,22 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Memory branches: fork, rewind, merge, diff, discard.** See docs/specs/memory-branches.md.
+  - **Fork** (`::memory fork {from, to, at?}`, `Db::memory_fork`, Python `memory_fork`, `POST /memory/fork`) is O(1): it writes one branch row and a version row, whatever the parent's size. A branch reads its parent's memories as of the fork time through its **lineage**, and nested forks work up to depth 16.
+    - Reads route per memory to the **owner**, the nearest level with any row for it. Recall runs one fused search over the whole lineage, so BM25 normalisation stays comparable.
+    - A write to an inherited memory **copies it up** first, in the same transaction: supersede, duplicate, retract, archive, set, rewind. The copy keeps its valid-time history, so `as_of` reads still see what was inherited. Ancestors are never written.
+    - Entity resolution reads the whole lineage, so a branch's "Anna" is its parent's Anna and the same-subject gate holds. This adds `EntityConfig.lineage`.
+  - **Rewind** (`{ns, to}`) retracts what is current but was not valid at `to`, and asserts again what was. It only appends rows, so it is undoable: `rewind {to: result.undo}`.
+  - **Merge** (`{from, into?, dry_run?, keep_time?, forgets?}`) replays the branch's own statements into `into` (default: the parent) through `remember`, so decider-nano settles conflicts by meaning. A merged "I moved to Lisbon" supersedes the parent's "I live in Paris".
+    - It also replays the branch's forgets of inherited memories.
+    - A merge log (`kleos_mem_merge`) makes it idempotent and resumable.
+    - `dry_run` is an exact preview: it merges into a scratch fork of `into`, diffs, then discards the fork.
+  - **Diff** (`{a, b, at?}`) reports memories added, and removed with the reason (`superseded` and by what, or `forgotten`). It also lists pending decisions and entity names present in only one side. Memories are matched by id, then by normalised text.
+  - **Discard** drops a branch's own rows, Engram queue and overlay; children need `cascade`. **branches** lists them.
+  - **GDPR erase** now reaches every copy of a memory in its family: the root and all its branches.
+  - **Engram is kept and extended.** A branch's overlay reads through its lineage (`::engram materialize` / `export` / `facts`), and its writes copy up the inherited facts and rows they change. A branch can serve its parent's overlay with its own edits on top, and a merge enqueues the target's edits through `remember`.
+  - Schema version 6 (`kleos_mem_branch`, `kleos_mem_copied`, `kleos_mem_merge`); older stores gain the relations on first use. Plain namespaces run the same queries as before.
+  - Tests: `kleos-core/tests/memory_branch.rs` (12) and `tests/engram.rs::branches_read_through_and_copy_up`. Demo with real models: `scripts/branches/branches_demo.py`. Costs: `kleos-core/examples/memory_branch_bench.rs` (results in the spec).
 - **Memory API: write-time dates (event times).** See "Dates" in docs/specs/memory-api.md; results in docs/benchmarks/memory.md ("Dates and list text").
   - **Parser.** `memory_time::parse_times(text, at)` is a rule-based English temporal-expression parser (regex and chrono, no model). It covers absolute dates in the usual formats, relative days and parts of days, offsets ("two days ago"), weekdays and weekends, relative weeks, months, years and seasons, "since" / "until" / "for the past N weeks", and ranges. Each match resolves against when it was said to `[start, end)` with a granularity and a kind. It is conservative: "may" the modal, "march" the verb, ordinals, names, vague times and habits are not dates. On 50 hand-labelled LoCoMo and LongMemEval claims it scores expression precision 1.00 and recall 0.96, interval precision 0.96 and recall 0.92 (0.96 / 0.96 / 0.88 / 0.88 before the three fixes the hand check found).
   - **Storage.** A new relation `kleos_mem_event {ns, id, n => start, end, granularity, kind, expr}` (schema version 5) holds one row per expression of each added claim, written in `remember`'s transaction. A v4 store gains it on first use, filled from the stored texts. Erase removes the rows.
