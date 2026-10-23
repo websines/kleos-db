@@ -112,7 +112,7 @@ pub mod builtin;
 pub enum Family {
     /// LiquidAI d1-omni (Decision Index schema, option markers).
     D1,
-    /// tasksource-decider-nano (cross-encoder, `Question: ..\nOption: ..`).
+    /// decider-nano (cross-encoder, `Question: ..\nOption: ..`).
     Nano,
     /// A family registered with [`register_family`].
     Custom(&'static str),
@@ -202,7 +202,8 @@ impl Family {
         let l = s.trim().to_ascii_lowercase();
         Ok(match l.as_str() {
             "d1" | "d1-omni" | "d1-omni-600m" => Family::D1,
-            "nano" | "decider-nano" | "tasksource-decider-nano" => Family::Nano,
+            "nano" | "decider-nano" | "kleos-decider-nano" | "decider-nano-base" | "nano-base"
+            | "tasksource-decider-nano" => Family::Nano,
             other => match FAMILIES.read().ok().and_then(|f| f.keys().find(|k| **k == other).copied()) {
                 Some(k) => Family::Custom(k),
                 None => bail!("unknown decider family '{other}': expected 'd1', 'nano' or a family registered with register_family"),
@@ -1657,6 +1658,7 @@ fn now() -> f64 {
 /// field is optional:
 ///
 /// * `model`: `decider-nano` (default; also `nano` or
+///   `Mazino0/kleos-decider-nano`), `decider-nano-base` (the upstream
 ///   `tasksource/tasksource-decider-nano`) or `d1-omni` (`d1`,
 ///   `LiquidAI/d1-omni-600M`).
 /// * `precision`: `q8`/`int8` (default for decider-nano on CPU and Metal),
@@ -1966,7 +1968,7 @@ fn not_found(name: &str) -> miette::Report {
         )]
         #[diagnostic(code(eval::decider_not_found))]
         #[diagnostic(help(
-            "built-in models: 'decider-nano' (tasksource/tasksource-decider-nano), 'd1-omni' (LiquidAI/d1-omni-600M); `::decider list` shows what is registered"
+            "built-in models: 'decider-nano' (Mazino0/kleos-decider-nano), 'decider-nano-base' (tasksource/tasksource-decider-nano), 'd1-omni' (LiquidAI/d1-omni-600M); `::decider list` shows what is registered"
         ))]
         struct DeciderNotFound(String);
         DeciderNotFound(name.to_string()).into()

@@ -12,6 +12,9 @@ pub enum Error {
     /// A model file is not in the local Hugging Face cache.
     #[error("model file not found: {0}")]
     NotFound(String),
+    /// Downloading a model file failed.
+    #[error("model download failed: {0}")]
+    Download(String),
     /// Bad configuration or model metadata.
     #[error("configuration error: {0}")]
     Config(String),

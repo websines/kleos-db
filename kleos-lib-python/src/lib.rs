@@ -1174,7 +1174,9 @@ impl CozoDbPy {
     }
     /// Turn a built-in decision model on under `name` (kleos fork;
     /// process-wide, like `::decider enable`). `model` is `'decider-nano'`
-    /// (default) or `'d1-omni'`; needs a build with the `infer` feature. With
+    /// (default; kleos's fine-tune `Mazino0/kleos-decider-nano`),
+    /// `'decider-nano-base'` (upstream `tasksource/tasksource-decider-nano`)
+    /// or `'d1-omni'`; needs a build with the `infer` feature. With
     /// no keyword arguments a disabled decider comes back as it was.
     /// `path` loads decider-nano weights from a local directory (e.g. a
     /// fine-tune) instead of the Hugging Face cache.

@@ -31,7 +31,8 @@ kleos turns this raw contract into decisions a write path can act on safely.
 
 | Name | Model | Size | Licence | Status |
 |---|---|---|---|---|
-| `decider-nano` (default) | `tasksource/tasksource-decider-nano` (ModernBERT/Ettin cross-encoder) | 150M, 298 MB bf16 file | Apache-2.0 | Built in (feature `infer`) |
+| `decider-nano` (default) | [`Mazino0/kleos-decider-nano`](https://huggingface.co/Mazino0/kleos-decider-nano), weights version `nano-tune-v1` (kleos fine-tune, below) | 150M, 298 MB bf16 file | MIT (base Apache-2.0) | Built in (feature `infer`) |
+| `decider-nano-base` | `tasksource/tasksource-decider-nano` (ModernBERT/Ettin cross-encoder), weights version `base` | 150M, 298 MB bf16 file | Apache-2.0 | Built in (feature `infer`) |
 | `d1-omni` | `LiquidAI/d1-omni-600M` | 600M | LFM1.0 | Templates and calibration only. `enable` errors: "the d1-omni backend is not built into this kleos yet". The Rust port was stopped. |
 | custom | anything implementing `kleos::decide::Decider` | | | `register_decider(name, Arc<dyn Decider>, family)` |
 
@@ -291,8 +292,8 @@ request format the templates render, so the Rust path needs no prompt change.
   - Token embeddings frozen; gradient checkpointing; MPS at memory fraction 0.5. One run takes 30 minutes on an M3.
 - Selection: lr ∈ {1e-5, 2e-5, 4e-5}. The rule, fixed before looking at eval, was the lowest NLL on a 6% group split of the training data, with adapt as a tiebreak (adapt saturates at ≈ 1.0 AUROC after 100 steps). It picked lr 4e-5 (val NLL 0.197 against 0.202 and 0.218).
 - Weights: bf16 safetensors with the original key layout, plus `kleos_decider.json`, `{"weights_version": "nano-tune-v1"}`.
-  - Load with `::decider enable nano {path: '<dir>'}` (Python `path=`, Rust `DeciderSpec { path, .. }`).
-  - The weights are not published. Licence note: VitaminC and part of MultiNLI are share-alike (NOTICE.md); whether the weights inherit that is an open question for the maintainers.
+  - Published as [`Mazino0/kleos-decider-nano`](https://huggingface.co/Mazino0/kleos-decider-nano) under MIT (maintainer decision, 2026-10-23); it is the default `decider-nano`. `::decider enable` downloads it into the Hugging Face cache on first use (`HF_HUB_OFFLINE=1` forbids that; pre-seed with `hf download Mazino0/kleos-decider-nano`).
+  - Other weights in this layout load with `::decider enable nano {path: '<dir>'}` (Python `path=`, Rust `DeciderSpec { path, .. }`).
 
 Results through the Rust path (`decide_eval`, f32 on Metal). Calibration is fitted on adapt; figures are AUROC with 95% stratified-bootstrap CIs.
 

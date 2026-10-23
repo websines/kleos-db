@@ -90,7 +90,7 @@ blocks) were evaluated against the Hadamard rotation but are not shipped; no
 RotorQuant code is included. The `turbo-quant` crate (MIT OR Apache-2.0) was
 reviewed and not used.
 
-### tasksource-decider-nano (Apache-2.0; model weights, not shipped)
+### tasksource-decider-nano (Apache-2.0; model weights, not shipped in the library)
 
 `kleos-infer/src/decider_nano.rs` runs
 [`tasksource/tasksource-decider-nano`](https://huggingface.co/tasksource/tasksource-decider-nano)
@@ -100,6 +100,13 @@ user's Hugging Face cache. The inference code is a Rust port written for
 kleos from the model card and the repository's `decider.py` (Apache-2.0); the
 input layout (shared state, tree attention, option pooling) follows that
 reference. Its base model is `cross-encoder/ettin-reranker-150m-v1`.
+
+The default decider is kleos's fine-tune of it,
+[`Mazino0/kleos-decider-nano`](https://huggingface.co/Mazino0/kleos-decider-nano)
+(weights version `nano-tune-v1`), published under MIT for the fine-tuning
+changes; the repository also carries the base model's Apache-2.0 licence
+(`LICENSE-APACHE-base`). Like the base weights, it is read from the user's
+Hugging Face cache and is not bundled with the library.
 
 ### Evaluation data (not shipped in the library)
 
@@ -114,7 +121,8 @@ authors.
 
 `scripts/infer-bench/decide/train/build_data.py` builds the fine-tuning set
 into `.bench-data/nano-tune/data/` (never committed). Fine-tuned weights are
-written to `.bench-data/nano-tune/models/` and are not shipped or uploaded.
+written to `.bench-data/nano-tune/models/`; the selected run is published as
+`Mazino0/kleos-decider-nano` (see above).
 
 | Source | Licence | Use |
 |---|---|---|
@@ -124,9 +132,9 @@ written to `.bench-data/nano-tune/models/` and are not shipped or uploaded.
 | [MultiNLI](https://huggingface.co/datasets/nyu-mll/multi_nli) (Williams et al., 2018) | per genre: OANC (free), CC BY-SA 3.0, CC BY 3.0 | 900 training pairs; a 600-item validation_matched subset for the forgetting check |
 | Programmatic memory pairs (`memgen.py`) | kleos authors (MPL-2.0) | update / contradiction / compatible / duplicate, entity mentions, entity typing, relation mapping |
 
-**Share-alike note (decision for the maintainers, not made here):** VitaminC
-and part of MultiNLI are CC BY-SA. Whether weights fine-tuned on them are an
-adaptation that must carry CC BY-SA terms is an open legal question. Until it
-is settled, treat fine-tuned decider-nano weights as possibly share-alike and
-do not redistribute them under Apache-2.0 alone; a weights build without the
-CC BY-SA sources is possible by dropping them in `build_data.py`.
+**Share-alike note:** VitaminC and part of MultiNLI are CC BY-SA. Whether
+weights fine-tuned on them are an adaptation that must carry CC BY-SA terms is
+an open legal question. The maintainers decided (2026-10-23) to publish
+`nano-tune-v1` under MIT, with the training sources and their licences listed
+on the model card. A weights build without the CC BY-SA sources is possible by
+dropping them in `build_data.py`.

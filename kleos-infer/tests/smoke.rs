@@ -23,6 +23,9 @@ fn precision_and_device_parse() {
 
 #[test]
 fn missing_model_is_a_clear_error() {
+    // offline, so this test never touches the network (download is tested
+    // in hub_download.rs)
+    std::env::set_var("HF_HUB_OFFLINE", "1");
     let e = StaticEmbedder::new("nobody/no-such-model-kleos-test").err().unwrap();
     assert!(e.to_string().contains("hf download"), "{e}");
 }

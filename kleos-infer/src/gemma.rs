@@ -84,8 +84,14 @@ pub struct GemmaModel {
 }
 
 impl GemmaModel {
-    /// Reads `config.json` of `repo` from the HF cache; weights load lazily.
+    /// Reads `config.json` of `repo` from the HF cache (fetched if missing);
+    /// weights load lazily.
     pub fn new(repo: &str, engine: EngineConfig) -> Result<Arc<Self>> {
+        hub::ensure_hf_files(
+            repo,
+            &["config.json", "tokenizer.json", "model.safetensors", "2_Dense/model.safetensors", "3_Dense/model.safetensors"],
+            &[],
+        )?;
         let cfg: Config =
             serde_json::from_slice(&std::fs::read(hub::resolve_hf_file(repo, "config.json")?)?)?;
         if cfg.layer_types.len() != cfg.num_hidden_layers {

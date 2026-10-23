@@ -29,8 +29,12 @@ to kleos.
     `decide_important`, `decide_relation`; the batched fixed rule
     `Decide(rel[id, a, b], model:, template:)`, which outputs
     `[id, label, p, band, decided_by]`.
-  - Built-in backend: `tasksource/tasksource-decider-nano` (150M, Apache-2.0), a
-    candle port in `kleos-infer` that matches the PyTorch reference to about 1e-5.
+  - Built-in backend: decider-nano (150M), a candle port in `kleos-infer` that
+    matches the PyTorch reference to about 1e-5. The default weights are
+    `Mazino0/kleos-decider-nano` (MIT), kleos's fine-tune on memory-shaped pairs
+    (VitaminC 0.68→0.81, LongMemEval knowledge-update 0.39→0.82); the upstream
+    `tasksource/tasksource-decider-nano` (Apache-2.0) is `decider-nano-base`.
+    Default precision q8 (Metal ≈295 MB, CPU ≈305 MB after a batch of 16).
     The `infer-accelerate` feature adds Apple BLAS for CPU.
   - Third backends can register their own template family (`register_family`).
   - Rust (`Db`/`DbInstance::enable_decider`, `decide`, `decide_batch`,

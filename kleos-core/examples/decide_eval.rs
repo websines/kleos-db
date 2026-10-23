@@ -21,7 +21,7 @@
 //!     [--vitaminc .bench-data/decide/vitaminc_sample.json] [--fit-defaults] [--out out.json]
 //! ```
 //!
-//! Backends: `nano` runs tasksource-decider-nano through kleos-infer
+//! Backends: `nano` runs decider-nano (kleos-decider-nano) through kleos-infer
 //! (feature `infer`); `d1` replays recorded d1-omni answers (a fixture written
 //! by scripts/infer-bench/decide/d1_record.py) until the Rust d1 port lands.
 

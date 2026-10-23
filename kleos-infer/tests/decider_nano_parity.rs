@@ -63,8 +63,8 @@ fn device() -> DevicePref {
 
 #[test]
 fn decider_nano_matches_reference() {
-    if resolve_hf_file(DECIDER_NANO_REPO, "model.safetensors").is_err() {
-        eprintln!("skip: {DECIDER_NANO_REPO} not in the HF cache (`hf download {DECIDER_NANO_REPO}`)");
+    if resolve_hf_file(DECIDER_NANO_BASE_REPO, "model.safetensors").is_err() {
+        eprintln!("skip: {DECIDER_NANO_BASE_REPO} not in the HF cache (`hf download {DECIDER_NANO_BASE_REPO}`)");
         return;
     }
     let fx = fixture();
@@ -85,8 +85,8 @@ fn decider_nano_matches_reference() {
             precision: prec,
             ..Default::default()
         };
-        let m = DeciderNano::new(cfg).unwrap();
-        assert_eq!(m.model_id(), DECIDER_NANO_REPO);
+        let m = DeciderNano::with_repo(DECIDER_NANO_BASE_REPO, cfg).unwrap();
+        assert_eq!(m.model_id(), DECIDER_NANO_BASE_REPO);
         assert!(!m.is_loaded());
         // batched (all items at once) and one at a time must agree
         let batched = m.decide(&reqs, false).unwrap();
@@ -144,11 +144,11 @@ fn decider_nano_matches_reference() {
 
 #[test]
 fn decider_nano_rejects_bad_requests() {
-    if resolve_hf_file(DECIDER_NANO_REPO, "config.json").is_err() {
-        eprintln!("skip: {DECIDER_NANO_REPO} not in the HF cache");
+    if resolve_hf_file(DECIDER_NANO_BASE_REPO, "config.json").is_err() {
+        eprintln!("skip: {DECIDER_NANO_BASE_REPO} not in the HF cache");
         return;
     }
-    let m = DeciderNano::new(EngineConfig {
+    let m = DeciderNano::with_repo(DECIDER_NANO_BASE_REPO, EngineConfig {
         device: DevicePref::Cpu,
         precision: Precision::Q8,
         ..Default::default()

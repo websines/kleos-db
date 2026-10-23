@@ -713,19 +713,32 @@ fn value_rule_short_circuits_numbers_and_dates() {
 #[test]
 fn real_decider_nano_end_to_end() {
     if kleos_infer::resolve_hf_file(kleos_infer::DECIDER_NANO_REPO, "model.safetensors").is_err() {
-        eprintln!("skipping: tasksource/tasksource-decider-nano is not in the HF cache");
+        eprintln!("skipping: {} is not in the HF cache", kleos_infer::DECIDER_NANO_REPO);
         return;
     }
     let db = mem();
+    // `decider-nano` is the kleos fine-tune (weights version nano-tune-v1)
     run(&db, "::decider enable realnano {model: 'decider-nano', precision: 'f32'}").unwrap();
     let up = db.decide("realnano", "supersedes", "Tom lives in Berlin.", "Tom moved to Lisbon in March and has settled in there.").unwrap();
     let compat = db.decide("realnano", "supersedes", "Tom lives in Berlin.", "Tom is learning to play the cello.").unwrap();
+    assert_eq!(up.model, kleos_infer::DECIDER_NANO_REPO);
     assert!(up.p > compat.p, "{up:?} {compat:?}");
-    // The zero-shot threshold (0.246, fitted on adapt) favours recall, so a
-    // compatible addition can still be labelled "yes"; it must never be
-    // auto-applied, and zero-shot supersedes never auto-applies at all.
-    assert_ne!(up.band, Band::Auto);
+    assert_eq!(up.label, "yes", "{up:?}");
+    assert_eq!(compat.label, "no", "{compat:?}");
+    // a compatible addition must never be auto-applied as a supersession
     assert_ne!(compat.band, Band::Auto);
+    // the upstream checkpoint stays selectable, with its own (zero-shot)
+    // calibration under which supersedes never auto-applies
+    if kleos_infer::resolve_hf_file(kleos_infer::DECIDER_NANO_BASE_REPO, "model.safetensors").is_ok() {
+        run(&db, "::decider enable basenano {model: 'decider-nano-base', precision: 'f32'}").unwrap();
+        let bup = db.decide("basenano", "supersedes", "Tom lives in Berlin.", "Tom moved to Lisbon in March and has settled in there.").unwrap();
+        let bcompat = db.decide("basenano", "supersedes", "Tom lives in Berlin.", "Tom is learning to play the cello.").unwrap();
+        assert_eq!(bup.model, kleos_infer::DECIDER_NANO_BASE_REPO);
+        assert!(bup.p > bcompat.p, "{bup:?} {bcompat:?}");
+        assert_ne!(bup.band, Band::Auto);
+        assert_ne!(bcompat.band, Band::Auto);
+        run(&db, "::decider disable basenano").unwrap();
+    }
     let dup = db.decide("realnano", "duplicate", "Lena is a vegetarian.", "Lena doesn't eat meat.").unwrap();
     assert_eq!(dup.label, "yes");
     let rows = run(&db, "::decider list").unwrap();

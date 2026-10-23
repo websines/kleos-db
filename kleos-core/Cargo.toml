@@ -97,9 +97,10 @@ storage-tikv = ["dep:tikv-client", "dep:tokio"]
 cypher = []
 ## Built-in embedders from the `kleos-infer` crate (UPGRADE_PLAN D2/D3):
 ## `kleos::embed::builtin` registers EmbeddingGemma / Model2Vec models read
-## from the local Hugging Face cache. Off by default: the default build has no
+## from the Hugging Face cache, downloading missing files when a model is
+## enabled (`HF_HUB_OFFLINE=1` to forbid). Off by default: the default build has no
 ## ML dependencies, and models are never bundled. candle 0.11 needs a newer toolchain than 1.90 (verified on 1.99).
-infer = ["dep:kleos-infer"]
+infer = ["dep:kleos-infer", "kleos-infer/download"]
 ## `infer` plus Apple-GPU (Metal) kernels.
 infer-metal = ["infer", "kleos-infer/metal"]
 ## `infer` plus Apple Accelerate BLAS for CPU matmuls (macOS; 3-5x faster
@@ -209,7 +210,7 @@ crossbeam = "0.8.4"
 ndarray = { version = "0.15.6", features = ["serde"] }
 half = "2.4.1"
 sha2 = "0.10.8"
-kleos-infer = { path = "../kleos-infer", version = "0.1.0", optional = true }
+kleos-infer = { path = "../kleos-infer", version = "0.1.0", optional = true, default-features = false }
 rustc-hash = "1.1.0"
 twox-hash = "1.6.3"
 quadrature = "0.1.2"

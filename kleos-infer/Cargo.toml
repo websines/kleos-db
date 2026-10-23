@@ -9,7 +9,11 @@ keywords = ["embeddings", "inference", "kleos"]
 categories = ["science"]
 
 [features]
-default = []
+default = ["download"]
+## Fetch missing model files into the Hugging Face cache when a model is
+## enabled (blocking ureq + rustls; no async runtime). `HF_HUB_OFFLINE=1`
+## turns it off at run time.
+download = ["dep:hf-hub"]
 ## Apple-GPU kernels through candle's Metal backend (macOS only).
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "dep:objc2"]
 ## Apple Accelerate (AMX) BLAS for CPU matmuls (macOS only).
@@ -30,3 +34,4 @@ thiserror = "1"
 # Autorelease pool around Metal work (see gemma.rs `with_pool`); already in
 # the tree through candle-metal-kernels.
 objc2 = { version = "0.6", optional = true }
+hf-hub = { version = "0.4.3", default-features = false, features = ["ureq"], optional = true }

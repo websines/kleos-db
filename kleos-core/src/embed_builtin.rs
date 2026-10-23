@@ -8,7 +8,9 @@
 
 //! Built-in embedders backed by `kleos-infer` (cargo feature `infer`). Model
 //! files are read from the local Hugging Face cache (`HF_HOME`); fetch them
-//! once with e.g. `hf download google/embeddinggemma-300m`.
+//! once with e.g. `hf download google/embeddinggemma-300m`, or let enabling
+//! the model download them (gated repos need `HF_TOKEN`; `HF_HUB_OFFLINE=1`
+//! forbids downloads).
 //!
 //! ```no_run
 //! use kleos::embed::builtin::{register_embeddinggemma, register_model2vec, EngineConfig};

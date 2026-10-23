@@ -35,8 +35,10 @@ pub struct StaticEmbedder {
 }
 
 impl StaticEmbedder {
-    /// Reads `config.json` of `repo` (HF cache) now; weights load on first use.
+    /// Reads `config.json` of `repo` (HF cache, fetched if missing) now;
+    /// weights load on first use.
     pub fn new(repo: &str) -> Result<Self> {
+        hub::ensure_hf_files(repo, &["config.json", "tokenizer.json", "model.safetensors"], &[])?;
         let cfg: serde_json::Value =
             serde_json::from_slice(&std::fs::read(hub::resolve_hf_file(repo, "config.json")?)?)?;
         let dim = cfg["hidden_dim"]

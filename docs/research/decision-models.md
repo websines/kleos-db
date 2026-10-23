@@ -195,3 +195,27 @@ The model is still 150M. Memory went down too: Metal q8 needs 287 MB after load 
 
 Open: the weights' licence (CC BY-SA training data) is not decided; Metal batching is unsolved.
 
+
+### 2026-10-23: the fine-tune is the default, published under MIT
+
+The decider-nano fine-tune (`nano-tune-v1`) beat the base model on every
+held-out set:
+
+- VitaminC-300: 0.68 → 0.81.
+- LongMemEval knowledge-update: 0.39 → 0.82.
+- Supersedes: 0.94 → 0.99, with a 36% auto band and 0 false.
+
+There was no forgetting on MultiNLI.
+
+**Decision:**
+
+- It is published as `Mazino0/kleos-decider-nano` under MIT.
+- It is the default `decider-nano`.
+- The upstream checkpoint stays selectable as `decider-nano-base`.
+
+On the CC BY-SA training sources (VitaminC, part of MultiNLI), the
+maintainers chose MIT and list the sources on the model card. See NOTICE.md.
+
+Full results are in `docs/specs/decide.md`, under "Fine-tuned weights".
+
+This closes the "VitaminC stays weak" revisit condition above.

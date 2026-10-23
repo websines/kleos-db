@@ -32,7 +32,7 @@
 //!   encoder, mean pooling, two dense projections, Matryoshka output).
 //!
 //! Decision models ([`Decider`]):
-//! * [`DeciderNano`]: `tasksource/tasksource-decider-nano` (150M ModernBERT
+//! * [`DeciderNano`]: `Mazino0/kleos-decider-nano` (150M ModernBERT
 //!   joint cross-encoder; one logit per option, tree-attention shared state).
 
 mod decide;
@@ -45,11 +45,11 @@ mod linear;
 mod static_embed;
 
 pub use decide::{softmax, DecideAnswer, DecideRequest, Decider};
-pub use decider_nano::{DeciderNano, DECIDER_BATCH_TOKENS, DECIDER_NANO_REPO};
+pub use decider_nano::{DeciderNano, DECIDER_BATCH_TOKENS, DECIDER_NANO_BASE_REPO, DECIDER_NANO_REPO};
 pub use device::DevicePref;
 pub use error::{Error, Result};
 pub use gemma::{GemmaEmbedder, GemmaModel, GEMMA_DOCUMENT_PROMPT, GEMMA_QUERY_PROMPT};
-pub use hub::{hf_cache_dir, resolve_hf_file};
+pub use hub::{ensure_hf_files, hf_cache_dir, hf_offline, resolve_hf_file};
 pub use static_embed::StaticEmbedder;
 
 /// Weight precision.

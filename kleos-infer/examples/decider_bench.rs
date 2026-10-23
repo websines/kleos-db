@@ -6,7 +6,7 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Latency and memory of tasksource-decider-nano on short memory-note
+//! Latency and memory of decider-nano on short memory-note
 //! decisions, rendered with the kleos `supersedes` template (NLI, 3 options).
 //!
 //! ```text

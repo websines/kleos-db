@@ -7,8 +7,10 @@
  */
 
 //! Built-in deciders backed by `kleos-infer` (cargo feature `infer`). Model
-//! files are read from the local Hugging Face cache (`HF_HOME`); fetch them
-//! once with e.g. `hf download tasksource/tasksource-decider-nano`.
+//! files live in the Hugging Face cache (`HF_HOME`). Enabling a model
+//! downloads missing files there (the decider-nano default is about 300 MB);
+//! set `HF_HUB_OFFLINE=1` to forbid that and pre-seed the cache with e.g.
+//! `hf download Mazino0/kleos-decider-nano`.
 //!
 //! ```no_run
 //! use kleos::decide::{enable_decider, DeciderSpec};
@@ -23,7 +25,7 @@ use miette::{miette, Result};
 use crate::bail;
 
 pub use kleos_infer::{DevicePref, EngineConfig, Precision};
-use kleos_infer::{DeciderNano, DECIDER_NANO_REPO};
+use kleos_infer::{DeciderNano, DECIDER_NANO_BASE_REPO, DECIDER_NANO_REPO};
 
 use super::{register_with_info, DecideAnswer, DecideRequest, Decider, DeciderInfo, DeciderSpec, Family};
 
@@ -118,12 +120,16 @@ enum Builtin {
 fn resolve(model: Option<&str>) -> Result<Builtin> {
     let m = model.unwrap_or("decider-nano").trim();
     Ok(match m.to_ascii_lowercase().as_str() {
-        "decider-nano" | "nano" | "tasksource-decider-nano" => Builtin::Nano(DECIDER_NANO_REPO.to_string()),
-        "tasksource/tasksource-decider-nano" => Builtin::Nano(m.to_string()),
+        "decider-nano" | "nano" | "kleos-decider-nano" | "mazino0/kleos-decider-nano" => {
+            Builtin::Nano(DECIDER_NANO_REPO.to_string())
+        }
+        "decider-nano-base" | "nano-base" | "tasksource-decider-nano" | "tasksource/tasksource-decider-nano" => {
+            Builtin::Nano(DECIDER_NANO_BASE_REPO.to_string())
+        }
         "d1" | "d1-omni" | "d1-omni-600m" | "liquidai/d1-omni-600m" => Builtin::D1,
         _ if m.starts_with('/') || m.starts_with('.') => Builtin::Nano(m.to_string()),
         other => bail!(
-            "unknown decider model '{other}': built-in models are 'decider-nano' (tasksource/tasksource-decider-nano) and 'd1-omni' (LiquidAI/d1-omni-600M)"
+            "unknown decider model '{other}': built-in models are 'decider-nano' (Mazino0/kleos-decider-nano), 'decider-nano-base' (tasksource/tasksource-decider-nano) and 'd1-omni' (LiquidAI/d1-omni-600M)"
         ),
     })
 }

@@ -6,9 +6,10 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! `tasksource/tasksource-decider-nano` (Apache-2.0): a 150M joint
-//! typed-decision cross-encoder on a ModernBERT / Ettin encoder
-//! (`cross-encoder/ettin-reranker-150m-v1`), as a [`Decider`] backend.
+//! decider-nano: a 150M joint typed-decision cross-encoder on a ModernBERT / Ettin encoder
+//! (`cross-encoder/ettin-reranker-150m-v1`), as a [`Decider`] backend. The
+//! default checkpoint is kleos's fine-tune [`DECIDER_NANO_REPO`] (MIT); the
+//! upstream [`DECIDER_NANO_BASE_REPO`] (Apache-2.0) has the same layout.
 //!
 //! Port of the repository's `decider.py`, layout `shared`, pooling `opt`,
 //! attention `cached` (its `decider_config.json`). One request is one row:
@@ -48,8 +49,11 @@ use crate::gemma::with_pool;
 use crate::linear::{Embedding, Linear, Loader, TensorFile};
 use crate::{hub, EngineConfig, Error, Precision, Result};
 
-/// Hugging Face repo of the default decider-nano checkpoint.
-pub const DECIDER_NANO_REPO: &str = "tasksource/tasksource-decider-nano";
+/// Hugging Face repo of the default decider-nano checkpoint: kleos's
+/// fine-tune on memory-shaped pairs (weights version `nano-tune-v1`, MIT).
+pub const DECIDER_NANO_REPO: &str = "Mazino0/kleos-decider-nano";
+/// The upstream checkpoint it was tuned from (weights version `base`).
+pub const DECIDER_NANO_BASE_REPO: &str = "tasksource/tasksource-decider-nano";
 
 /// Longest `(state, question, option)` pair the encoder reads.
 const MAX_PAIR_TOKENS: usize = 8192;
@@ -141,7 +145,7 @@ struct Weights {
     bytes: usize,
 }
 
-/// tasksource-decider-nano as a [`Decider`]. Weights load lazily from the
+/// decider-nano as a [`Decider`]. Weights load lazily from the
 /// local HF cache on the first [`Decider::decide`] call.
 pub struct DeciderNano {
     repo: String,
@@ -200,9 +204,11 @@ impl DeciderNano {
         Self::with_repo(DECIDER_NANO_REPO, cfg)
     }
 
-    /// A checkpoint by repo id (or local directory). Reads `config.json`
-    /// now; weights load on first use.
+    /// A checkpoint by repo id (or local directory). Fetches missing files
+    /// into the HF cache and reads `config.json` now; weights load on first
+    /// use.
     pub fn with_repo(repo: &str, engine: EngineConfig) -> Result<Self> {
+        hub::ensure_hf_files(repo, &["config.json", "tokenizer.json", "model.safetensors"], &["kleos_decider.json"])?;
         let cfg: Config =
             serde_json::from_slice(&std::fs::read(hub::resolve_hf_file(repo, "config.json")?)?)?;
         if cfg.hidden_size % cfg.num_attention_heads != 0 {
@@ -210,13 +216,13 @@ impl DeciderNano {
         }
         // `kleos_decider.json` next to the weights names the weights version
         // that shipped calibration defaults are keyed on (e.g. a fine-tune);
-        // the published checkpoint is "base", any other directory "custom".
+        // the upstream checkpoint is "base", any other directory "custom".
         let weights_version = hub::resolve_hf_file(repo, "kleos_decider.json")
             .ok()
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             .and_then(|v| v.get("weights_version").and_then(|x| x.as_str()).map(str::to_string))
-            .unwrap_or_else(|| if repo == DECIDER_NANO_REPO { "base".into() } else { "custom".into() });
+            .unwrap_or_else(|| if repo == DECIDER_NANO_BASE_REPO { "base".into() } else { "custom".into() });
         Ok(Self {
             repo: repo.to_string(),
             weights_version,
