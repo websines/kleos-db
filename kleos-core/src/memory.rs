@@ -46,6 +46,15 @@ use crate::memory_engram::{self as engram_hook, Job};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
 
+/// Memory branches: fork, rewind, merge, diff, discard (docs/specs/memory-branches.md).
+#[path = "memory_branch.rs"]
+pub mod branch;
+use branch::{Scope, MEM_BRANCH, MEM_COPIED};
+pub use branch::{
+    BranchInfo, BranchesOpts, DiffEntities, DiffMem, DiffOpts, DiffPending, DiffResult, DiscardOpts, DiscardResult,
+    ForkOpts, ForkResult, MergeOpts, MergeResult, MergeStatement, RewindOpts, RewindResult,
+};
+
 /// Memories: `{ns, id, vt: Validity => text, kind, source, created, importance}`.
 pub const MEM: &str = "kleos_mem";
 /// Memory vectors: `{ns, id => current, vec}` (created once an embedder is set).
@@ -84,8 +93,9 @@ pub const MEM_ROLE: &str = "kleos_mem_role";
 pub const MEM_EVENT: &str = "kleos_mem_event";
 /// Current schema version (2 added `kleos_mem_ns`; 3 added `kleos_mem_access`
 /// and `kleos_mem_life`, and entity merges / review links; 4 added
-/// `kleos_mem_role`; 5 added `kleos_mem_event`).
-const SCHEMA_VERSION: i64 = 5;
+/// `kleos_mem_role`; 5 added `kleos_mem_event`; 6 added the branch
+/// relations `kleos_mem_branch`, `kleos_mem_copied` and `kleos_mem_merge`).
+const SCHEMA_VERSION: i64 = 6;
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
@@ -1125,11 +1135,15 @@ struct EntityPlan {
 
 /// Entity resolution over the memory schema's own entity relation, scoped
 /// to one namespace.
-fn mem_entity_config(ns: &str, decider: Option<&str>) -> EntityConfig {
+fn mem_entity_config(sc: &Scope, decider: Option<&str>) -> EntityConfig {
     let mut cfg = EntityConfig::new(MEM_ENTITY);
     cfg.id = "eid".into();
     cfg.type_col = Some("kind".into());
-    cfg.scope = Some(("ns".into(), s(ns)));
+    cfg.scope = Some(("ns".into(), s(sc.ns())));
+    if !sc.is_plain() {
+        // a branch resolves names against its whole lineage
+        cfg.lineage = sc.levels.iter().map(|l| (s(&l.ns), l.cut)).collect();
+    }
     cfg.decider = decider.map(|d| d.to_string());
     cfg
 }
@@ -1287,6 +1301,12 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("5".to_string()))?;
             cfg.version = 5;
         }
+        if cfg.version < 6 {
+            // v5 stores predate branches
+            self.create_v6_relations()?;
+            self.set_mem_config("version", Some("6".to_string()))?;
+            cfg.version = 6;
+        }
         Ok(Some(cfg))
     }
 
@@ -1378,6 +1398,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.create_v3_relations()?;
                 self.create_v4_relations()?;
                 self.create_v5_relations()?;
+                self.create_v6_relations()?;
                 self.mem_q(
                     &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: [Lowercase, Stemmer('english'), Stopwords('en')]}}"),
                     vec![],
@@ -1550,11 +1571,13 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// the memories valid at `as_of` (default now). The index legs fetch for
     /// `k` hits; the `window` best are returned. Returns `(id, score, text,
     /// kind, source, created, importance)` rows by score.
+    /// On a branch the legs search the whole lineage in one fusion and a
+    /// per-level view rule keeps what the branch sees (spec "Recall").
     #[allow(clippy::too_many_arguments)]
     fn mem_search(
         &'s self,
         cfg: &MemConfig,
-        ns: &str,
+        sc: &Scope,
         text: &str,
         qvec: Option<Vec<f32>>,
         k: usize,
@@ -1566,18 +1589,30 @@ impl<'s, S: Storage<'s>> Db<S> {
         hide_archived: bool,
         hide_expired_at: Option<i64>,
     ) -> Result<Vec<Vec<DataValue>>> {
+        let ns = sc.ns();
+        let lineage = !sc.is_plain();
         let fq = fts_query(text);
-        // indexes see superseded and retraction rows too: over-fetch
-        let mut fetch = k * 4 + 16;
+        // indexes see superseded and retraction rows too: over-fetch (on a
+        // branch, ancestors' rows are filtered only after the search)
+        let mut fetch = (k * 4 + 16) * sc.levels.len();
         if kind.is_some() || entity.is_some() {
             fetch *= 4;
         }
         let mut legs = vec![];
         let mut p = vec![("ns", s(ns))];
+        if lineage {
+            p.push(("lin", str_list(&sc.names())));
+            p.push(("anc", str_list(&sc.names()[1..])));
+        }
         if let (Some(v), Some(_)) = (qvec, cfg.dim) {
-            let cur = if as_of.is_none() { " && current" } else { "" };
+            let filter = match (lineage, as_of.is_none()) {
+                (false, true) => "ns == $ns && current",
+                (false, false) => "ns == $ns",
+                (true, true) => "(ns == $ns && current) || is_in(ns, $anc)",
+                (true, false) => "is_in(ns, $lin)",
+            };
             legs.push(format!(
-                "l[lid, id, score] := ~{MEM_VEC}:hnsw{{ns, id, current | query: vec($qv), k: {fetch}, ef: {ef}, bind_distance: d, filter: ns == $ns{cur}}}, lid = 'semantic', score = -d",
+                "l[lid, id, score] := ~{MEM_VEC}:hnsw{{ns, id, current | query: vec($qv), k: {fetch}, ef: {ef}, bind_distance: d, filter: {filter}}}, lid = 'semantic', score = -d",
                 ef = fetch.max(64)
             ));
             p.push((
@@ -1586,8 +1621,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             ));
         }
         if !fq.is_empty() {
+            let filter = if lineage { "is_in(ns, $lin)" } else { "ns == $ns" };
             legs.push(format!(
-                "l[lid, id, score] := ~{MEM}:fts{{ns, id | query: $fq, k: {fetch}, bind_score: s, filter: ns == $ns}}, lid = 'text', score = s"
+                "l[lid, id, score] := ~{MEM}:fts{{ns, id | query: $fq, k: {fetch}, bind_score: s, filter: {filter}}}, lid = 'text', score = s"
             ));
             p.push(("fq", s(&fq)));
         }
@@ -1608,12 +1644,28 @@ impl<'s, S: Storage<'s>> Db<S> {
             weights.push(format!("['text', {w}]"));
             norms.push("['text', 'bm25']");
         }
-        let at = match as_of {
-            Some(t) => {
-                p.push(("as_of", DataValue::from(t)));
-                "$as_of"
-            }
-            None => "'NOW'",
+        // the memory atom: the namespace's rows at the read time, or on a
+        // branch the lineage view (`ons` is each memory's owner)
+        let (view, mem_atom, owner) = if lineage {
+            let cols = ["text", "kind", "source", "created", "importance"];
+            (
+                sc.view_rules("vis", "f[id, _], ", &cols, as_of, &mut p),
+                "vis[id, ons, text, kind, source, created, importance]".to_string(),
+                "ons",
+            )
+        } else {
+            let at = match as_of {
+                Some(t) => {
+                    p.push(("as_of", DataValue::from(t)));
+                    "$as_of"
+                }
+                None => "'NOW'",
+            };
+            (
+                String::new(),
+                format!("*{MEM}{{ns: $ns, id, text, kind, source, created, importance @ {at}}}"),
+                "$ns",
+            )
         };
         let mut filters = String::new();
         if let Some(kd) = kind {
@@ -1622,7 +1674,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         if let Some(eids) = entity {
             // every row of the entity's cluster (merged names included)
-            filters.push_str(&format!(", *{MEM_MENTION}{{ns: $ns, id, eid}}, is_in(eid, $eids)"));
+            filters.push_str(&format!(", *{MEM_MENTION}{{ns: {owner}, id, eid}}, is_in(eid, $eids)"));
             p.push(("eids", str_list(eids)));
         }
         // the archive tier and expired memories are left out unless asked
@@ -1635,18 +1687,20 @@ impl<'s, S: Storage<'s>> Db<S> {
             p.push(("exp_at", DataValue::from(t)));
         }
         if !hidden.is_empty() {
-            hidden.insert_str(
-                0,
-                &format!("life[id, e, a] := f[id, _], *{MEM_LIFE}{{ns: $ns, id, expires: e, archived: a}}\n"),
-            );
+            let life = if lineage {
+                format!("life[id, e, a] := f[id, _], vis[id, ons, _, _, _, _, _], *{MEM_LIFE}{{ns: ons, id, expires: e, archived: a}}\n")
+            } else {
+                format!("life[id, e, a] := f[id, _], *{MEM_LIFE}{{ns: $ns, id, expires: e, archived: a}}\n")
+            };
+            hidden.insert_str(0, &life);
             filters.push_str(", not hidden[id]");
         }
         let script = format!(
             "{legs}\n\
              f[id, score] <~ WeightedFusion(l[lid, id, score], weights: [{w}], norms: [{n}])\n\
-             {hidden}\
+             {view}{hidden}\
              ?[id, score, text, kind, source, created, importance] := f[id, score], \
-               *{MEM}{{ns: $ns, id, text, kind, source, created, importance @ {at}}}{filters}\n\
+               {mem_atom}{filters}\n\
              :order -score\n:limit {window}",
             legs = legs.join("\n"),
             w = weights.join(", "),
@@ -1657,15 +1711,23 @@ impl<'s, S: Storage<'s>> Db<S> {
             .rows)
     }
 
-    /// Roles of the memories that have one (`remember {role}`).
-    fn roles_of(&'s self, ns: &str, ids: &[String]) -> Result<BTreeMap<String, String>> {
+    /// Roles of the memories that have one (`remember {role}`), from each
+    /// memory's owner.
+    fn roles_of(&'s self, sc: &Scope, ids: &[String]) -> Result<BTreeMap<String, String>> {
         if ids.is_empty() {
             return Ok(BTreeMap::new());
+        }
+        if !sc.is_plain() {
+            let mut out = BTreeMap::new();
+            for (l, group) in self.by_owner(sc, ids)? {
+                out.extend(self.roles_of(&sc.level(l), &group)?);
+            }
+            return Ok(out);
         }
         Ok(self
             .mem_q(
                 &format!("?[id, role] := id in $ids, *{MEM_ROLE}{{ns: $ns, id, role}}"),
-                vec![("ns", s(ns)), ("ids", str_list(ids))],
+                vec![("ns", s(sc.ns())), ("ids", str_list(ids))],
             )?
             .rows
             .into_iter()
@@ -1673,12 +1735,21 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect())
     }
 
-    /// Validity history rows `(id, ts, is_assert)` of `ids` in `ns`.
-    fn mem_history(&'s self, ns: &str, ids: &[String]) -> Result<Vec<(String, i64, bool)>> {
+    /// Validity history rows `(id, ts, is_assert)` of `ids`, from each
+    /// memory's owner (an ancestor's up to its cut).
+    fn mem_history(&'s self, sc: &Scope, ids: &[String]) -> Result<Vec<(String, i64, bool)>> {
+        if !sc.is_plain() {
+            let mut out = vec![];
+            for (l, group) in self.by_owner(sc, ids)? {
+                let cut = sc.levels[l].cut.unwrap_or(i64::MAX);
+                out.extend(self.mem_history(&sc.level(l), &group)?.into_iter().filter(|r| r.1 <= cut));
+            }
+            return Ok(out);
+        }
         Ok(self
             .mem_q(
                 &format!("?[id, vt] := *{MEM}{{ns: $ns, id, vt}}, id in $ids"),
-                vec![("ns", s(ns)), ("ids", str_list(ids))],
+                vec![("ns", s(sc.ns())), ("ids", str_list(ids))],
             )?
             .rows
             .into_iter()
@@ -1689,8 +1760,13 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect())
     }
 
-    /// The namespace's entity rows and current merges.
-    fn entity_view(&'s self, ns: &str) -> Result<EntityView> {
+    /// The namespace's entity rows and current merges (on a branch, the
+    /// lineage's: `entity_view_lineage`).
+    fn entity_view(&'s self, sc: &Scope) -> Result<EntityView> {
+        if !sc.is_plain() {
+            return self.entity_view_lineage(sc);
+        }
+        let ns = sc.ns();
         let mut v = EntityView::default();
         for r in self
             .mem_q(&format!("?[eid, name, norm] := *{MEM_ENTITY}{{ns: $ns, eid, name, norm}}"), vec![("ns", s(ns))])?
@@ -1725,11 +1801,12 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// entity. Nothing is written here.
     fn plan_entities(
         &'s self,
-        ns: &str,
+        sc: &Scope,
         names: &[String],
         decider: Option<&str>,
         view: &EntityView,
     ) -> Result<EntityPlan> {
+        let ns = sc.ns();
         let mut wanted: Vec<(String, String)> = vec![];
         for n in names {
             let k = norm_name(n);
@@ -1743,7 +1820,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         // no context: an exact, unique name in the namespace is the same
         // entity by rule; the model only sees other near names
-        let cfg = mem_entity_config(ns, decider);
+        let cfg = mem_entity_config(sc, decider);
         let mentions: Vec<Mention> = wanted.iter().map(|(_, n)| Mention::new(n.as_str())).collect();
         let res = self.resolve_entities(&cfg, &mentions, ResolveOptions { commit: false })?;
         let now = now_micros();
@@ -1829,8 +1906,9 @@ impl<'s, S: Storage<'s>> Db<S> {
     }
 
     /// `ids` plus the claims of each that is a statement id (`<id>.<n>`):
-    /// a statement split into claims is forgotten or set as a whole.
-    fn with_claims(&'s self, ns: &str, mut ids: Vec<String>) -> Result<Vec<String>> {
+    /// a statement split into claims is forgotten or set as a whole. On a
+    /// branch, claims of every level count.
+    fn with_claims(&'s self, sc: &Scope, mut ids: Vec<String>) -> Result<Vec<String>> {
         if ids.is_empty() {
             return Ok(ids);
         }
@@ -1839,31 +1917,41 @@ impl<'s, S: Storage<'s>> Db<S> {
             return Ok(ids);
         }
         // claim ids sort right after their statement id: one key range each
-        for r in self
-            .mem_q(
-                &format!(
-                    "?[id] := p in $ps, *{MEM}{{ns: $ns, id}}, id > p, id < concat(p, '~'), starts_with(id, p)"
-                ),
-                vec![("ns", s(ns)), ("ps", str_list(&prefixes))],
-            )?
-            .rows
-        {
-            ids.extend(cell_str(&r[0]));
+        for ns in sc.names() {
+            for r in self
+                .mem_q(
+                    &format!(
+                        "?[id] := p in $ps, *{MEM}{{ns: $ns, id}}, id > p, id < concat(p, '~'), starts_with(id, p)"
+                    ),
+                    vec![("ns", s(&ns)), ("ps", str_list(&prefixes))],
+                )?
+                .rows
+            {
+                ids.extend(cell_str(&r[0]));
+            }
         }
         ids.sort();
         ids.dedup();
         Ok(ids)
     }
 
-    /// `(expires, archived)` of the ids that have a `kleos_mem_life` row.
-    fn life_of(&'s self, ns: &str, ids: &[String]) -> Result<BTreeMap<String, (Option<i64>, Option<i64>)>> {
+    /// `(expires, archived)` of the ids that have a `kleos_mem_life` row,
+    /// from each memory's owner.
+    fn life_of(&'s self, sc: &Scope, ids: &[String]) -> Result<BTreeMap<String, (Option<i64>, Option<i64>)>> {
         if ids.is_empty() {
             return Ok(BTreeMap::new());
+        }
+        if !sc.is_plain() {
+            let mut out = BTreeMap::new();
+            for (l, group) in self.by_owner(sc, ids)? {
+                out.extend(self.life_of(&sc.level(l), &group)?);
+            }
+            return Ok(out);
         }
         Ok(self
             .mem_q(
                 &format!("?[id, expires, archived] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires, archived}}"),
-                vec![("ns", s(ns)), ("ids", str_list(ids))],
+                vec![("ns", s(sc.ns())), ("ids", str_list(ids))],
             )?
             .rows
             .into_iter()
@@ -1878,13 +1966,14 @@ impl<'s, S: Storage<'s>> Db<S> {
     fn plan_remember(
         &'s self,
         cfg: &MemConfig,
-        ns: &str,
+        sc: &Scope,
         claims: &[(String, String, Option<Vec<f32>>)],
         at: i64,
         opts: &RememberOpts,
         auto: bool,
         floor: f64,
     ) -> Result<Plan> {
+        let ns = sc.ns();
         let k = opts.k.unwrap_or(DEFAULT_K).max(1);
         let multi = claims.len() > 1;
         let decider = self.pick_decider(opts.decider.as_deref(), cfg);
@@ -1895,9 +1984,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         let view = if opts.entities.is_empty() {
             EntityView::default()
         } else {
-            self.entity_view(ns)?
+            self.entity_view(sc)?
         };
-        let ents = self.plan_entities(ns, &opts.entities, decider.as_deref(), &view)?;
+        let ents = self.plan_entities(sc, &opts.entities, decider.as_deref(), &view)?;
         let mut claim_ents: Vec<Vec<usize>> = vec![vec![]; claims.len()];
         for (ei, e) in ents.out.iter().enumerate() {
             let hit: Vec<usize> = if multi {
@@ -1928,7 +2017,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             let window = if auto { 2 * k } else { k };
             let rows = self.mem_search(
                 cfg,
-                ns,
+                sc,
                 text,
                 vec.clone(),
                 k,
@@ -1945,7 +2034,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         // candidates: never another speaker's memory; in `auto` mode only
         // declarative ones, the first k of the 2k fetched
         let spoken = self.roles_of(
-            ns,
+            sc,
             &rows_per.iter().flatten().filter_map(|r| cell_str(&r[0])).collect::<Vec<_>>(),
         )?;
         let rows_per: Vec<Vec<Vec<DataValue>>> = rows_per
@@ -1965,37 +2054,21 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let iv = intervals(&self.mem_history(ns, &ids)?, i64::MAX);
-        let life = self.life_of(ns, &ids)?;
+        let iv = intervals(&self.mem_history(sc, &ids)?, i64::MAX);
+        let life = self.life_of(sc, &ids)?;
         let mut cand_ents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         if !ents.sure.is_empty() && !ids.is_empty() {
-            for r in self
-                .mem_q(
-                    &format!("?[id, eid] := id in $ids, *{MEM_MENTION}{{ns: $ns, id, eid}}"),
-                    vec![("ns", s(ns)), ("ids", str_list(&ids))],
-                )?
-                .rows
-            {
-                if let (Some(id), Some(e)) = (cell_str(&r[0]), cell_str(&r[1])) {
-                    cand_ents.entry(id).or_default().insert(view.canonical(&e));
-                }
+            for (id, e) in self.mentions_of(sc, &ids)? {
+                cand_ents.entry(id).or_default().insert(view.canonical(&e));
             }
         }
         // the candidates' vectors, for the similarity floor and the audit
-        let mut cand_vecs: BTreeMap<String, Vec<f32>> = BTreeMap::new();
-        if cfg.dim.is_some() && !ids.is_empty() && claims.iter().any(|c| c.2.is_some()) {
-            for r in self
-                .mem_q(
-                    &format!("?[id, vec] := id in $ids, *{MEM_VEC}{{ns: $ns, id, vec}}"),
-                    vec![("ns", s(ns)), ("ids", str_list(&ids))],
-                )?
-                .rows
-            {
-                if let (Some(id), Some(v)) = (cell_str(&r[0]), vec_of(&r[1])) {
-                    cand_vecs.insert(id, v);
-                }
-            }
-        }
+        let cand_vecs: BTreeMap<String, Vec<f32>> =
+            if cfg.dim.is_some() && !ids.is_empty() && claims.iter().any(|c| c.2.is_some()) {
+                self.vecs_of(sc, &ids)?
+            } else {
+                BTreeMap::new()
+            };
 
         let mut plans: Vec<ClaimPlan> = vec![];
         let mut sup_todo: Vec<(usize, usize)> = vec![];
@@ -2266,6 +2339,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let cfg = self.mem_ready(opts.embedder.as_deref())?;
         let ns = ns_of(&opts.ns);
+        let sc = self.mem_scope(&ns)?;
+        if sc.discarded {
+            bail!("`remember`: memory namespace '{ns}' is a discarded branch");
+        }
         let stmt = new_id("m");
         let parts = if auto {
             memory_claims::split_claims(text)
@@ -2295,7 +2372,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             let local = gate.seq();
             let seen = self.ns_head(&ns)?;
             let at = opts.at.unwrap_or_else(now_micros);
-            let plan = self.plan_remember(&cfg, &ns, &claims, at, &opts, auto, floor)?;
+            let plan = self.plan_remember(&cfg, &sc, &claims, at, &opts, auto, floor)?;
             let commit = match held {
                 Some(c) => c,
                 None => gate.commit(),
@@ -2435,6 +2512,17 @@ impl<'s, S: Storage<'s>> Db<S> {
 
             let mut script = String::new();
             let mut p: Vec<(&str, DataValue)> = vec![("ns", s(&ns))];
+            // a branch: inherited memories this statement ends or repeats
+            // are copied up first (docs/specs/memory-branches.md)
+            if !sc.is_plain() {
+                let touched: Vec<String> = old_all
+                    .iter()
+                    .cloned()
+                    .chain(plans.iter().filter_map(|cp| cp.duplicate.map(|(i, _)| cp.cands[i].id.clone())))
+                    .unique()
+                    .collect();
+                self.copy_up_blocks(&cfg, &sc, &touched, &mut script, &mut p)?;
+            }
             if !mems.is_empty() {
                 script.push_str(&format!(
                     "{{?[ns, id, vt, text, kind, source, created, importance] <- $mems \
@@ -2618,28 +2706,42 @@ impl<'s, S: Storage<'s>> Db<S> {
     }
 
     /// The events of the statements `ids` belong to (a claim's statement is
-    /// the id before its `.n`), by memory id.
-    fn statement_events(&'s self, ns: &str, ids: &[String]) -> Result<BTreeMap<String, Vec<MemEvent>>> {
+    /// the id before its `.n`), by memory id. On a branch each memory's
+    /// events come from its owner.
+    fn statement_events(&'s self, sc: &Scope, ids: &[String]) -> Result<BTreeMap<String, Vec<MemEvent>>> {
         let stmts: BTreeSet<&str> = ids.iter().map(|i| memory_recall::statement_of(i)).collect();
         if stmts.is_empty() {
             return Ok(BTreeMap::new());
         }
         let exact: Vec<String> = stmts.iter().map(|x| x.to_string()).collect();
         let prefixes: Vec<String> = stmts.iter().map(|x| format!("{x}.")).collect();
+        let mut raw: Vec<(usize, String, DataValue)> = vec![];
+        for (l, ns) in sc.names().iter().enumerate() {
+            for r in self
+                .mem_q(
+                    &format!(
+                        "?[id, ev] := id in $exact, *{MEM_EVENT}{{ns: $ns, id, n, start, end, granularity, kind, expr}}, \
+                           ev = [n, start, end, granularity, kind, expr]\n\
+                         ?[id, ev] := p in $ps, *{MEM_EVENT}{{ns: $ns, id, n, start, end, granularity, kind, expr}}, \
+                           id > p, id < concat(p, '~'), starts_with(id, p), ev = [n, start, end, granularity, kind, expr]"
+                    ),
+                    vec![("ns", s(ns)), ("exact", str_list(&exact)), ("ps", str_list(&prefixes))],
+                )?
+                .rows
+            {
+                if let Some(id) = cell_str(&r[0]) {
+                    raw.push((l, id, r[1].clone()));
+                }
+            }
+        }
+        if !sc.is_plain() {
+            let all: Vec<String> = raw.iter().map(|x| x.1.clone()).unique().collect();
+            let own = self.mem_owners(sc, &all)?;
+            raw.retain(|(l, id, _)| own.get(id) == Some(l));
+        }
         let mut out: BTreeMap<String, Vec<(i64, MemEvent)>> = BTreeMap::new();
-        for r in self
-            .mem_q(
-                &format!(
-                    "?[id, ev] := id in $exact, *{MEM_EVENT}{{ns: $ns, id, n, start, end, granularity, kind, expr}}, \
-                       ev = [n, start, end, granularity, kind, expr]\n\
-                     ?[id, ev] := p in $ps, *{MEM_EVENT}{{ns: $ns, id, n, start, end, granularity, kind, expr}}, \
-                       id > p, id < concat(p, '~'), starts_with(id, p), ev = [n, start, end, granularity, kind, expr]"
-                ),
-                vec![("ns", s(ns)), ("exact", str_list(&exact)), ("ps", str_list(&prefixes))],
-            )?
-            .rows
-        {
-            if let (Some(id), Some(e)) = (cell_str(&r[0]), event_of(&r[1])) {
+        for (_, id, ev) in raw {
+            if let Some(e) = event_of(&ev) {
                 out.entry(id).or_default().push(e);
             }
         }
@@ -2664,6 +2766,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             None => return Ok(Default::default()),
         };
         let ns = ns_of(&opts.ns);
+        let sc = self.mem_scope(&ns)?;
         let w = opts.vector_weight.unwrap_or(DEFAULT_VECTOR_WEIGHT);
         if !(0.0..=1.0).contains(&w) {
             bail!("`recall` option vector_weight must be in [0, 1], got {w}");
@@ -2709,7 +2812,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let max_src = opts.max_per_source.unwrap_or(DEFAULT_MAX_PER_SOURCE);
         let eids = match &opts.entity {
             Some(e) => {
-                let eids = self.entity_view(&ns)?.cluster_of_name(e);
+                let eids = self.entity_view(&sc)?.cluster_of_name(e);
                 if eids.is_empty() {
                     return Ok(Default::default());
                 }
@@ -2754,7 +2857,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let mut rows = self.mem_search(
             &cfg,
-            &ns,
+            &sc,
             query,
             qvec,
             fetch,
@@ -2769,7 +2872,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         // entity-graph expansion: other memories about the top hits' entities
         let mut expanded: BTreeSet<String> = BTreeSet::new();
         if opts.expand.unwrap_or(false) && eids.is_none() && !rows.is_empty() {
-            let (boost, new_rows) = self.expand_rows(&ns, &rows, we, opts.as_of, opts.kind.as_deref())?;
+            let (boost, new_rows) = self.expand_rows(&sc, &rows, we, opts.as_of, opts.kind.as_deref())?;
             // a related memory already in the pool takes the expansion
             // score when it is higher than its own relevance
             for r in rows.iter_mut() {
@@ -2790,7 +2893,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
         let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
-        let iv = intervals(&self.mem_history(&ns, &ids)?, read_at);
+        let iv = intervals(&self.mem_history(&sc, &ids)?, read_at);
         let mut pending: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut access: BTreeMap<String, (i64, i64)> = BTreeMap::new();
         let mut life: BTreeMap<String, (Option<i64>, Option<i64>)> = BTreeMap::new();
@@ -2799,21 +2902,39 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut origin: BTreeMap<String, (i64, String)> = BTreeMap::new();
         if !ids.is_empty() {
             // pending supersedes, access counts, the tier, the role and the
-            // origin statement, in one read
-            for r in self
-                .mem_q(
-                    &format!(
-                        "?[tag, id, a, b] := *{MEM_DECISION}{{ns: $ns, new, cand: id, template: 'supersedes', status: 'pending'}}, \
-                           id in $ids, *{MEM}{{ns: $ns, id: new @ $at}}, tag = 'p', a = new, b = null\n\
-                         ?[tag, id, a, b] := id in $ids, *{MEM_ACCESS}{{ns: $ns, id, n: a, last: b}}, tag = 'a'\n\
-                         ?[tag, id, a, b] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires: a, archived: b}}, tag = 'l'\n\
-                         ?[tag, id, a, b] := id in $ids, *{MEM_ROLE}{{ns: $ns, id, role: a}}, tag = 'r', b = null\n\
-                         ?[tag, id, a, b] := id in $ids, *{MEM_SOURCE}{{ns: $ns, id, at: b, text: a}}, tag = 's'"
-                    ),
-                    vec![("ns", s(&ns)), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
-                )?
-                .rows
-            {
+            // origin statement, in one read (on a branch: per owner, plus
+            // the pending decisions of every level)
+            let pend = format!(
+                "?[tag, id, a, b] := *{MEM_DECISION}{{ns: $ns, new, cand: id, template: 'supersedes', status: 'pending'}}, \
+                   id in $ids, *{MEM}{{ns: $ns, id: new @ $at}}, tag = 'p', a = new, b = null\n"
+            );
+            let meta = format!(
+                "?[tag, id, a, b] := id in $ids, *{MEM_ACCESS}{{ns: $ns, id, n: a, last: b}}, tag = 'a'\n\
+                 ?[tag, id, a, b] := id in $ids, *{MEM_LIFE}{{ns: $ns, id, expires: a, archived: b}}, tag = 'l'\n\
+                 ?[tag, id, a, b] := id in $ids, *{MEM_ROLE}{{ns: $ns, id, role: a}}, tag = 'r', b = null\n\
+                 ?[tag, id, a, b] := id in $ids, *{MEM_SOURCE}{{ns: $ns, id, at: b, text: a}}, tag = 's'"
+            );
+            let mut meta_rows = vec![];
+            if sc.is_plain() {
+                meta_rows = self
+                    .mem_q(
+                        &format!("{pend}{meta}"),
+                        vec![("ns", s(&ns)), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
+                    )?
+                    .rows;
+            } else {
+                for (l, group) in self.by_owner(&sc, &ids)? {
+                    meta_rows.extend(
+                        self.mem_q(&meta, vec![("ns", s(&sc.levels[l].ns)), ("ids", str_list(&group))])?.rows,
+                    );
+                }
+                for (cand, news) in self.pending_of(&sc, &ids, read_at)? {
+                    for n in news {
+                        meta_rows.push(vec![s("p"), s(&cand), s(&n), DataValue::Null]);
+                    }
+                }
+            }
+            for r in meta_rows {
                 let Some(id) = cell_str(&r[1]) else { continue };
                 match r[0].get_str() {
                     Some("p") => pending.entry(id).or_default().extend(cell_str(&r[2])),
@@ -2840,7 +2961,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
         // event times: each memory's own, else its statement's
-        let sev = self.statement_events(&ns, &ids)?;
+        let sev = self.statement_events(&sc, &ids)?;
         let mut by_stmt: BTreeMap<&str, Vec<&MemEvent>> = BTreeMap::new();
         for (id, v) in &sev {
             by_stmt.entry(memory_recall::statement_of(id)).or_default().extend(v.iter());
@@ -2941,14 +3062,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         if diversity && hits.len() > 1 {
             let vecs: BTreeMap<String, Vec<f32>> = if mmr > 0.0 && cfg.dim.is_some() {
                 let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
-                self.mem_q(
-                    &format!("?[id, vec] := id in $ids, *{MEM_VEC}{{ns: $ns, id, vec}}"),
-                    vec![("ns", s(&ns)), ("ids", str_list(&ids))],
-                )?
-                .rows
-                .into_iter()
-                .filter_map(|r| Some((cell_str(&r[0])?, vec_of(&r[1])?)))
-                .collect()
+                self.vecs_of(&sc, &ids)?
             } else {
                 BTreeMap::new()
             };
@@ -2987,7 +3101,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// `EXPAND_MAX_NEW`).
     fn expand_rows(
         &'s self,
-        ns: &str,
+        scope: &Scope,
         rows: &[Vec<DataValue>],
         weight: f64,
         as_of: Option<i64>,
@@ -2999,24 +3113,19 @@ impl<'s, S: Storage<'s>> Db<S> {
             .filter_map(|r| Some((cell_str(&r[0])?, r[1].get_float().unwrap_or(0.0))))
             .collect();
         let seed_ids: Vec<String> = seeds.iter().map(|x| x.0.clone()).collect();
-        let ment = self.mem_q(
-            &format!("?[id, eid] := id in $ids, *{MEM_MENTION}{{ns: $ns, id, eid}}"),
-            vec![("ns", s(ns)), ("ids", str_list(&seed_ids))],
-        )?;
-        if ment.rows.is_empty() {
+        let ment = self.mentions_of(scope, &seed_ids)?;
+        if ment.is_empty() {
             return Ok(Default::default());
         }
-        let view = self.entity_view(ns)?;
+        let view = self.entity_view(scope)?;
         // canonical entity -> best seed relevance
         let mut canon: BTreeMap<String, f64> = BTreeMap::new();
-        for r in &ment.rows {
-            if let (Some(id), Some(e)) = (cell_str(&r[0]), cell_str(&r[1])) {
-                let rel = seeds.iter().find(|x| x.0 == id).map_or(0.0, |x| x.1);
-                let c = view.canonical(&e);
-                let v = canon.entry(c).or_insert(rel);
-                if rel > *v {
-                    *v = rel;
-                }
+        for (id, e) in &ment {
+            let rel = seeds.iter().find(|x| x.0 == *id).map_or(0.0, |x| x.1);
+            let c = view.canonical(e);
+            let v = canon.entry(c).or_insert(rel);
+            if rel > *v {
+                *v = rel;
             }
         }
         let cluster: BTreeMap<String, String> = view
@@ -3027,17 +3136,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect();
         let eids: Vec<String> = cluster.keys().cloned().collect();
         let mut by_canon: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for r in self
-            .mem_q(
-                &format!("?[eid, id] := eid in $eids, *{MEM_MENTION}{{ns: $ns, eid, id}}"),
-                vec![("ns", s(ns)), ("eids", str_list(&eids))],
-            )?
-            .rows
-        {
-            if let (Some(e), Some(id)) = (cell_str(&r[0]), cell_str(&r[1])) {
-                if let Some(c) = cluster.get(&e) {
-                    by_canon.entry(c.clone()).or_default().insert(id);
-                }
+        for (e, id) in self.mentioning(scope, &eids)? {
+            if let Some(c) = cluster.get(&e) {
+                by_canon.entry(c.clone()).or_default().insert(id);
             }
         }
         let have: BTreeSet<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
@@ -3064,39 +3165,46 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut cand: Vec<(String, f64)> = cand.into_iter().collect();
         cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
         cand.truncate(EXPAND_MAX_NEW);
-        let mut p = vec![
-            ("ns", s(ns)),
-            (
-                "cands",
-                DataValue::List(
-                    cand.iter()
-                        .map(|(id, sc)| DataValue::List(vec![s(id), DataValue::from(*sc)]))
-                        .collect(),
+        // the candidates valid at the read time, each from its owner
+        let ids: Vec<String> = cand.iter().map(|x| x.0.clone()).collect();
+        let mut out = vec![];
+        for (l, group) in self.by_owner(scope, &ids)? {
+            let mut p = vec![
+                ("ns", s(&scope.levels[l].ns)),
+                (
+                    "cands",
+                    DataValue::List(
+                        cand.iter()
+                            .filter(|(id, _)| group.contains(id))
+                            .map(|(id, sc)| DataValue::List(vec![s(id), DataValue::from(*sc)]))
+                            .collect(),
+                    ),
                 ),
-            ),
-        ];
-        let at = match as_of {
-            Some(t) => {
-                p.push(("as_of", DataValue::from(t)));
-                "$as_of"
+            ];
+            let at = match scope.level_at(l, as_of) {
+                Some(t) => {
+                    p.push(("as_of", DataValue::from(t)));
+                    "$as_of"
+                }
+                None => "'NOW'",
+            };
+            let mut filters = String::new();
+            if let Some(kd) = kind {
+                filters.push_str(", kind == $kind");
+                p.push(("kind", s(kd)));
             }
-            None => "'NOW'",
-        };
-        let mut filters = String::new();
-        if let Some(kd) = kind {
-            filters.push_str(", kind == $kind");
-            p.push(("kind", s(kd)));
+            out.extend(
+                self.mem_q(
+                    &format!(
+                        "c[id, score] <- $cands\n\
+                         ?[id, score, text, kind, source, created, importance] := c[id, score], \
+                           *{MEM}{{ns: $ns, id, text, kind, source, created, importance @ {at}}}{filters}"
+                    ),
+                    p,
+                )?
+                .rows,
+            );
         }
-        let mut out = self
-            .mem_q(
-                &format!(
-                    "c[id, score] <- $cands\n\
-                     ?[id, score, text, kind, source, created, importance] := c[id, score], \
-                       *{MEM}{{ns: $ns, id, text, kind, source, created, importance @ {at}}}{filters}"
-                ),
-                p,
-            )?
-            .rows;
         out.sort_by(|a, b| {
             b[1].get_float()
                 .partial_cmp(&a[1].get_float())
@@ -3116,6 +3224,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let budget = opts.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
         let show_source = opts.show_source;
         let ns = ns_of(&opts.ns);
+        let sc = self.mem_scope(&ns)?;
         let read_at = opts.as_of.unwrap_or_else(now_micros);
         let (hits, sev) = self.recall_hits(query, opts)?;
         if hits.is_empty() {
@@ -3145,21 +3254,16 @@ impl<'s, S: Storage<'s>> Db<S> {
         let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
         // entities: canonical names
         let mut ents: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let ment = self.mem_q(
-            &format!("?[id, eid] := id in $ids, *{MEM_MENTION}{{ns: $ns, id, eid}}"),
-            vec![("ns", s(&ns)), ("ids", str_list(&ids))],
-        )?;
-        if !ment.rows.is_empty() {
-            let view = self.entity_view(&ns)?;
-            for r in ment.rows {
-                if let (Some(id), Some(e)) = (cell_str(&r[0]), cell_str(&r[1])) {
-                    let c = view.canonical(&e);
-                    let name = view.rows.get(&c).or_else(|| view.rows.get(&e)).map(|x| x.0.clone());
-                    if let Some(n) = name {
-                        let v = ents.entry(id).or_default();
-                        if !v.contains(&n) {
-                            v.push(n);
-                        }
+        let ment = self.mentions_of(&sc, &ids)?;
+        if !ment.is_empty() {
+            let view = self.entity_view(&sc)?;
+            for (id, e) in ment {
+                let c = view.canonical(&e);
+                let name = view.rows.get(&c).or_else(|| view.rows.get(&e)).map(|x| x.0.clone());
+                if let Some(n) = name {
+                    let v = ents.entry(id).or_default();
+                    if !v.contains(&n) {
+                        v.push(n);
                     }
                 }
             }
@@ -3175,20 +3279,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                 break;
             }
             let srcs: Vec<String> = frontier.iter().map(|x| x.1.clone()).collect();
-            let links = self.mem_q(
-                &format!("?[src, dst] := src in $srcs, *{MEM_LINK}{{ns: $ns, src, rel: 'supersedes', dst}}"),
-                vec![("ns", s(&ns)), ("srcs", str_list(&srcs))],
-            )?;
-            let pairs: Vec<(String, String)> = links
-                .rows
-                .iter()
-                .filter_map(|r| Some((cell_str(&r[0])?, cell_str(&r[1])?)))
-                .collect();
+            let pairs: Vec<(String, String)> = self.supersede_links(&sc, &srcs)?;
             if pairs.is_empty() {
                 break;
             }
             let olds: Vec<String> = pairs.iter().map(|x| x.1.clone()).collect::<BTreeSet<_>>().into_iter().collect();
-            let versions = self.mem_versions(&ns, &olds, read_at)?;
+            let versions = self.mem_versions(&sc, &olds, read_at)?;
             let mut next = vec![];
             for (root, src) in &frontier {
                 for (a, b) in &pairs {
@@ -3216,7 +3312,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let newer_v = if newer.is_empty() {
             BTreeMap::new()
         } else {
-            self.mem_versions(&ns, &newer, read_at)?
+            self.mem_versions(&sc, &newer, read_at)?
         };
         let items: Vec<memory_recall::CtxItem> = hits
             .into_iter()
@@ -3244,12 +3340,27 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     /// The last version of each memory that started at or before `t`: its
     /// text, valid-from and the end of that version (a retraction), if any.
-    fn mem_versions(&'s self, ns: &str, ids: &[String], t: i64) -> Result<BTreeMap<String, memory_recall::Previous>> {
+    /// On a branch each memory's versions come from its owner, an
+    /// ancestor's up to its cut.
+    fn mem_versions(&'s self, sc: &Scope, ids: &[String], t: i64) -> Result<BTreeMap<String, memory_recall::Previous>> {
+        if !sc.is_plain() {
+            let mut out = BTreeMap::new();
+            for (l, group) in self.by_owner(sc, ids)? {
+                let cut = sc.levels[l].cut.unwrap_or(i64::MAX);
+                for (id, mut v) in self.mem_versions(&sc.level(l), &group, t.min(cut))? {
+                    if v.to.is_some_and(|x| x > cut) {
+                        v.to = None;
+                    }
+                    out.insert(id, v);
+                }
+            }
+            return Ok(out);
+        }
         let mut by: BTreeMap<String, Vec<(i64, bool, String)>> = BTreeMap::new();
         for r in self
             .mem_q(
                 &format!("?[id, vt, text] := id in $ids, *{MEM}{{ns: $ns, id, vt, text}}"),
-                vec![("ns", s(ns)), ("ids", str_list(ids))],
+                vec![("ns", s(sc.ns())), ("ids", str_list(ids))],
             )?
             .rows
         {
@@ -3312,13 +3423,18 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// under the namespace version, like `forget`, since the archive and
     /// expiry change which memories `remember` may treat as duplicates.
     pub fn memory_set(&'s self, opts: SetOpts) -> Result<JsonValue> {
-        if self.mem_config()?.is_none() {
-            bail!("`memory set`: there is no memory store yet");
-        }
+        let cfg = match self.mem_config()? {
+            Some(c) => c,
+            None => bail!("`memory set`: there is no memory store yet"),
+        };
         let ns = ns_of(&opts.ns);
+        let sc = self.mem_scope(&ns)?;
+        if sc.discarded {
+            bail!("`memory set`: memory namespace '{ns}' is a discarded branch");
+        }
         let mut ids = opts.ids.clone();
         ids.extend(opts.id.clone());
-        let mut ids = self.with_claims(&ns, ids)?;
+        let mut ids = self.with_claims(&sc, ids)?;
         ids.sort();
         ids.dedup();
         if ids.is_empty() {
@@ -3336,7 +3452,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let _commit = gate.commit();
         let now = now_micros();
         // current memories only, with the valid time of their current row
-        let hist = self.mem_history(&ns, &ids)?;
+        let hist = self.mem_history(&sc, &ids)?;
         let iv = intervals(&hist, now);
         let found: Vec<String> = iv.keys().cloned().collect();
         if found.is_empty() {
@@ -3344,6 +3460,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let mut script = String::new();
         let mut p = vec![("ns", s(&ns)), ("ids", str_list(&found))];
+        // a branch changes its own copy of an inherited memory
+        let mut changes = String::new();
+        self.copy_up_blocks(&cfg, &sc, &found, &mut changes, &mut p)?;
         if let Some(x) = opts.importance {
             // the latest assertion at or before now holds the current values
             let rows: Vec<DataValue> = found
@@ -3367,7 +3486,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             p.push(("imp", DataValue::from(x)));
         }
         if opts.ttl.is_some() || opts.expires.is_some() || opts.no_ttl || opts.archived.is_some() {
-            let old = self.life_of(&ns, &found)?;
+            let old = self.life_of(&sc, &found)?;
             let rows: Vec<DataValue> = found
                 .iter()
                 .map(|id| {
@@ -3395,6 +3514,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         if script.is_empty() {
             bail!("`memory set` needs importance, ttl, expires, no_ttl or archived");
         }
+        script.insert_str(0, &changes);
         script.push_str(&bump_ns_head());
         self.mem_q(&script, p)?;
         Ok(serde_json::json!({"ns": ns, "ids": found}))
@@ -3420,13 +3540,17 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         };
         let ns = ns_of(&opts.ns);
+        let sc = self.mem_scope(&ns)?;
+        if sc.discarded {
+            bail!("`forget`: memory namespace '{ns}' is a discarded branch");
+        }
         // a forget changes what is current: commit under the namespace gate
         // so a concurrent `remember` plans against the result
         let gate = ns_gate(&ns);
         let _commit = gate.commit();
         let mut ids: Vec<String> = opts.ids.clone();
         ids.extend(opts.id.clone());
-        let mut ids = self.with_claims(&ns, ids)?;
+        let mut ids = self.with_claims(&sc, ids)?;
         let by_filter = opts.kind.is_some() || opts.entity.is_some() || opts.expired;
         if ids.is_empty() && !by_filter && !opts.all {
             bail!("`forget` needs an id, ids, a kind, entity or expired filter, or all: true");
@@ -3435,25 +3559,30 @@ impl<'s, S: Storage<'s>> Db<S> {
             bail!("`forget` takes ids or a filter, not both");
         }
         if ids.is_empty() {
-            // filters select current memories
-            let mut body = format!("*{MEM}{{ns: $ns, id, kind @ 'NOW'}}");
+            // filters select current memories (on a branch: of the view,
+            // each filter row read from the memory's owner)
             let mut p = vec![("ns", s(&ns))];
+            let (pre, mut body, owner) = if sc.is_plain() {
+                (String::new(), format!("*{MEM}{{ns: $ns, id, kind @ 'NOW'}}"), "$ns")
+            } else {
+                (sc.view_rules("vis", "", &["kind"], None, &mut p), "vis[id, ons, kind]".to_string(), "ons")
+            };
             if let Some(k) = &opts.kind {
                 body.push_str(", kind == $kind");
                 p.push(("kind", s(k)));
             }
             if let Some(e) = &opts.entity {
-                body.push_str(&format!(", *{MEM_MENTION}{{ns: $ns, id, eid}}, is_in(eid, $eids)"));
-                p.push(("eids", str_list(&self.entity_view(&ns)?.cluster_of_name(e))));
+                body.push_str(&format!(", *{MEM_MENTION}{{ns: {owner}, id, eid}}, is_in(eid, $eids)"));
+                p.push(("eids", str_list(&self.entity_view(&sc)?.cluster_of_name(e))));
             }
             if opts.expired {
                 body.push_str(&format!(
-                    ", *{MEM_LIFE}{{ns: $ns, id, expires: e, archived: a}}, !is_null(e), e <= $now, is_null(a)"
+                    ", *{MEM_LIFE}{{ns: {owner}, id, expires: e, archived: a}}, !is_null(e), e <= $now, is_null(a)"
                 ));
                 p.push(("now", DataValue::from(opts.at.unwrap_or_else(now_micros))));
             }
             ids = self
-                .mem_q(&format!("?[id] := {body}"), p)?
+                .mem_q(&format!("{pre}?[id] := {body}"), p)?
                 .rows
                 .into_iter()
                 .filter_map(|r| cell_str(&r[0]))
@@ -3468,19 +3597,11 @@ impl<'s, S: Storage<'s>> Db<S> {
         if mode == "archive" {
             // the archive tier: still valid, hidden from recall by default
             let at = opts.at.unwrap_or_else(now_micros);
-            let cur: Vec<String> = self
-                .mem_q(
-                    &format!("?[id] := *{MEM}{{ns: $ns, id @ 'NOW'}}, id in $ids"),
-                    vec![("ns", s(&ns)), ("ids", str_list(&ids))],
-                )?
-                .rows
-                .into_iter()
-                .filter_map(|r| cell_str(&r[0]))
-                .collect();
+            let cur = self.mem_valid(&sc, &ids, None)?;
             if cur.is_empty() {
                 return Ok(ForgetResult { mode, ids: cur });
             }
-            let old = self.life_of(&ns, &cur)?;
+            let old = self.life_of(&sc, &cur)?;
             let rows: Vec<DataValue> = cur
                 .iter()
                 .map(|id| {
@@ -3493,39 +3614,37 @@ impl<'s, S: Storage<'s>> Db<S> {
                     ])
                 })
                 .collect();
-            let mut script = format!(
+            let mut script = String::new();
+            let mut p = vec![("ns", s(&ns)), ("life", DataValue::List(rows))];
+            self.copy_up_blocks(&cfg, &sc, &cur, &mut script, &mut p)?;
+            script.push_str(&format!(
                 "{{?[ns, id, expires, archived] <- $life :put {MEM_LIFE} {{ns, id => expires, archived}}}}"
-            );
+            ));
             script.push_str(&bump_ns_head());
-            self.mem_q(&script, vec![("ns", s(&ns)), ("life", DataValue::List(rows))])?;
+            self.mem_q(&script, p)?;
             return Ok(ForgetResult { mode, ids: cur });
         }
         if mode == "retract" {
             let at = opts.at.unwrap_or_else(now_micros);
-            let cur: Vec<String> = self
-                .mem_q(
-                    &format!("?[id] := *{MEM}{{ns: $ns, id @ 'NOW'}}, id in $ids"),
-                    vec![("ns", s(&ns)), ("ids", str_list(&ids))],
-                )?
-                .rows
-                .into_iter()
-                .filter_map(|r| cell_str(&r[0]))
-                .collect();
+            let cur = self.mem_valid(&sc, &ids, None)?;
             if cur.is_empty() {
                 return Ok(ForgetResult { mode, ids: cur });
             }
-            let mut script = format!(
+            let mut script = String::new();
+            let mut p = vec![("ns", s(&ns)), ("ids", str_list(&cur)), ("at", DataValue::from(at))];
+            // a branch retracts its own copy of an inherited memory
+            self.copy_up_blocks(&cfg, &sc, &cur, &mut script, &mut p)?;
+            script.push_str(&format!(
                 "{{?[ns, id, vt, text, kind, source, created, importance] := *{MEM}{{ns, id, text, kind, source, created, importance @ 'NOW'}}, \
                    ns = $ns, id in $ids, vt = [$at, false] \
                   :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
-            );
+            ));
             if has_vec {
                 script.push_str(&format!(
                     "{{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $ids, current = false \
                       :update {MEM_VEC} {{ns, id => current}}}}"
                 ));
             }
-            let mut p = vec![("ns", s(&ns)), ("ids", str_list(&cur)), ("at", DataValue::from(at))];
             let job = Job { op: "retract", mem_ids: &cur, old: &[], text: None, at, entities: &[] };
             if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
                 script.push_str(&frag);
@@ -3536,23 +3655,48 @@ impl<'s, S: Storage<'s>> Db<S> {
             return Ok(ForgetResult { mode, ids: cur });
         }
 
-        // erase: only keys that exist at some time
+        // erase: every copy in the family of branches (spec "Erase"); a
+        // plain namespace with no branches is its own family
+        let family = if sc.is_plain() && !self.has_branches(&ns)? { vec![ns.clone()] } else { self.mem_family(&sc)? };
+        let mut erased: BTreeSet<String> = BTreeSet::new();
+        for f in &family {
+            // the other namespaces' gates too (this one's is held)
+            let other = (*f != ns).then(|| ns_gate(f));
+            let _held = other.as_ref().map(|g| g.commit());
+            erased.extend(self.erase_in(&cfg, f, &ids)?);
+        }
+        Ok(ForgetResult { mode, ids: erased.into_iter().collect() })
+    }
+
+    /// Whether `ns` has branches of its own (an erase must then reach them).
+    fn has_branches(&'s self, ns: &str) -> Result<bool> {
+        Ok(!self
+            .mem_q(&format!("?[c] := *{MEM_BRANCH}{{ns: c, parent: $ns}} :limit 1"), vec![("ns", s(ns))])?
+            .rows
+            .is_empty())
+    }
+
+    /// Erase `ids` from one namespace (the `forget` erase steps); returns the
+    /// ids that existed there.
+    fn erase_in(&'s self, cfg: &MemConfig, ns: &str, ids: &[String]) -> Result<Vec<String>> {
+        let has_vec = cfg.dim.is_some();
+        // only keys that exist at some time
         let exist: Vec<String> = self
             .mem_q(
                 &format!("?[id] := *{MEM}{{ns: $ns, id}}, id in $ids"),
-                vec![("ns", s(&ns)), ("ids", str_list(&ids))],
+                vec![("ns", s(ns)), ("ids", str_list(ids))],
             )?
             .rows
             .into_iter()
             .filter_map(|r| cell_str(&r[0]))
             .collect();
         if exist.is_empty() {
-            return Ok(ForgetResult { mode, ids: exist });
+            return Ok(exist);
         }
         let eids: Vec<String> = self
             .mem_q(
                 &format!("?[eid] := *{MEM_MENTION}{{ns: $ns, id, eid}}, id in $ids"),
-                vec![("ns", s(&ns)), ("ids", str_list(&exist))],
+                vec![("ns", s(ns)), ("ids", str_list(&exist))],
             )?
             .rows
             .into_iter()
@@ -3561,7 +3705,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let keys = DataValue::List(
             exist
                 .iter()
-                .map(|id| DataValue::List(vec![s(&ns), s(id)]))
+                .map(|id| DataValue::List(vec![s(ns), s(id)]))
                 .collect(),
         );
         let mut script = String::new();
@@ -3585,6 +3729,7 @@ impl<'s, S: Storage<'s>> Db<S> {
              {{?[ns, id] := *{MEM_LIFE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_LIFE} {{ns, id}}}}\
              {{?[ns, id] := *{MEM_ROLE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_ROLE} {{ns, id}}}}\
              {{?[ns, id, n] := *{MEM_EVENT}{{ns, id, n}}, ns = $ns, id in $ids :rm {MEM_EVENT} {{ns, id, n}}}}\
+             {{?[ns, id] := *{MEM_COPIED}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_COPIED} {{ns, id}}}}\
              {{gone[x] := x in $eids, not *{MEM_ENTITY}{{ns: $ns, eid: x}}\n\
                ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[from]\n\
                ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[into] \
@@ -3594,9 +3739,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                ?[relation, a, b] := *{ENTITY_LINKS}{{relation, a, b}}, relation = $erel, gone[b] \
                :rm {ENTITY_LINKS} {{relation, a, b}}}}"
         ));
-        let mut p = vec![("ns", s(&ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))];
+        let mut p = vec![("ns", s(ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))];
         let job = Job { op: "erase", mem_ids: &exist, old: &[], text: None, at: now_micros(), entities: &[] };
-        if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
+        if let Some((frag, ps)) = engram_hook::enqueue(cfg, job) {
             script.push_str(&frag);
             p.extend(ps);
         }
@@ -3611,8 +3756,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         // ::erase deletes every row of each key with its FTS/HNSW entries and
         // writes the salted audit marker (kleos_evict_audit)
         self.mem_q(&format!("::erase {MEM} $keys"), vec![("keys", keys)])?;
-        self.mem_access.forget(&ns, &exist);
-        Ok(ForgetResult { mode, ids: exist })
+        self.mem_access.forget(ns, &exist);
+        Ok(exist)
     }
 
     /// A minimal, model-free look at the namespace: pending tentative
@@ -3628,23 +3773,39 @@ impl<'s, S: Storage<'s>> Db<S> {
         if self.mem_config()?.is_none() {
             return Ok(res);
         }
+        let sc = self.mem_scope(&ns)?;
         let limit = opts.limit.unwrap_or(50);
-        let pend = self.mem_q(
-            &format!(
-                "?[at, new, cand, template, label, p, band, decided_by] := \
-                   *{MEM_DECISION}{{ns: $ns, new, cand, template, label, p, band, decided_by, status: 'pending', at}}\n\
-                 :order -at\n:limit {limit}"
-            ),
-            vec![("ns", s(&ns))],
-        )?;
+        // pending decisions: every level's (an ancestor's up to its cut)
+        let mut pend_rows = vec![];
+        for l in &sc.levels {
+            let (cut, c) = match l.cut {
+                Some(c) => (", at <= $c", DataValue::from(c)),
+                None => ("", DataValue::Null),
+            };
+            pend_rows.extend(
+                self.mem_q(
+                    &format!(
+                        "?[at, new, cand, template, label, p, band, decided_by] := \
+                           *{MEM_DECISION}{{ns: $ns, new, cand, template, label, p, band, decided_by, status: 'pending', at}}{cut}\n\
+                         :order -at\n:limit {limit}"
+                    ),
+                    vec![("ns", s(&l.ns)), ("c", c)],
+                )?
+                .rows,
+            );
+        }
+        if !sc.is_plain() {
+            pend_rows.sort_by(|a, b| b[0].get_int().cmp(&a[0].get_int()));
+            pend_rows.truncate(limit);
+        }
         let mut need: Vec<String> = vec![];
-        for r in &pend.rows {
+        for r in &pend_rows {
             need.extend(cell_str(&r[1]));
             need.extend(cell_str(&r[2]));
         }
         let texts: BTreeMap<String, String> = if need.is_empty() {
             BTreeMap::new()
-        } else {
+        } else if sc.is_plain() {
             self.mem_q(
                 &format!("?[id, text] := *{MEM}{{ns: $ns, id, text}}, id in $ids"),
                 vec![("ns", s(&ns)), ("ids", str_list(&need))],
@@ -3653,8 +3814,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             .into_iter()
             .filter_map(|r| Some((cell_str(&r[0])?, cell_str(&r[1])?)))
             .collect()
+        } else {
+            self.mem_texts(&sc, &need)?
         };
-        for r in pend.rows {
+        for r in pend_rows {
             let (Some(new), Some(cand)) = (cell_str(&r[1]), cell_str(&r[2])) else {
                 continue;
             };
@@ -3685,36 +3848,73 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
 
         let since = opts.since.unwrap_or_else(|| now_micros() - 7 * 86_400_000_000);
-        let ch = self.mem_q(
-            &format!("::changes {MEM} {{from: $since, prefix: [$ns]}}"),
-            vec![("ns", s(&ns)), ("since", DataValue::from(since))],
-        )?;
-        let col = |name: &str| ch.headers.iter().position(|h| h == name);
-        if let (Some(ci), Some(ai), Some(ii), Some(ti), Some(ki)) =
-            (col("change"), col("at"), col("id"), col("text"), col("kind"))
-        {
-            let n = ch.rows.len();
-            for r in ch.rows.iter().skip(n.saturating_sub(limit)) {
-                res.changes.push(MemChange {
-                    id: cell_str(&r[ii]).unwrap_or_default(),
-                    change: cell_str(&r[ci]).unwrap_or_default(),
-                    at: r[ai].get_int().unwrap_or(0),
-                    text: cell_str(&r[ti]).unwrap_or_default(),
-                    kind: cell_str(&r[ki]).unwrap_or_default(),
-                });
+        // the change feed: each level's own memories (an ancestor's up to
+        // its cut), in time order
+        let mut changes: Vec<MemChange> = vec![];
+        let owners = if sc.is_plain() {
+            BTreeMap::new()
+        } else {
+            let all: Vec<String> = sc
+                .names()
+                .iter()
+                .flat_map(|n| {
+                    self.mem_q(&format!("?[id] := *{MEM}{{ns: $ns, id}}"), vec![("ns", s(n))])
+                        .map(|r| r.rows.into_iter().filter_map(|x| cell_str(&x[0])).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                })
+                .unique()
+                .collect();
+            self.mem_owners(&sc, &all)?
+        };
+        for (l, lv) in sc.levels.iter().enumerate() {
+            let ch = self.mem_q(
+                &format!("::changes {MEM} {{from: $since, prefix: [$ns]}}"),
+                vec![("ns", s(&lv.ns)), ("since", DataValue::from(since))],
+            )?;
+            let col = |name: &str| ch.headers.iter().position(|h| h == name);
+            if let (Some(ci), Some(ai), Some(ii), Some(ti), Some(ki)) =
+                (col("change"), col("at"), col("id"), col("text"), col("kind"))
+            {
+                for r in &ch.rows {
+                    let c = MemChange {
+                        id: cell_str(&r[ii]).unwrap_or_default(),
+                        change: cell_str(&r[ci]).unwrap_or_default(),
+                        at: r[ai].get_int().unwrap_or(0),
+                        text: cell_str(&r[ti]).unwrap_or_default(),
+                        kind: cell_str(&r[ki]).unwrap_or_default(),
+                    };
+                    if !sc.is_plain() && (lv.cut.is_some_and(|x| c.at > x) || owners.get(&c.id) != Some(&l)) {
+                        continue;
+                    }
+                    changes.push(c);
+                }
             }
         }
+        if !sc.is_plain() {
+            changes.sort_by_key(|c| c.at);
+        }
+        let n = changes.len();
+        res.changes = changes.into_iter().skip(n.saturating_sub(limit)).collect();
 
         // model-free: current memories sharing an entity whose values differ
-        let shared = self.mem_q(
-            &format!(
-                "?[eid, created, id, text] := *{MEM_MENTION}{{ns: $ns, id, eid}}, \
-                   *{MEM}{{ns: $ns, id, text, created @ 'NOW'}}"
-            ),
-            vec![("ns", s(&ns))],
-        )?;
+        let shared = if sc.is_plain() {
+            self.mem_q(
+                &format!(
+                    "?[eid, created, id, text] := *{MEM_MENTION}{{ns: $ns, id, eid}}, \
+                       *{MEM}{{ns: $ns, id, text, created @ 'NOW'}}"
+                ),
+                vec![("ns", s(&ns))],
+            )?
+        } else {
+            let mut p = vec![];
+            let rules = sc.view_rules("vis", "", &["text", "created"], None, &mut p);
+            self.mem_q(
+                &format!("{rules}?[eid, created, id, text] := vis[id, ons, text, created], *{MEM_MENTION}{{ns: ons, id, eid}}"),
+                p,
+            )?
+        };
         // grouped by canonical entity: merged names count as one
-        let view = self.entity_view(&ns)?;
+        let view = self.entity_view(&sc)?;
         let mut groups: BTreeMap<String, Vec<(i64, String, String)>> = BTreeMap::new();
         for r in shared.rows {
             if let (Some(e), Some(id), Some(t)) = (cell_str(&r[0]), cell_str(&r[2]), cell_str(&r[3])) {
@@ -3766,18 +3966,26 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         self.mem_ready(None)?;
         let ns = ns_of(&opts.ns);
-        let known: BTreeSet<String> = self
-            .mem_q(
-                &format!(
-                    "?[x] := x in $xs, *{MEM}{{ns: $ns, id: x}}\n\
-                     ?[x] := x in $xs, *{MEM_ENTITY}{{ns: $ns, eid: x}}"
-                ),
-                vec![("ns", s(&ns)), ("xs", str_list(&[opts.from.clone(), opts.to.clone()]))],
-            )?
-            .rows
-            .into_iter()
-            .filter_map(|r| cell_str(&r[0]))
-            .collect();
+        let sc = self.mem_scope(&ns)?;
+        if sc.discarded {
+            bail!("`link`: memory namespace '{ns}' is a discarded branch");
+        }
+        // on a branch, memories and entities of the whole lineage
+        let mut known: BTreeSet<String> = BTreeSet::new();
+        for n in sc.names() {
+            known.extend(
+                self.mem_q(
+                    &format!(
+                        "?[x] := x in $xs, *{MEM}{{ns: $ns, id: x}}\n\
+                         ?[x] := x in $xs, *{MEM_ENTITY}{{ns: $ns, eid: x}}"
+                    ),
+                    vec![("ns", s(&n)), ("xs", str_list(&[opts.from.clone(), opts.to.clone()]))],
+                )?
+                .rows
+                .into_iter()
+                .filter_map(|r| cell_str(&r[0])),
+            );
+        }
         for x in [&opts.from, &opts.to] {
             if !known.contains(x) {
                 bail!("`link`: '{x}' is neither a memory nor an entity of namespace '{ns}'");
@@ -3805,8 +4013,10 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     /// One entry point for every surface that speaks JSON (HTTP, the
     /// `::memory` op, bindings): `op` is `init`, `remember`, `recall`,
-    /// `forget`, `reflect` or `link`; `args` an object of that op's options,
-    /// plus `text` (remember), `query` (recall) or `id` (forget).
+    /// `forget`, `reflect`, `link`, `set`, `flush`, or a branch op (`fork`,
+    /// `rewind`, `merge`, `diff`, `discard`, `branches`); `args` an object of
+    /// that op's options, plus `text` (remember), `query` (recall) or `id`
+    /// (forget).
     pub fn memory_call(&'s self, op: &str, args: JsonValue) -> Result<JsonValue> {
         let mut args = match args {
             JsonValue::Null => serde_json::Map::new(),
@@ -3848,8 +4058,16 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             "reflect" => serde_json::to_value(self.reflect(from_args(op, args)?)?).into_diagnostic()?,
             "link" => self.link(from_args(op, args)?)?,
+            // branches (docs/specs/memory-branches.md)
+            "fork" => serde_json::to_value(self.memory_fork(from_args(op, args)?)?).into_diagnostic()?,
+            "rewind" => serde_json::to_value(self.memory_rewind(from_args(op, args)?)?).into_diagnostic()?,
+            "merge" => serde_json::to_value(self.memory_merge(from_args(op, args)?)?).into_diagnostic()?,
+            "diff" => serde_json::to_value(self.memory_diff(from_args(op, args)?)?).into_diagnostic()?,
+            "discard" => serde_json::to_value(self.memory_discard(from_args(op, args)?)?).into_diagnostic()?,
+            "branches" => serde_json::to_value(self.memory_branches(from_args(op, args)?)?).into_diagnostic()?,
             other => bail!(
-                "unknown memory op '{other}': expected init, remember, recall, forget, reflect, link, set or flush"
+                "unknown memory op '{other}': expected init, remember, recall, forget, reflect, link, set, flush, \
+                 fork, rewind, merge, diff, discard or branches"
             ),
         };
         Ok(out)

@@ -104,6 +104,12 @@ pub struct EntityConfig {
     /// scope column is then part of the key, before the id column; index
     /// hits outside the scope are dropped.
     pub scope: Option<(String, DataValue)>,
+    /// Memory branches (docs/specs/memory-branches.md): when non-empty, the
+    /// snapshot reads the rows of every `(scope value, cutoff)` instead of
+    /// `scope` alone, a cutoff keeping the rows whose `created` column is at
+    /// or before it. The memory API sets it for a branch's lineage.
+    #[serde(skip)]
+    pub lineage: Vec<(DataValue, Option<i64>)>,
 }
 
 impl EntityConfig {
@@ -130,6 +136,7 @@ impl EntityConfig {
             tau_auto: None,
             exact_auto: false,
             scope: None,
+            lineage: vec![],
         }
     }
 
@@ -929,12 +936,32 @@ impl<'s, S: Storage<'s>> Db<S> {
         let ai = slot(&cfg.aliases, &mut binds, &mut heads);
         let di = slot(&cfg.description, &mut binds, &mut heads);
         let mut scope_param = BTreeMap::new();
-        if let Some((col, v)) = &cfg.scope {
-            binds.push(format!("{col}: $scope"));
-            scope_param.insert("scope".to_string(), v.clone());
+        let mut prelude = String::new();
+        let mut cond = String::new();
+        match &cfg.scope {
+            Some((col, _)) if !cfg.lineage.is_empty() => {
+                // a branch: every level's rows, an ancestor's up to its cut
+                binds.push(format!("{col}: scv, created: scc"));
+                prelude.push_str("lin[scv, cut] <- $lineage\n");
+                cond.push_str(", lin[scv, cut], is_null(cut) || scc <= cut");
+                scope_param.insert(
+                    "lineage".to_string(),
+                    DataValue::List(
+                        cfg.lineage
+                            .iter()
+                            .map(|(v, c)| DataValue::List(vec![v.clone(), c.map_or(DataValue::Null, DataValue::from)]))
+                            .collect(),
+                    ),
+                );
+            }
+            Some((col, v)) => {
+                binds.push(format!("{col}: $scope"));
+                scope_param.insert("scope".to_string(), v.clone());
+            }
+            None => {}
         }
         let script = format!(
-            "?[{}] := *{}{{{}}}",
+            "{prelude}?[{}] := *{}{{{}}}{cond}",
             heads.join(", "),
             cfg.relation,
             binds.join(", ")

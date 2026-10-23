@@ -1388,6 +1388,30 @@ impl DbInstance {
     pub fn memory_flush(&self) -> Result<usize> {
         dispatch_db!(self, db => db.memory_flush())
     }
+    /// Dispatcher method. See [crate::Db::memory_fork].
+    pub fn memory_fork(&self, opts: memory::ForkOpts) -> Result<memory::ForkResult> {
+        dispatch_db!(self, db => db.memory_fork(opts))
+    }
+    /// Dispatcher method. See [crate::Db::memory_rewind].
+    pub fn memory_rewind(&self, opts: memory::RewindOpts) -> Result<memory::RewindResult> {
+        dispatch_db!(self, db => db.memory_rewind(opts))
+    }
+    /// Dispatcher method. See [crate::Db::memory_merge].
+    pub fn memory_merge(&self, opts: memory::MergeOpts) -> Result<memory::MergeResult> {
+        dispatch_db!(self, db => db.memory_merge(opts))
+    }
+    /// Dispatcher method. See [crate::Db::memory_diff].
+    pub fn memory_diff(&self, opts: memory::DiffOpts) -> Result<memory::DiffResult> {
+        dispatch_db!(self, db => db.memory_diff(opts))
+    }
+    /// Dispatcher method. See [crate::Db::memory_discard].
+    pub fn memory_discard(&self, opts: memory::DiscardOpts) -> Result<memory::DiscardResult> {
+        dispatch_db!(self, db => db.memory_discard(opts))
+    }
+    /// Dispatcher method. See [crate::Db::memory_branches].
+    pub fn memory_branches(&self, opts: memory::BranchesOpts) -> Result<Vec<memory::BranchInfo>> {
+        dispatch_db!(self, db => db.memory_branches(opts))
+    }
     /// Dispatcher method. See [crate::Db::memory_call].
     pub fn memory_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
         dispatch_db!(self, db => db.memory_call(op, args))

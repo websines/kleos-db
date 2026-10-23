@@ -1535,6 +1535,51 @@ impl CozoDbPy {
             opts,
         )
     }
+    /// Fork memory namespace `from_ns` into the new branch `to`
+    /// (copy-on-write, O(1); docs/specs/memory-branches.md). Options: `at`
+    /// (fork as of this valid time, µs). Returns `{ns, parent, at, depth,
+    /// lineage}`.
+    #[pyo3(signature = (from_ns, to, **opts))]
+    pub fn memory_fork(&self, py: Python<'_>, from_ns: &str, to: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "fork", vec![("from", json!(from_ns)), ("to", json!(to))], opts)
+    }
+    /// Put namespace `ns` back to its state at valid time `to` (µs).
+    /// Appends only; `memory_rewind(ns, result["undo"])` undoes it. Returns
+    /// `{ns, to, at, retracted, restored, undo}`.
+    #[pyo3(signature = (ns, to, **opts))]
+    pub fn memory_rewind(&self, py: Python<'_>, ns: &str, to: i64, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "rewind", vec![("ns", json!(ns)), ("to", json!(to))], opts)
+    }
+    /// Replay branch `from_ns`'s own statements into `into` (default its
+    /// parent) through `remember`, so the decider settles conflicts.
+    /// Options: `dry_run` (exact preview with a diff), `keep_time`,
+    /// `forgets`. Returns `{from, into, statements, skipped, replayed,
+    /// forgets, forgets_skipped, diff?}`.
+    #[pyo3(signature = (from_ns, into=None, **opts))]
+    pub fn memory_merge(&self, py: Python<'_>, from_ns: &str, into: Option<&str>, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        let mut extra = vec![("from", json!(from_ns))];
+        if let Some(i) = into {
+            extra.push(("into", json!(i)));
+        }
+        self.memory_op(py, "merge", extra, opts)
+    }
+    /// What changes going from namespace `a` to `b`: `{added, removed,
+    /// same, pending, entities}`. Options: `at`.
+    #[pyo3(signature = (a, b, **opts))]
+    pub fn memory_diff(&self, py: Python<'_>, a: &str, b: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "diff", vec![("a", json!(a)), ("b", json!(b))], opts)
+    }
+    /// Drop branch `ns` (its own rows only). Options: `cascade`.
+    #[pyo3(signature = (ns, **opts))]
+    pub fn memory_discard(&self, py: Python<'_>, ns: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "discard", vec![("ns", json!(ns))], opts)
+    }
+    /// List branches. Options: `ns` (that family only), `all` (include
+    /// discarded).
+    #[pyo3(signature = (**opts))]
+    pub fn memory_branches(&self, py: Python<'_>, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "branches", vec![], opts)
+    }
     pub fn multi_transact(&self, write: bool) -> PyResult<CozoDbMulTx> {
         let db = self.db_ref()?;
         Ok(CozoDbMulTx {
