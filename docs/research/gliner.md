@@ -5,6 +5,17 @@
 [`scripts/gliner/`](../../scripts/gliner/). Data, caches and raw results:
 `.bench-data/gliner/`.*
 
+> **Update, 2026-10-24:** the spike below was zero-shot only. A fine-tuned
+> `base-v1` was then tested against a hand-checked gold set. See
+> [Fine-tuned](#fine-tuned-2026-10-24).
+> - **Names:** fine-tuning works. Mentions of people by relation or role
+>   ("my sister", "my boss") go from F 0.14 to 0.86. Names overall go from
+>   F 0.82 to 0.89, at about 25 ms per claim, 3× faster than zero-shot.
+> - **Store or skip:** it only ties kleos's rules (0.725 vs 0.735).
+> - **About the speaker:** it loses to a first-person regex (0.72 vs
+>   0.845).
+> - **Update keys:** the verdict on keys below stands.
+
 ## Verdict
 
 **Do not adopt GLiNER2.5 as a write-time *update* model. Keep it in view
@@ -364,6 +375,185 @@ for comparing two statements. As a pair decider it is near chance, and at
   GLiNER's open label set is what the port buys, and these results did not
   need it.
 
+## Fine-tuned (2026-10-24)
+
+*Branch `wave3/gliner-ft`. Python only, no kleos-core changes. Scripts:
+`scripts/gliner/ft_*.py`, `kleos_rules.py` and `ft_gold/`. Data, checkpoints
+and predictions: `.bench-data/gliner-ft/`.*
+
+### Why it was redone
+
+The spike above had four weaknesses:
+- it used the models zero-shot only, although GLiNER is meant to be
+  fine-tuned;
+- it mostly used `small`;
+- it scored against GLM labels that were only 63% right on entities;
+- it tested names end to end only on first-person knowledge-update
+  questions, which contain almost none.
+
+This round fine-tunes `base-v1` on kleos's own tasks and scores it
+against a gold set checked by hand.
+
+### Tasks
+
+For each claim (kleos's splitter, without the speaker label):
+
+- **Entities.** Four labels:
+  - `person`, `location` and `organization`;
+  - `relative`: a phrase for one specific person by relation or role to
+    the speaker ("my sister", "Mom", "my boss").
+- **`name_of`.** A relative paired with the name the same claim gives
+  ("my sister Anna"). No model is trained for it: a rule joins adjacent
+  spans, or splits a `relative` span that contains a `person`.
+- **`kind`.** One of seven: fact, preference, plan, event, question,
+  request, small talk. *Store* means the first four.
+- **`about_speaker`.** Yes or no.
+
+### Data
+
+**Training and validation sets.**
+- 2,700 claims from LongMemEval_S user turns. They come from the 12,015
+  sessions that are in *no* evaluation haystack.
+  - Excluded: the 7,180 sessions of the 162 questions any bench-l2 model
+    run used, and of all 78 knowledge-update questions.
+  - 900 of the 2,700 were picked to contain a capitalised name.
+- 1,001 claims of GLM-written personal chat and 287 of GLM-written chat
+  between friends. The friend chat adds the reactions and small talk that
+  the LongMemEval turns lack.
+- No LoCoMo text.
+
+**Training labels.**
+- GLM-4.7-Flash without reasoning, 20 claims per call. With reasoning it
+  was about 4× slower on a key with limited concurrency.
+- Cleanup: names (`person`, `location`, `organization`) must contain a
+  capital letter, pronouns are not entities, and every mention must be a
+  whole-word match. This removed 1,017 of 3,242 silver entities, for
+  example "books" labelled as a person, and "I".
+- Result: 3,570 training and 396 validation claims.
+
+**Gold set (200 claims).**
+- 150 random claims: 75 from evaluation-side LongMemEval sessions and 75
+  from LoCoMo.
+- 50 claims picked to contain kinship or role phrases (25 + 25), because
+  the random 150 contain only 3 relatives.
+- First labelled by GLM *with* reasoning, then every claim read and
+  corrected by hand: 59 corrections, in `scripts/gliner/ft_gold/`.
+
+How well the GLM labels agree with the gold, on the random 150:
+
+| Labels | Entities exactly right (per claim) | kind | store | about |
+|---|---|---|---|---|
+| GLM, no reasoning (training labels) | 83% | 69% | 87% | 85% |
+| GLM, with reasoning (gold draft) | 95% | 81% | 90% | 84% |
+
+### Training
+
+- **Model and settings.** `base-v1`, 3 epochs, batch 4 × 2 accumulation.
+  Encoder learning rate 1e-5, head learning rate 5e-5. Linear schedule,
+  FP32 on MPS. gliner2's trainer has no MPS path, so it is patched in.
+- **Frozen token table.** The 128k-row token table is half of `base`'s
+  parameters. Freezing it was needed to fit the run under a 70% MPS
+  watermark (about 8 GB). Without a cap, the allocator cache grew to
+  14 GB and the machine swapped.
+- **Bare label names, no descriptions.** The schema is encoded with every
+  claim. Short labels make it about 3× shorter, which is where the speed
+  gain comes from. The model learns what the labels mean.
+- **Cost.** 95.7 min on the M3 with 16 GB, shared with other agents' Rust
+  builds (load average 10–57, so read this as an upper bound). Process
+  RSS was 2.2 GB, plus MPS memory up to the cap.
+- **Thresholds.** For each model, a threshold per entity label is tuned on
+  the silver validation set, then frozen.
+- **Name filter.** Every model's names go through the same filter as the
+  training labels: a capital letter, and no pronouns.
+
+### Results (gold, 200 claims)
+
+| | zero-shot `small` | zero-shot `base` | fine-tuned `base`, 1 epoch | **fine-tuned `base`, 3 epochs** | rules |
+|---|---|---|---|---|---|
+| person F (n = 18) | 0.86 | 0.90 | 1.00 | **1.00** | — |
+| location F (n = 12) | 0.88 | 0.77 | 0.78 | **0.92** | — |
+| organization F (n = 16) | 0.65 | 0.75 | 0.72 | **0.77** | — |
+| relative F (n = 53) | 0.23 | 0.14 | 0.81 | **0.86** | — |
+| names (person + place + org) P / R / F | 0.71 / 0.89 / 0.79 | 0.77 / 0.87 / 0.82 | 0.79 / 0.89 / 0.84 | **0.83 / 0.96 / 0.89** | capitals guess 0.29 / 0.83 / 0.42 |
+| name_of pairs (n = 3) | 1 of 3 | 0 of 3 | 2 of 3 | 2 of 3, no false pairs | — |
+| kind, 7-way | 0.35 | 0.22 | 0.38 | 0.47 | majority 0.20 |
+| store or skip, all 200 | 0.61 | 0.60 | 0.65 | 0.725 | **0.735** (`is_declarative`) |
+| store or skip, random 150 | 0.51 | 0.48 | 0.63 | **0.70** | 0.65 |
+| about the speaker | 0.58 | 0.56 | 0.62 | 0.72 | **0.845** (first-person regex) |
+| ms per claim, MPS, batch 8 | 129 (loaded) | 80 | — | **24.5** (34 on CPU) | — |
+
+- **The rule baseline is exact.** `kleos_rules.py` is a line-for-line port
+  of `memory_claims::is_declarative`. It agrees with kleos's own `decided`
+  on 2,805 of 2,805 claims.
+- **The old "0.72 for the rules" is not comparable.** That number was
+  scored against the old silver labels. Against this gold set the rules
+  score 0.735 overall and 0.65 on the random 150.
+- **Most remaining errors are on the label boundary.**
+  - The organization false positives are titles and products ("The Last
+    Romantics", "Canon EOS Rebel"), which have no label of their own.
+  - The relative false positives are groups ("my friends", "our
+    families"), which the gold excludes and the no-reasoning labels often
+    included.
+- **Rule and model together do not help store or skip.** Storing only what
+  the rules keep *and* the model does not call small talk scores 0.735 on
+  all 200 and 0.66 on the random 150.
+
+### Stretch: update keys from a closed vocabulary (zero-shot, not fine-tuned)
+
+`ft_keys.py` replaces the span keys with a *classification*. Each claim gets
+one attribute from a fixed list of 44 personal-fact attributes, such as
+residence, employer, pets, social media or collection. It is scored on the
+same 22 held-out pairs and 5,472 unrelated claim pairs as section 3.
+
+- **True updates:** the old and the new claim get the same attribute in
+  16 of 22 pairs (73%), against 9–27% for the span keys. Subject drift is
+  gone. Instagram 1,250 → 1,300 and birds 27 → 32 now match; both were
+  stale-first misses of main.
+- **Unrelated claims:** 1,516 of 5,472 pairs share an attribute, 66 per
+  question. A question's haystack clusters on one hobby, so many of its
+  claims share an attribute.
+- **No value is extracted,** so the key cannot supersede anything by
+  itself. At best it is a blocking key in front of the decider, which the
+  embedding candidates already provide.
+- **Cost:** 2.9 s per claim on a loaded CPU, with 44 described labels.
+
+This was not fine-tuned. The verdict on keys stands.
+
+### Caveats
+
+- **The gold set is small:** 18 persons, 12 places, 16 organizations,
+  53 relatives and 3 pairs. A difference of a few points is noise; the
+  `name_of` row is anecdotal.
+- **The gold set is anchored on the GLM draft.** I corrected what I
+  noticed, and the label conventions are mine. For example: platitudes
+  are small talk, "Can you give me examples" is a request, and groups are
+  not relatives. A model trained on GLM labels cannot learn conventions
+  the GLM labels do not follow. That caps kind, store or skip, and about.
+- **Thresholds come from noisy silver labels.** One example is location
+  at 0.2 for the 3-epoch model.
+- **One seed, one run.** `small` was not fine-tuned.
+- **Timings are approximate:** the machine was shared and heavily loaded.
+
+### Verdict and next step
+
+- **Names (`remember {entities}`): adopt the fine-tuned `base` as an
+  option.** It finds people mentioned by relation or role ("my sister",
+  "my boss"), which zero-shot cannot (F 0.14 → 0.86). It raises names from
+  F 0.82 to 0.89. It is 3× faster than zero-shot because it uses bare
+  labels: 25 ms per claim on MPS, 34 ms on CPU.
+- **Store or skip and kind: keep the rules.** Fine-tuning ties them
+  (0.725 vs 0.735; 0.70 vs 0.65 on the random 150). Doing better needs
+  better training labels: GLM with reasoning, or hand labels.
+- **About the speaker: keep the regex.**
+- **Phase 2 should be the end-to-end run *before* any port.**
+  - Run LoCoMo with automatic names (persons, places, organizations,
+    relatives with their names, and `user` from the regex), with the
+    decider on. Compare with no names and with the capital-letter guess.
+  - The fine-tuned checkpoint runs in Python, so this needs no candle
+    work.
+  - A port is worth its ~13 days only if this moves QA or the
+    same-subject gate.
+
 ## Architecture (what a port has to reproduce)
 
 Read from `gliner2` 2.0.0 (Apache-2.0) and the checkpoints' safetensors
@@ -538,6 +728,26 @@ for p in a c cu; do $G/venv/bin/python policy_sim.py $p $G/runs/policy_$p.json s
 $G/venv/bin/python policy_sim.py b $G/runs/policy_b_v3n.json small v3n cpu   # section 4
 $G/venv/bin/python decide_pairs.py decide cpu               # Decide vs decider-nano
 $G/venv/bin/python speed.py base mps 40                     # section 5, one process per model x device
+```
+
+Fine-tuned round (2026-10-24; `GLINER_DIR` defaults to `.bench-data/gliner-ft`):
+
+```zsh
+export G=/Volumes/SSD01/dev/unnamed-holdco/cozodb-mdr/.bench-data/gliner-ft
+uv venv --python /Users/subhankarchowdhury/miniconda3/bin/python3.12 $G/venv
+VIRTUAL_ENV=$G/venv uv pip install --exclude-newer 2026-10-10 "gliner2[local]==2.1.0" psutil requests
+VIRTUAL_ENV=$G/venv uv pip install <a kleos wheel built from main>   # the claim splitter
+cd scripts/gliner
+$G/venv/bin/python ft_data.py split && $G/venv/bin/python ft_data.py pool && $G/venv/bin/python ft_data.py gold_extra
+$G/venv/bin/python ft_data.py synth 80 && $G/venv/bin/python ft_data.py synth_chat
+$G/venv/bin/python ft_data.py silver gold_draft gold_extra synth synth_chat pool   # LLM, cached
+$G/venv/bin/python ft_gold.py                                # gold.json = draft + ft_gold/ corrections
+$G/venv/bin/python ft_train.py build
+PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7 PYTORCH_MPS_LOW_WATERMARK_RATIO=0.6 $G/venv/bin/python ft_train.py train base 3 base-e3
+for m in small base; do $G/venv/bin/python ft_eval.py predict $m zs-$m mps; done
+$G/venv/bin/python ft_eval.py predict $G/ckpt/base-e3/final ft-base-ep3 mps
+$G/venv/bin/python ft_eval.py score zs-small zs-base ft-base-ep3
+$G/venv/bin/python ft_keys.py base zs-base cpu              # stretch: closed-vocabulary keys
 ```
 
 LLM calls are cached under `$G/llm-cache` (no key in the cache). The

@@ -1,0 +1,13 @@
+{
+ "_note": "Hand corrections of the GLM draft for gold_extra (indices into gold_extra_silver.json); same keys as corrections_a.json.",
+ "2":  {"ents": [["relative", "my friend"], ["person", "Alex"]], "pairs": [["my friend", "Alex"]]},
+ "6":  {"ents": [["relative", "my wife"], ["organization", "Allen Edmonds"]]},
+ "8":  {"ents": [["relative", "my partner"], ["person", "Alex"]], "pairs": [["my partner", "Alex"]]},
+ "19": {"ents": [["relative", "my dad"], ["organization", "Georgia"]]},
+ "26": {"kind": "event"},
+ "29": {"ents": []},
+ "31": {"ents": [["person", "Samantha"], ["relative", "my girlfriend"]]},
+ "33": {"ents": [["relative", "My wife"]]},
+ "36": {"ents": [["person", "Audrey"], ["relative", "my girlfriend"]]},
+ "49": {"about": true}
+}
