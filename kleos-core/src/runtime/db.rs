@@ -2771,6 +2771,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             SysOp::MemApi(op, _) => bail!(
                 "`::memory {op}` must run as a script of its own, not inside an imperative block"
             ),
+            SysOp::Entity(_) => {
+                bail!("`::entity` must run as a script of its own, not inside an imperative block")
+            }
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3561,6 +3564,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let out = self.memory_call(op, args.clone())?;
                 return Ok(crate::memory::memory_rows(op, out));
             }
+            // kleos fork: entity resolution runs its own scripts
+            SysOp::Entity(op) => return self.run_entity_op(op, read_only),
             SysOp::KillRunning(id) => {
                 let queries = self.running_queries.lock().unwrap();
                 return Ok(match queries.get(id) {

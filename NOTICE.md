@@ -117,6 +117,16 @@ written to `.bench-data/` at run time and is not committed. The memory items
 in `kleos-core/examples/data/decide_items.json` are hand-written by the kleos
 authors.
 
+### Entity-resolution evaluation data (not shipped in the library)
+
+`kleos-core/examples/entity_eval.rs` evaluates entity resolution on the
+[Leipzig entity-matching benchmark](https://dbs.uni-leipzig.de/research/projects/benchmark-datasets-for-entity-resolution)
+DBLP-ACM (Köpcke, Thor and Rahm, "Evaluation of entity resolution approaches
+on real-world match problems", PVLDB 2010), licensed CC BY 4.0. It is
+downloaded to `.bench-data/entity/` and is not committed. The memory-style
+mentions in `kleos-core/examples/data/entity_mentions.jsonl` are hand-written
+by the kleos authors.
+
 ### Fine-tuning data for decider-nano (not shipped; built at run time)
 
 `scripts/infer-bench/decide/train/build_data.py` builds the fine-tuning set
