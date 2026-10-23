@@ -19,7 +19,8 @@ Metric definitions (docs/benchmarks/memory.md):
                NDCG@10  sessions ranked by first appearance in the top 10, binary relevance (ndcg_any, session level)
                KU latest@k  the latest-dated answer session is in the top k
                KU stale-first  the first answer-session memory is from an older answer session
-  LoCoMo       R@k / Rall@k / NDCG@10 over evidence dialog ids (turn level)
+  LoCoMo       R@k / Rall@k / NDCG@10 over evidence dialog ids (turn level; an evidence turn counts once,
+               at its first hit: since claims, two hits can be claims of one turn)
 @5 numbers come from a separate recall(k=5) call, @10 from recall(k=10).
 """
 import argparse
@@ -94,7 +95,14 @@ def locomo_metrics(q):
         got = set().union(*[set(h["srcs"]) for h in hits[:k]]) if hits else set()
         m[f"R@{k}"] = float(bool(got & ev))
         m[f"Rall@{k}"] = float(ev <= got)
-    m["NDCG@10"] = C.ndcg([1 if set(h["srcs"]) & ev else 0 for h in q["hits10"]], len(ev), 10)
+    # an evidence turn counts once, at its first hit (two claims of one turn
+    # are not two relevant results)
+    seen, rels = set(), []
+    for h in q["hits10"]:
+        new = (set(h["srcs"]) & ev) - seen
+        seen |= new
+        rels.append(1 if new else 0)
+    m["NDCG@10"] = C.ndcg(rels, len(ev), 10)
     return m
 
 

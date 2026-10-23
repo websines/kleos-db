@@ -1376,3 +1376,224 @@ fn claims_questions_rank_below_statements() {
         .recall("x", RecallOpts { question_weight: Some(-1.0), ..Default::default() })
         .is_err());
 }
+
+// ------------------------------------------------------- recall: diversity, expansion, context, roles
+
+fn src_at(ns_: &str, t: i64, source: &str) -> RememberOpts {
+    RememberOpts {
+        ns: ns(ns_),
+        at: Some(t),
+        source: Some(source.to_string()),
+        ..Default::default()
+    }
+}
+
+fn ropts(ns_: &str, k: usize) -> RecallOpts {
+    RecallOpts {
+        ns: ns(ns_),
+        k: Some(k),
+        record_access: Some(false),
+        ..Default::default()
+    }
+}
+
+/// The per-statement cap (default 1), the per-source cap, MMR near-duplicate
+/// suppression, and `diversity: false` as the old top-k.
+#[test]
+fn recall_diversity_caps_and_mmr() {
+    let m = Models::new("div", vec![], vec![]);
+    let db = m.db();
+    // one statement of three claims about hiking, and other statements
+    let long = "I went hiking in the Alps last summer. The hiking trail near Zermatt was steep. \
+                Hiking with my brother is the best.";
+    let r = db.remember(long, src_at("u", d(1), "chat-1#1")).unwrap();
+    assert_eq!(r.claims.len(), 3);
+    db.remember("We planned a hiking trip to Norway for next year.", src_at("u", d(2), "chat-1#2")).unwrap();
+    db.remember("Hiking boots need breaking in before a long hiking trip.", src_at("u", d(3), "chat-1#3")).unwrap();
+    db.remember("My favourite hiking snack is trail mix.", src_at("u", d(4), "chat-2#1")).unwrap();
+    db.remember("I bought a new tent for camping.", src_at("u", d(5), "chat-3#1")).unwrap();
+
+    let q = "hiking trip";
+    // diversity off: the old top-k, claims of one statement may stack
+    let off = db.recall(q, RecallOpts { diversity: Some(false), ..ropts("u", 5) }).unwrap();
+    let stmt = r.id.clone().unwrap();
+    let n_off = off.iter().filter(|h| h.id.starts_with(&format!("{stmt}."))).count();
+    assert!(n_off >= 2, "{:?}", texts(&off));
+    // default: one claim per statement (the others only fill up to k)
+    let on = db.recall(q, ropts("u", 4)).unwrap();
+    assert_eq!(on.len(), 4);
+    let n_on = on.iter().filter(|h| h.id.starts_with(&format!("{stmt}."))).count();
+    assert_eq!(n_on, 1, "{:?}", texts(&on));
+    // the same set as off, minus stacked claims: every statement is represented
+    let stmts: BTreeSet<&str> = on.iter().map(|h| h.id.split('.').next().unwrap()).collect();
+    assert_eq!(stmts.len(), 4, "{:?}", texts(&on));
+    // caps are soft: asking for more than there are statements fills with claims
+    assert_eq!(db.recall(q, ropts("u", 7)).unwrap().len(), 7);
+
+    // per-source cap: chat-1 (statements 1-3) at most 1
+    let src1 = db
+        .recall(q, RecallOpts { max_per_source: Some(1), ..ropts("u", 3) })
+        .unwrap();
+    let groups: Vec<&str> = src1.iter().map(|h| h.source.as_deref().unwrap().split('#').next().unwrap()).collect();
+    assert_eq!(groups.iter().collect::<BTreeSet<_>>().len(), 3, "{groups:?}");
+
+    // MMR: an exact restatement in another chat is a near-duplicate
+    let dup = "Hiking boots need breaking in before a long hiking trip!";
+    db.remember(dup, RememberOpts { split: Some("none".into()), ..src_at("v", d(1), "a#1") }).unwrap();
+    db.remember("Hiking boots really need breaking in before a long hiking trip.", src_at("v", d(2), "b#1")).unwrap();
+    db.remember("A hiking trip in autumn needs warm layers.", src_at("v", d(3), "c#1")).unwrap();
+    db.remember("I like swimming.", src_at("v", d(4), "d#1")).unwrap();
+    let plain = db.recall("hiking boots trip", ropts("v", 2)).unwrap();
+    assert!(plain.iter().all(|h| h.text.starts_with("Hiking boots")), "{:?}", texts(&plain));
+    let mmr = db
+        .recall("hiking boots trip", RecallOpts { mmr_weight: Some(1.0), ..ropts("v", 2) })
+        .unwrap();
+    assert!(mmr[0].text.starts_with("Hiking boots"), "{:?}", texts(&mmr));
+    assert!(!mmr[1].text.starts_with("Hiking boots"), "{:?}", texts(&mmr));
+    // deterministic
+    let again = db
+        .recall("hiking boots trip", RecallOpts { mmr_weight: Some(1.0), ..ropts("v", 2) })
+        .unwrap();
+    assert_eq!(texts(&mmr), texts(&again));
+    assert!(db.recall(q, RecallOpts { mmr_weight: Some(-1.0), ..ropts("u", 2) }).is_err());
+}
+
+/// Entity-graph expansion: memories about the top hits' entities join the
+/// pool at a reduced weight, merges followed; hub entities are not followed.
+#[test]
+fn recall_entity_expansion() {
+    let m = Models::new("exp", vec![], vec![]);
+    let db = m.db();
+    db.remember("Anna adopted a greyhound called Pixel.", with_ents("u", d(1), &["Anna", "Pixel"])).unwrap();
+    db.remember("She works as a nurse at the Charité.", with_ents("u", d(2), &["Anna"])).unwrap();
+    db.remember("The weather was rainy all week.", with_ents("u", d(3), &[])).unwrap();
+    for i in 0..5 {
+        db.remember(&format!("Unrelated note number {i} about cooking pasta."), with_ents("u", d(4 + i), &[]))
+            .unwrap();
+    }
+    let q = "what dog did Anna adopt";
+    let base = db.recall(q, ropts("u", 2)).unwrap();
+    assert!(base.iter().all(|h| !h.expanded));
+    assert!(!base.iter().any(|h| h.text.contains("nurse")), "{:?}", texts(&base));
+    let ex = db
+        .recall(q, RecallOpts { expand: Some(true), expand_weight: Some(1.0), ..ropts("u", 2) })
+        .unwrap();
+    assert_eq!(ex[0].text, "Anna adopted a greyhound called Pixel.");
+    assert!(ex.iter().any(|h| h.text.contains("nurse") && h.expanded), "{:?}", texts(&ex));
+    // a hub entity (mentioned by more than 25 memories) is not followed
+    for i in 0..26 {
+        db.remember(&format!("User fact {i}: likes colour {i}."), with_ents("h", d(1 + i), &["user"])).unwrap();
+    }
+    db.remember("I adopted a greyhound called Pixel.", with_ents("h", d(40), &["user"])).unwrap();
+    let hub = db
+        .recall("greyhound", RecallOpts { expand: Some(true), expand_weight: Some(1.0), ..ropts("h", 3) })
+        .unwrap();
+    assert!(hub.iter().all(|h| !h.expanded), "{:?}", texts(&hub));
+}
+
+/// The context block: grouped by entity, dated, the superseded value as
+/// "previously", the statement a claim came from, the budget, determinism,
+/// and the CozoScript / JSON surfaces.
+#[test]
+fn recall_context_current_previously_and_budget() {
+    let m = Models::new("ctx", vec![(BERLIN, LISBON)], vec![]);
+    let db = m.db();
+    db.remember(BERLIN, with_ents("u", d(1), &["user"])).unwrap();
+    db.remember(COFFEE, with_ents("u", d(2), &["user"])).unwrap();
+    let b = db.remember(LISBON, with_ents("u", d(10), &["user"])).unwrap();
+    assert_eq!(b.superseded.len(), 1);
+    db.remember("My sister Anna lives in Munich. She is a nurse.", with_ents("u", d(12), &["Anna"])).unwrap();
+
+    // k = 3: Lisbon, the coffee and one claim of Anna's statement
+    let opts = || RecallOpts { budget: Some(400), ..ropts("u", 3) };
+    let c = db.recall_context("where do we live?", opts()).unwrap();
+    let t = &c.text;
+    assert!(t.starts_with("Recalled memories"), "{t}");
+    assert!(t.contains("## user\n") && t.contains("## Anna\n"), "{t}");
+    assert!(t.contains("- [2026-01-11 (Sun)] I moved to Lisbon last month."), "{t}");
+    assert!(t.contains("  previously: \"I live in Berlin.\" (from 2026-01-02 until 2026-01-11)"), "{t}");
+    // the superseded memory itself is not a current item
+    assert!(!t.contains("- [2026-01-02 (Fri)] I live in Berlin."), "{t}");
+    // a claim shows the statement it came from
+    assert!(t.contains("said in: \"My sister Anna lives in Munich. She is a nurse.\""), "{t}");
+    assert!(c.tokens <= 400 && c.tokens > 0, "{c:?}");
+    assert_eq!((c.ids.len(), c.omitted.len()), (3, 0), "{c:?}");
+    // deterministic
+    assert_eq!(db.recall_context("where do we live?", opts()).unwrap(), c);
+    // a small budget keeps the best items and leaves the rest out
+    let small = db.recall_context("where do we live?", RecallOpts { budget: Some(80), ..ropts("u", 3) }).unwrap();
+    assert!(small.tokens <= 80, "{small:?}");
+    assert!(!small.omitted.is_empty() && !small.ids.is_empty(), "{small:?}");
+    // as_of: before the move, Berlin is current and nothing is "previously"
+    let past = db
+        .recall_context("where do I live?", RecallOpts { as_of: Some(d(5)), ..opts() })
+        .unwrap();
+    assert!(past.text.contains("I live in Berlin.") && !past.text.contains("  previously:"), "{}", past.text);
+    // surfaces
+    let j = db
+        .memory_call("recall", serde_json::json!({"query": "where do we live?", "ns": "u", "k": 3, "format": "context", "budget": 400, "record_access": false}))
+        .unwrap();
+    assert_eq!(j["text"].as_str().unwrap(), c.text);
+    let rows = db
+        .run_script(
+            "::memory recall 'where do we live?' {ns: 'u', k: 3, format: 'context', budget: 400}",
+            Default::default(),
+            ScriptMutability::Immutable,
+        )
+        .unwrap();
+    let col = rows.headers.iter().position(|h| h == "text").unwrap();
+    assert_eq!(rows.rows[0][col], DataValue::from(c.text.as_str()));
+    assert!(db
+        .memory_call("recall", serde_json::json!({"query": "x", "format": "table"}))
+        .is_err());
+}
+
+/// Speaker roles: assistant memories are stored, recalled with their role at
+/// a lower weight and filterable, never decided; `from` / `to` filter on
+/// valid-from.
+#[test]
+fn remember_roles_and_time_filters() {
+    let m = Models::new("role", vec![(BERLIN, LISBON)], vec![]);
+    let db = m.db();
+    let a = db.remember(BERLIN, at("u", d(1))).unwrap();
+    // the assistant "saying" the update never supersedes the user's fact
+    let asst = db
+        .remember(LISBON, RememberOpts { role: Some("assistant".into()), ..at("u", d(2)) })
+        .unwrap();
+    assert!(asst.superseded.is_empty() && asst.decisions.is_empty(), "{asst:?}");
+    // and the user's own update does not see the assistant memory as a candidate
+    let u2 = db.remember("I moved to Lisbon last month!", at("u", d(3))).unwrap();
+    assert!(u2.decisions.iter().all(|x| x.candidate != asst.id.clone().unwrap()), "{u2:?}");
+    assert!(db.remember("x y z", RememberOpts { role: Some("robot".into()), ..at("u", d(4)) }).is_err());
+
+    let hits = db.recall("Lisbon", ropts("u", 5)).unwrap();
+    let ah = hits.iter().find(|h| h.id == asst.id.clone().unwrap()).unwrap();
+    assert_eq!(ah.role.as_deref(), Some("assistant"));
+    // the assistant weight: 0.05 lower than without it
+    let no_w = db
+        .recall("Lisbon", RecallOpts { assistant_weight: Some(0.0), ..ropts("u", 5) })
+        .unwrap();
+    let ah0 = no_w.iter().find(|h| h.id == ah.id).unwrap();
+    assert!((ah0.score - ah.score - 0.05).abs() < 1e-6, "{} {}", ah0.score, ah.score);
+    // role filter
+    let only_a = db.recall("Lisbon", RecallOpts { role: Some("assistant".into()), ..ropts("u", 5) }).unwrap();
+    assert_eq!(only_a.iter().map(|h| h.id.clone()).collect::<Vec<_>>(), vec![ah.id.clone()]);
+    let only_u = db.recall("Lisbon", RecallOpts { role: Some("user".into()), ..ropts("u", 5) }).unwrap();
+    assert!(only_u.iter().all(|h| h.role.is_none()) && !only_u.is_empty());
+    // the context block marks the speaker
+    let c = db.recall_context("Lisbon", ropts("u", 5)).unwrap();
+    assert!(c.text.contains("(assistant) I moved to Lisbon last month."), "{}", c.text);
+    // time filters on valid-from: [d(2), d(3)) is the assistant memory only
+    let w = db
+        .recall("Lisbon Berlin", RecallOpts { from: Some(d(2)), to: Some(d(3)), ..ropts("u", 5) })
+        .unwrap();
+    assert_eq!(w.iter().map(|h| h.id.clone()).collect::<Vec<_>>(), vec![ah.id.clone()]);
+    let early = db
+        .recall("Lisbon Berlin", RecallOpts { to: Some(d(2)), as_of: Some(d(1)), ..ropts("u", 5) })
+        .unwrap();
+    assert_eq!(early.iter().map(|h| h.id.clone()).collect::<Vec<_>>(), vec![a.id.clone().unwrap()]);
+    // erase removes the role row
+    db.forget(ForgetOpts { ns: ns("u"), id: asst.id.clone(), mode: Some("erase".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(count(&db, "?[id] := *kleos_mem_role{ns: 'u', id}"), 0);
+}

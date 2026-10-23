@@ -1464,7 +1464,9 @@ impl CozoDbPy {
     /// subject, e.g. "user"), `at` (valid-from µs), `ttl` / `expires` (µs),
     /// `k`, `decider`, `embedder`, `split` (`"auto"`, the default: a text of
     /// several sentences becomes one memory per claim; `"none"`: one memory),
-    /// `min_similarity`. Returns `{action, id, superseded, duplicate_of,
+    /// `min_similarity`, `role` (`"user"`, `"assistant"` or `"other"`:
+    /// assistant/other memories are recalled but never decided). Returns
+    /// `{action, id, superseded, duplicate_of,
     /// tentative, decisions, gated, entities, entity_links, embedded,
     /// decider, ns}`, plus `claims` when the text was split; decisions carry
     /// `decided_by`.
@@ -1476,12 +1478,24 @@ impl CozoDbPy {
     /// Options: `ns`, `k`, `kind`, `entity`, `as_of`, `vector_weight`,
     /// `hide_pending`, `include_archived`, `include_expired`, `record_access`,
     /// and the ranking blend: `blend`, `recency_weight`, `half_life_days`,
-    /// `importance_weight`, `access_weight`, `question_weight`. Returns a
-    /// list of `{id, text, score, relevance, recency, access_count, kind,
-    /// valid_from, ...}`, plus `context` (the whole statement) for a claim.
+    /// `importance_weight`, `access_weight`, `question_weight`,
+    /// `assistant_weight`; diversity: `diversity`, `max_per_statement`,
+    /// `max_per_source`, `mmr_weight`, `pool`; `expand` / `expand_weight`
+    /// (entity-graph expansion); filters `role`, `from`, `to` (valid-from µs).
+    /// Returns a list of `{id, text, score, relevance, recency,
+    /// access_count, kind, valid_from, ...}`, plus `context` (the whole
+    /// statement) for a claim and `role` when stored. With
+    /// `format="context"` (and `budget`, tokens) it returns `{text, tokens,
+    /// budget, ids, omitted}`: a text block for an LLM reader.
     #[pyo3(signature = (query, **opts))]
     pub fn recall(&self, py: Python<'_>, query: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "recall", vec![("query", json!(query))], opts)
+    }
+    /// `recall(query, format="context", **opts)`: the token-budgeted
+    /// context block `{text, tokens, budget, ids, omitted}`.
+    #[pyo3(signature = (query, **opts))]
+    pub fn recall_context(&self, py: Python<'_>, query: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "recall", vec![("query", json!(query)), ("format", json!("context"))], opts)
     }
     /// Forget a memory (`id`) or a filter (`ids`, `kind`, `entity`,
     /// `expired=True`, `all=True`). `mode='retract'` (default) ends validity;

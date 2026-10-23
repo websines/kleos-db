@@ -127,15 +127,28 @@ def lme_units(x, unit="user"):
     for sid, date, turns in sess:
         t0 = lme_ts(date)
         groups = []
-        if unit == "user":
-            for j, i in enumerate([i for i, t in enumerate(turns) if t["role"] == "user"]):
-                out.append({
-                    "src": f"{sid}#{i}",
-                    "session": sid,
-                    "at": t0 + j * 1_000_000,
-                    "text": turns[i]["content"].strip(),
-                    "evidence": bool(turns[i].get("has_answer")),
-                })
+        if unit in ("user", "user+assistant"):
+            j = -1
+            for i, t in enumerate(turns):
+                if t["role"] == "user":
+                    j += 1
+                    out.append({
+                        "src": f"{sid}#{i}",
+                        "session": sid,
+                        "at": t0 + j * 1_000_000,
+                        "text": t["content"].strip(),
+                        "evidence": bool(t.get("has_answer")),
+                    })
+                elif unit == "user+assistant":
+                    # the reply, half a second after the user turn it answers
+                    out.append({
+                        "src": f"{sid}#{i}",
+                        "session": sid,
+                        "at": t0 + max(j, 0) * 1_000_000 + 500_000,
+                        "text": t["content"].strip(),
+                        "evidence": bool(t.get("has_answer")),
+                        "role": "assistant",
+                    })
             continue
         if unit == "session":
             groups = [list(range(len(turns)))]
@@ -190,6 +203,26 @@ def locomo_units(conv):
                 text += f" [shares a photo: {t['blip_caption']}]"
             out.append({"src": t["dia_id"], "session": f"session_{n}", "at": t0 + j * 1_000_000, "text": text})
         n += 1
+    return out
+
+
+_CAPS = re.compile(r"\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*")
+_NOT_NAMES = {"I", "I'm", "I've", "The", "This", "That", "It", "It's", "My", "We", "You", "Yes", "No", "Oh", "Hey",
+              "Hi", "Thanks", "Thank", "Wow", "What", "How", "Do", "Did", "Have", "Are", "Is", "So", "But", "And",
+              "Also", "Just", "That's", "Sounds", "Great", "Good", "Awesome", "Congrats", "Glad", "Sure", "Totally"}
+
+
+def caps_entities(text):
+    """A crude, model-free entity list for a LoCoMo turn: the speaker plus
+    capitalised word runs that are not sentence openers or fillers."""
+    spk, _, body = text.partition(": ")
+    out = [spk]
+    for m in _CAPS.finditer(body):
+        w = m.group(0)
+        if w.split()[0] in _NOT_NAMES or len(w) < 3:
+            continue
+        if w not in out:
+            out.append(w)
     return out
 
 

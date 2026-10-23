@@ -1,9 +1,10 @@
 # Memory API: remember, recall, forget, reflect, link
 
-Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring.
+Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring. Diverse recall, entity expansion, the context output, speaker roles and valid-from filters: wave3/recall.
 
 Code:
 - `kleos-core/src/memory.rs`: schema, the operations, entity resolution and the same-subject gate, scoring, the access buffer and the JSON entry point;
+- `kleos-core/src/memory_recall.rs`: the diverse selection and the context block (model-free, deterministic);
 - `parse/sys.rs` and `cozoscript.pest` (`mem_api_op`): the `::memory` ops;
 - `lib.rs`: `DbInstance` dispatch;
 - `kleos-lib-python/src/lib.rs`: Python methods;
@@ -42,12 +43,13 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 | `kleos_mem_ns` | `{ns => seq}` | The namespace version (see "Concurrency"). |
 | `kleos_mem_access` | `{ns, id => n, last}` | Access counts and the last access (µs), written by batched flushes (see "Ranking"). |
 | `kleos_mem_life` | `{ns, id => expires?, archived?}` | Expiry and archive time (µs). Only memories with a TTL or in the archive have a row. |
+| `kleos_mem_role` | `{ns, id => role}` | Who said a memory (`remember {role}`): `user`, `assistant` or `other`. Only memories stored with a role have a row; none means the user. |
 | `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`, and `engram` when an Engram model is attached. It is created last, so its presence marks a complete schema. |
 | `kleos_engram_queue` | `{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}` | Only with an Engram model attached (feature `engram`): one job per memory change for the overlay worker. See "Engram attachment". |
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
 
-The schema version is 3. A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use.
+The schema version is 4. A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`.
 
 **Why vectors live in a sibling relation.**
 - The dimension is unknown until an embedder is chosen. With a separate relation, a store created without one can gain vectors later: `::memory init {embedder: …}` creates the relation and backfills it.
@@ -67,7 +69,8 @@ Options:
 - `decider`;
 - `embedder`: only used when this call creates the store;
 - `split`: `auto` (the default) stores a text of several sentences as one memory per claim (see "Claims"); `none` stores the whole text as one memory, as before claims;
-- `min_similarity`: the cosine below which a claim's candidate is not sent to the decider (default 0.6; claims of a split text only).
+- `min_similarity`: the cosine below which a claim's candidate is not sent to the decider (default 0.6; claims of a split text only);
+- `role`: who said it, `user` (the default when unset), `assistant` or `other` (see "Speaker roles").
 
 Steps:
 1. Embed the text, if the store's embedder is enabled.
@@ -239,7 +242,12 @@ Options:
 - `hide_pending`: leave out memories with a pending `supersedes` by a memory valid at the read time. Default false;
 - `include_archived`, `include_expired`: default false;
 - ranking: `blend` (default true), `recency_weight`, `half_life_days`, `importance_weight`, `access_weight`, `question_weight` (see "Ranking");
-- `record_access`: count the returned memories as accessed. Default true; read-only `::memory recall` scripts never count.
+- `record_access`: count the returned memories as accessed. Default true; read-only `::memory recall` scripts never count;
+- diversity: `diversity` (default true), `max_per_statement` (default 1), `max_per_source` (default 0, no cap), `mmr_weight` (default 0), `pool` (see "Diversity");
+- `expand` (default false) and `expand_weight` (default 0.5): entity-graph expansion (see "Entity expansion");
+- `assistant_weight` (default 0.05) and `role` (a filter): see "Speaker roles";
+- `from`, `to` (µs): only memories whose validity starts in `[from, to)` (see "Valid-from filters");
+- `format`: `list` (the default) or `context`, with `budget` (tokens, default 2000) and `show_source` (default false): see "Context output".
 
 It is one script:
 - The vector leg is HNSW over `kleos_mem_vec`, filtered to the namespace (and `current` unless `as_of` is set). Its score is −distance.
@@ -251,6 +259,69 @@ It is one script:
 Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`, and `context` (the whole statement) when the memory is one claim of a longer text. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
 
 The vector leg always returns the nearest neighbours, so recall returns up to k memories even when none are relevant. There is no score cutoff.
+
+Hits also carry `role` (when stored) and `expanded` (true for a memory brought in by entity expansion). With diversity on, hits are in selection order, which is score order unless `mmr_weight` moved a near-duplicate down.
+
+#### Diversity
+
+Questions that need several pieces of evidence lose them when the top k fills with near-copies: with claims, three sentences of one message can take three of ten slots, and one session can take all ten. So recall chooses the k hits from a deeper pool:
+
+1. The pool is the `pool` best by score (default max(3k, k + 10); the index legs fetch at least pool / 2 deep).
+2. Greedy selection: the next hit is the candidate with the highest `score − mmr_weight · max similarity to the hits already chosen`, among the candidates within the caps. Similarity is the cosine of the two vectors when both have one, else the word overlap (Jaccard of words of three or more characters). Ties keep the higher-ranked candidate.
+3. Caps: at most `max_per_statement` hits per statement (the claims of one text; a claim `m_….n` belongs to `m_…`), and at most `max_per_source` per source group. The source group is the part of `source` before the first `#`, so `chat-12#4` and `chat-12#9` are one conversation; a source without `#` is its own group. 0 means no cap.
+4. The caps are soft: when they leave fewer than k candidates, the capped ones fill the rest in score order.
+
+`diversity: false` is the top k by score, exactly as before (the same fetch, window and order). Everything is deterministic.
+
+**Defaults.** One hit per statement; no source cap; no MMR penalty. The benchmark numbers that chose them are in [docs/benchmarks/memory.md](../benchmarks/memory.md) ("Recall diversity"). In short: the statement cap helps everywhere (multi-session and temporal Rall@10 on LongMemEval) and costs nothing on single-evidence questions. A per-session cap helps LongMemEval multi-session but hurts LoCoMo, whose evidence often sits in several turns of one session, so it is opt-in. The MMR penalty moved little either way.
+
+#### Entity expansion
+
+`expand: true` adds memories about the entities of the top hits to the pool:
+- the seeds are the 3 most relevant hits;
+- their mentions (`kleos_mem_mention`) give canonical entities, merges followed (`kleos_entity_merge`); every row of each cluster counts;
+- an entity that more than 25 memories mention is not followed (the user, a speaker: a hub says nothing about this question);
+- the other memories mentioning those entities, valid at the read time and not archived or expired, join the pool (up to 30) with relevance `expand_weight` × the best seed's relevance, flagged `expanded`;
+- they then go through the blend and the diverse selection like any other candidate.
+
+It is skipped when recall already filters by `entity`. It only does something when `remember` was given `entities`; there is no NER.
+
+#### Speaker roles
+
+`remember {role}` records who said a memory: `user` (the default when unset), `assistant` or `other`. An agent can store the assistant's replies too, so questions about what the assistant said ("what was the third recipe you suggested?") can be answered, without letting them displace the user's facts:
+- assistant and other memories are **never decided**: they never supersede or duplicate anything, and they are never candidates of a user statement. What the assistant said does not replace what the user said;
+- recall subtracts `assistant_weight` (default 0.05) from an assistant memory's blended score, so of two equally relevant memories the user's ranks first;
+- `recall {role}` filters by speaker (`user` includes memories with no role); hits carry `role`.
+
+#### Valid-from filters
+
+`recall {from, to}` keeps memories whose validity (the interval containing the read time) starts in `[from, to)`: "what did I do in May". They are post-filters on a 4× deeper fetch. `as_of` is the other time question: the state of the world at a time. Parsing dates out of questions is not done.
+
+#### Context output
+
+`recall {format: 'context', budget}` (Rust `Db::recall_context`, Python `recall(..., format="context")` or `recall_context`) returns `{text, tokens, budget, ids, omitted}`: the same hits as `recall` with the same options, as a Markdown block for an LLM reader. For example:
+
+```
+Recalled memories, grouped by topic, most relevant first. [date] is when a statement was made or became true; "previously" lines are older values it replaced.
+
+## user
+- [2026-01-11 (Sun)] I moved to Lisbon last month.
+  previously: "I live in Berlin." (from 2026-01-02 until 2026-01-11)
+
+## Anna
+- [2026-01-13 (Tue)] My sister Anna lives in Munich.
+  said in: "My sister Anna lives in Munich. She is a nurse."
+```
+
+- **Grouping.** A memory goes under the canonical entity it mentions that most of the shown memories mention (ties by name); without entities, under its source group ("Conversation of <date>"); else "Other". Groups are ordered by their best-ranked memory, and memories within a group by date. Claims of one statement are one item.
+- **Each item:** `[valid-from date]`, `(until <date>)` for a past read, `(assistant)` / `(other)` for another speaker, the text, and the source with `show_source`. Source names are not shown by default; they are ids, not content.
+- **`previously`:** the memories this one superseded (`supersedes` links), up to three steps back, each with its own validity: "previously: X (from d1 until d2)". It is the history kleos already stores, so the reader sees both the current value and the change.
+- **`possibly replaced by`:** a newer memory with a pending `supersedes` decision about this one, marked unconfirmed.
+- **`said in`:** for a claim, up to 600 characters of the statement it came from, centred on the claim and cut at word boundaries.
+- **Budget.** Tokens are estimated as characters / 4. Items are added in rank order with their `previously` lines while they fit (a group heading counts too); then the `said in` lines, in rank order, while the budget lasts. Memories that did not fit are listed in `omitted`.
+- **Deterministic.** The same store and options give the same text byte for byte.
+
+`::memory recall '…' {format: 'context', budget: 800}` returns one row with the columns `text, tokens, budget, ids, omitted`; HTTP `POST /memory/recall {"query": …, "format": "context"}` returns the object.
 
 #### Ranking (E4, C6)
 
