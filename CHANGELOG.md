@@ -19,6 +19,14 @@ to kleos.
   - The schema version is now 3: `kleos_mem_access` and `kleos_mem_life`, created on first use for older stores. Erase also removes access counts, expiry rows, and entity merges and links.
   - The `memory::link_entities` hook is gone: resolution happens inside `remember`.
 
+- **Memory API → Engram overlay: `remember` produces Engram edits when a model is attached** (feature `engram`, docs/specs/engram-overlay.md "Memory attachment").
+  - `::memory init {engram: 'nano'}` (Rust/Python `InitOpts.engram`) attaches a registered Engram model; `''` detaches. Unattached stores and builds without the feature behave exactly as before.
+  - While attached, `remember` (write, or supersede with the old ids), `forget` retract and `forget` erase each write a job to the new `kleos_engram_queue` relation in the same transaction as the memory change. The job id is the namespace version the commit produces, so jobs are in commit order, and the `kleos_mem_ns` concurrency guarantees cover them. Duplicates enqueue nothing; an erase clears the text of the erased memories' earlier jobs.
+  - `scripts/engram/engram_worker.py` applies the jobs with the EngramEdit-style write path through `::engram write` / `erase_plan` / `erase_fact`, with leased claims, retries and idempotent applies. Overlay facts are keyed by memory id and valid from the memory's valid-from, so `::engram export {as_of}` follows `::memory recall {as_of}`. `::engram queue` reports pending / failed jobs and the last error.
+  - Fix: `::engram erase_fact` no longer brings back the row value of a fact that ended while the erased fact shared its rows.
+  - Python bindings: new `engram` feature pass-through.
+  - End to end on the 132M model (`scripts/engram/remember_e2e.py`): top-1 recall of 10 remembered facts 0/10 → 9/10 (unseen rephrasings 1/18 → 9/18); a superseding `remember` flips the answer and `as_of` before it restores the old overlay bit for bit; erasing one memory keeps 128 untouched rows bit-identical; erasing the namespace gives logits bit-identical to the base model; jobs survive a worker crash and a `kill -9` with one version per fact. `remember` costs about 1 ms more on SQLite when attached.
+
 - **Memory API: concurrent `remember`s on one topic no longer leave two current facts.**
   - A per-namespace version row (`kleos_mem_ns`) is asserted and bumped inside each write transaction, so the storage engine orders writers across threads and processes. A writer that lost the race plans again and supersedes the winner.
   - The schema version is now 2, and v1 stores get the table on first use.

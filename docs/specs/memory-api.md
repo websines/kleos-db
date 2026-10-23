@@ -42,7 +42,8 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 | `kleos_mem_ns` | `{ns => seq}` | The namespace version (see "Concurrency"). |
 | `kleos_mem_access` | `{ns, id => n, last}` | Access counts and the last access (µs), written by batched flushes (see "Ranking"). |
 | `kleos_mem_life` | `{ns, id => expires?, archived?}` | Expiry and archive time (µs). Only memories with a TTL or in the archive have a row. |
-| `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`. It is created last, so its presence marks a complete schema. |
+| `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`, and `engram` when an Engram model is attached. It is created last, so its presence marks a complete schema. |
+| `kleos_engram_queue` | `{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}` | Only with an Engram model attached (feature `engram`): one job per memory change for the overlay worker. See "Engram attachment". |
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
 
@@ -223,7 +224,9 @@ Writes the buffered access counts now. Returns `{flushed}`, the number of memori
 - Targets: `id` or `ids`, or a filter `kind` / `entity` / `expired: true` (current memories past their expiry, not yet archived), or `all: true` for a whole namespace. A call without any of these is an error.
 - `mode: 'retract'` (the default) ends validity at `at` (default now) with a retraction row and clears `current` on the vector. History and `as_of` recall keep the memory.
 - `mode: 'archive'` moves current memories to the archive tier (above).
-- `mode: 'erase'` (GDPR) calls `::erase kleos_mem` on the keys. That deletes every version, with its FTS entries, and writes the salted `kleos_evict_audit` marker. It then removes the memory's vector, source rows, mentions, links, audit rows, access counts (stored and buffered) and expiry row, and any entity left with no mention, with the entity merges and review links that touch it.
+- `mode: 'erase'` (GDPR) runs in two steps:
+  1. One transaction removes the memory's vector, source rows, mentions, links and audit rows, and any entity left with no mention. When an Engram model is attached, the same transaction enqueues the overlay erase.
+  2. `::erase kleos_mem` then deletes every version of the keys, with their FTS entries, and writes the salted `kleos_evict_audit` marker.
 - Returns `{mode, ids}`: the memories that were current (retract) or existed (erase).
 
 ### reflect(ns, opts)
@@ -240,6 +243,19 @@ There is no op yet to accept or reject a pending decision. To act on one, `forge
 ### link(from, to, rel)
 
 Adds `kleos_mem_link {ns, from, rel, to}` with optional `p`. Both ends must be memories or entities of the namespace.
+
+### Engram attachment (feature `engram`)
+
+`::memory init {engram: 'nano'}` attaches the store to a registered Engram model ([engram-overlay.md](engram-overlay.md), "Memory attachment"); `engram: ''` detaches. While attached, each memory change also writes a job to `kleos_engram_queue`, **inside the change's own write script**, so one transaction:
+- `remember` that adds a memory: `write`, or `supersede` with the superseded ids; a duplicate writes none;
+- `forget` retract: `retract` with the ids that were current, at the retraction time;
+- `forget` erase: `erase` with the ids that existed. It also clears the text of earlier jobs of those memories.
+
+The job's `qid` is the `kleos_mem_ns` version its commit produces, computed in the transaction before the version bump. So the concurrency rules above cover the queue too: a plan that lost the race writes neither its memory nor its job, and jobs are numbered in commit order per namespace. The edits themselves are computed outside kleos by `scripts/engram/engram_worker.py`; `::engram queue {ns}` shows pending and failed jobs and the last error.
+
+The hook is one function, `memory_engram::enqueue`, called from the write-script assembly of `remember` and of both `forget` modes. It returns nothing when no model is attached or the feature is off, so the memory API's behaviour and cost are unchanged then.
+
+`forget` erase runs `::erase kleos_mem` as its own statement, after the transaction that cleans up and enqueues the Engram erase job. A crash between the two leaves the memory present and its overlay being erased. Repeating the `forget` completes it, since erase is idempotent. The opposite order could have left an erased memory whose Engram rows still answer.
 
 ### Entity resolution
 
@@ -262,7 +278,7 @@ The same options everywhere: one JSON object per op, handled by `Db::memory_call
 
 ```rust
 use kleos::memory::{RememberOpts, RecallOpts, ForgetOpts, ReflectOpts, LinkOpts, InitOpts};
-db.memory_init(InitOpts { embedder: Some("gemma".into()), decider: Some("nano".into()) })?;
+db.memory_init(InitOpts { embedder: Some("gemma".into()), decider: Some("nano".into()), ..Default::default() })?;  // engram: Some("nano".into()) attaches an Engram model
 let r = db.remember("I moved to Lisbon.", RememberOpts { ns: Some("alice".into()), ..Default::default() })?;
 let hits = db.recall("where do I live?", RecallOpts { ns: Some("alice".into()), ..Default::default() })?;
 db.forget(ForgetOpts { ns: Some("alice".into()), id: r.id, mode: Some("erase".into()), ..Default::default() })?;
@@ -277,6 +293,7 @@ db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "
 
 ```
 ::memory init {embedder: 'gemma', decider: 'nano'}
+::memory init {engram: 'nano'}             # feature engram: remember/forget enqueue Engram jobs
 ::memory remember 'I moved to Lisbon.' {ns: 'alice', entities: ['Lisbon'], source: 'chat-12'}
 ::memory recall 'where do I live?' {ns: 'alice', k: 5, as_of: 1767225600000000}
 ::memory forget $id {ns: 'alice', mode: 'erase'}

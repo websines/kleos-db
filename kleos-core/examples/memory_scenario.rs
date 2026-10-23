@@ -55,6 +55,7 @@ fn main() -> miette::Result<()> {
     db.memory_init(InitOpts {
         embedder: Some("life".into()),
         decider: Some("nano".into()),
+        ..Default::default()
     })?;
 
     let turns = data["turns"].as_array().unwrap();

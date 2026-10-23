@@ -885,16 +885,27 @@ mod imp {
                     }
                 }
             }
-            let puts = replacements.iter().map(|r| row_put(&fp, ns, r, t)).collect();
+            let replaced: BTreeSet<(u64, i64)> = replacements.iter().map(|r| (r.layer, r.row)).collect();
+            let mut puts: Vec<Vec<DataValue>> = replacements.iter().map(|r| row_put(&fp, ns, r, t)).collect();
+            // A touched row whose surviving latest version depends on a fact that
+            // is no longer valid (it was superseded or retracted while the erased
+            // fact still shared the row, so its revert was a version naming the
+            // erased fact) would come back to life. End it when that fact ended,
+            // as if the erased fact had never shared the row.
+            let mut ended = BTreeSet::new();
+            let stale = self.stale_after_erase(&fp, ns, fact, t, &touched, &replaced, &live)?;
+            for (k, e) in stale {
+                puts.push(row_retract(&fp, ns, k, e));
+                ended.insert(k);
+            }
             commit(self, vec![], puts, fact_keys, row_keys)?;
             let after = rows_at(self, &fp, ns, t)?;
-            let replaced: BTreeSet<(u64, i64)> = replacements.iter().map(|r| (r.layer, r.row)).collect();
             Ok(touched
                 .into_iter()
                 .map(|k| {
                     let a = if replaced.contains(&k) {
                         "replayed"
-                    } else if after.contains_key(&k) {
+                    } else if after.contains_key(&k) && !ended.contains(&k) {
                         "previous"
                     } else {
                         "reverted"
@@ -902,6 +913,64 @@ mod imp {
                     (k, a)
                 })
                 .collect())
+        }
+
+        /// Rows of `touched` (not replaced) whose latest version at `t`, once
+        /// the versions naming `fact` are gone, depends on a fact that is not
+        /// valid at `t`; with the time that fact's validity ended.
+        #[allow(clippy::too_many_arguments)]
+        fn stale_after_erase(
+            &'s self,
+            fp: &str,
+            ns: &str,
+            fact: &str,
+            t: i64,
+            touched: &BTreeSet<(u64, i64)>,
+            replaced: &BTreeSet<(u64, i64)>,
+            live: &BTreeMap<String, FactRec>,
+        ) -> Result<Vec<((u64, i64), i64)>> {
+            let p = params([("fp", s(fp)), ("ns", s(ns))]);
+            // surviving versions: (ts, asserted, facts) per row
+            let mut versions: BTreeMap<(u64, i64), Vec<(i64, bool, Vec<String>)>> = BTreeMap::new();
+            for r in query(self, &format!("?[layer, row, vt, facts] := *{ENGRAM_ROWS}{{fp: $fp, ns: $ns, layer, row, vt, facts}}"), p.clone())? {
+                let k = (r[0].get_int().unwrap_or(0) as u64, r[1].get_int().unwrap_or(0));
+                let facts = get_strs(&r[3]);
+                if !touched.contains(&k) || replaced.contains(&k) || facts.iter().any(|f| f == fact) {
+                    continue;
+                }
+                let (ts, a) = vt_parts(&r[2]);
+                versions.entry(k).or_default().push((ts, a, facts));
+            }
+            let mut ends: Option<BTreeMap<String, Vec<i64>>> = None;
+            let mut out = vec![];
+            for (k, mut vs) in versions {
+                vs.sort_by_key(|v| v.0);
+                let Some((tv, true, facts)) = vs.into_iter().filter(|v| v.0 <= t).last() else {
+                    continue;
+                };
+                let dead: Vec<&String> = facts.iter().filter(|f| f.as_str() != fact && !live.contains_key(*f)).collect();
+                if dead.is_empty() {
+                    continue;
+                }
+                if ends.is_none() {
+                    let mut m: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+                    for r in query(self, &format!("?[fact, vt] := *{ENGRAM_FACTS}{{fp: $fp, ns: $ns, fact, vt}}"), p.clone())? {
+                        let (ts, a) = vt_parts(&r[1]);
+                        if !a {
+                            m.entry(r[0].get_str().unwrap_or_default().to_string()).or_default().push(ts);
+                        }
+                    }
+                    ends = Some(m);
+                }
+                let m = ends.as_ref().unwrap();
+                let e = dead
+                    .iter()
+                    .filter_map(|f| m.get(f.as_str()).and_then(|ts| ts.iter().copied().filter(|&x| x >= tv && x <= t).min()))
+                    .min()
+                    .unwrap_or(t);
+                out.push((k, e));
+            }
+            Ok(out)
         }
 
         /// Facts of a namespace current at `as_of` (default now): `(id, since
@@ -1218,9 +1287,15 @@ mod imp {
                         .collect(),
                 ))
             }
+            "queue" => {
+                // the memory API's Engram jobs (memory_engram.rs)
+                check_keys(op, &["ns", "jobs"])?;
+                let jobs = matches!(op.opts.get("jobs"), Some(DataValue::Bool(true)));
+                crate::memory_engram::queue_status(db, opt_str(op, "ns")?.as_deref(), jobs)
+            }
             other => bail!(
                 "unknown `::engram` op '{other}': expected models, register, write, supersede, materialize, export, \
-                 erase, erase_plan, erase_fact, facts, history or rows"
+                 erase, erase_plan, erase_fact, facts, history, rows or queue"
             ),
         }
     }

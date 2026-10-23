@@ -164,6 +164,7 @@ pub mod data;
 pub mod decide;
 pub mod embed;
 pub mod memory;
+pub mod memory_engram;
 pub mod entity;
 pub mod engram;
 pub(crate) mod fixed_rule;

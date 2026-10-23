@@ -39,6 +39,7 @@ use crate::data::value::{DataValue, Validity};
 use crate::decide::{self, rules, Band, Decision, Template};
 use crate::embed;
 use crate::entity::{EntityConfig, Mention, Outcome, ResolveOptions, ENTITY_LINKS, ENTITY_MERGES};
+use crate::memory_engram::{self as engram_hook, Job};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
 
@@ -345,6 +346,10 @@ pub struct InitOpts {
     pub embedder: Option<String>,
     /// Decider used by `remember` when none is passed per call.
     pub decider: Option<String>,
+    /// Registered Engram model whose overlay follows the memories
+    /// (`remember` / `forget` enqueue Engram jobs); `''` detaches.
+    #[cfg(feature = "engram")]
+    pub engram: Option<String>,
 }
 
 /// Options of [`Db::remember`].
@@ -710,6 +715,10 @@ pub struct MemConfig {
     pub dim: Option<usize>,
     /// Default decider.
     pub decider: Option<String>,
+    /// Attached Engram model (feature `engram`).
+    #[cfg(feature = "engram")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engram: Option<String>,
     /// Schema version.
     pub version: i64,
 }
@@ -899,6 +908,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 Some("embedder") => cfg.embedder = v,
                 Some("decider") => cfg.decider = v,
                 Some("dim") => cfg.dim = v.and_then(|x| x.parse().ok()),
+                #[cfg(feature = "engram")]
+                Some("engram") => cfg.engram = v,
                 Some("version") => cfg.version = v.and_then(|x| x.parse().ok()).unwrap_or(1),
                 _ => {}
             }
@@ -977,6 +988,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         if let Some(e) = opts.embedder {
             self.attach_embedder(&mut cfg, &e)?;
+        }
+        #[cfg(feature = "engram")]
+        if let Some(m) = opts.engram {
+            crate::memory_engram::attach(self, &mut cfg, &m)?;
         }
         Ok(cfg)
     }
@@ -1076,7 +1091,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 });
                 self.memory_init(InitOpts {
                     embedder,
-                    decider: None,
+                    ..Default::default()
                 })
             }
         }
@@ -1804,6 +1819,21 @@ impl<'s, S: Storage<'s>> Db<S> {
                 res.entities = ents.out.iter().map(|e| e.eid.clone()).collect();
                 res.entity_links = ents.out.clone();
             }
+            if duplicate.is_none() {
+                let old: Vec<String> = supersede.iter().map(|&i| cands[i].id.clone()).collect();
+                let job = Job {
+                    op: if old.is_empty() { "write" } else { "supersede" },
+                    mem_ids: std::slice::from_ref(&mem_id),
+                    old: &old,
+                    text: Some(text),
+                    at,
+                    entities: &opts.entities,
+                };
+                if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
+                    script.push_str(&frag);
+                    p.extend(ps);
+                }
+            }
             // the version this plan was made against must still hold
             script.insert_str(
                 0,
@@ -2242,11 +2272,14 @@ impl<'s, S: Storage<'s>> Db<S> {
                       :update {MEM_VEC} {{ns, id => current}}}}"
                 ));
             }
+            let mut p = vec![("ns", s(&ns)), ("ids", str_list(&cur)), ("at", DataValue::from(at))];
+            let job = Job { op: "retract", mem_ids: &cur, old: &[], text: None, at, entities: &[] };
+            if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
+                script.push_str(&frag);
+                p.extend(ps);
+            }
             script.push_str(&bump_ns_head());
-            self.mem_q(
-                &script,
-                vec![("ns", s(&ns)), ("ids", str_list(&cur)), ("at", DataValue::from(at))],
-            )?;
+            self.mem_q(&script, p)?;
             return Ok(ForgetResult { mode, ids: cur });
         }
 
@@ -2278,9 +2311,6 @@ impl<'s, S: Storage<'s>> Db<S> {
                 .map(|id| DataValue::List(vec![s(&ns), s(id)]))
                 .collect(),
         );
-        // ::erase deletes every row of each key with its FTS/HNSW entries and
-        // writes the salted audit marker (kleos_evict_audit)
-        self.mem_q(&format!("::erase {MEM} $keys"), vec![("keys", keys)])?;
         let mut script = String::new();
         if has_vec {
             script.push_str(&format!(
@@ -2309,16 +2339,23 @@ impl<'s, S: Storage<'s>> Db<S> {
                ?[relation, a, b] := *{ENTITY_LINKS}{{relation, a, b}}, relation = $erel, gone[b] \
                :rm {ENTITY_LINKS} {{relation, a, b}}}}"
         ));
+        let mut p = vec![("ns", s(&ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))];
+        let job = Job { op: "erase", mem_ids: &exist, old: &[], text: None, at: now_micros(), entities: &[] };
+        if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
+            script.push_str(&frag);
+            p.extend(ps);
+        }
         script.push_str(&bump_ns_head());
-        self.mem_q(
-            &script,
-            vec![
-                ("ns", s(&ns)),
-                ("ids", str_list(&exist)),
-                ("eids", str_list(&eids)),
-                ("erel", s(MEM_ENTITY)),
-            ],
-        )?;
+        // The dependent rows and the Engram erase job commit first, the
+        // memory rows second: after a crash in between, the overlay is
+        // already being erased and the memory is still there, so repeating
+        // the `forget` completes it. The other order could leave a memory
+        // erased while its Engram rows still answer.
+        p.push(("erel", s(MEM_ENTITY)));
+        self.mem_q(&script, p)?;
+        // ::erase deletes every row of each key with its FTS/HNSW entries and
+        // writes the salted audit marker (kleos_evict_audit)
+        self.mem_q(&format!("::erase {MEM} $keys"), vec![("keys", keys)])?;
         self.mem_access.forget(&ns, &exist);
         Ok(ForgetResult { mode, ids: exist })
     }
