@@ -1006,7 +1006,12 @@ impl<'s, S: Storage<'s>> Db<S> {
             let qs: Vec<DataValue> = mentions
                 .iter()
                 .filter_map(|(i, _, p)| {
-                    let toks: Vec<&String> = p.tokens.iter().filter(|t| t.chars().all(|c| c.is_alphanumeric())).collect();
+                    let toks: Vec<&String> = p
+                        .tokens
+                        .iter()
+                        .filter(|t| t.chars().all(|c| c.is_alphanumeric()))
+                        .filter(|t| !matches!(t.as_str(), "and" | "or" | "not" | "near"))
+                        .collect();
                     if toks.is_empty() {
                         None
                     } else {

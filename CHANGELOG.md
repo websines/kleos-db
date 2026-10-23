@@ -11,6 +11,26 @@ to kleos.
 
 ### Added
 
+- Entity resolution (UPGRADE_PLAN E3, docs/specs/entity-resolution.md,
+  `kleos::entity`). Mentions are resolved against a user's entity relation
+  configured by column names (name, type, aliases, description, embedding).
+  - Candidates: a rule tier (exact normalized name or alias, initials,
+    nicknames, acronyms, first name, surname; honorifics and company suffixes
+    stripped) unioned with the relation's MinHash LSH, FTS and HNSW indices;
+    same or compatible types only.
+  - Confirmation: `same_entity` decisions in one batch. Auto merges, Tentative
+    records a possible same-as link for review, None makes a new entity. A
+    mention is only ever decided against one canonical entity, so merges are
+    never transitive. Without a decider, rules and MinHash decide alone.
+  - Merges are rows in the valid-time relation `kleos_entity_merge`; `split`
+    appends a retraction, so history and time travel keep working. Review links
+    live in `kleos_entity_link`.
+  - Rust: `resolve_entities(config, mentions, opts)`, `merge_entities`,
+    `split_entity`, `entity_history`, `entity_pending`, `reject_entity_link`,
+    `canonical_entity`. CozoScript: `::entity resolve | merge | split | history |
+    pending | reject`. Python: the same methods on `CozoDbPy`.
+  - `examples/entity_eval.rs` measures DBLP-ACM (Leipzig, CC BY 4.0) and a
+    hand-written memory-style mention set against an exact-name baseline.
 - `decide()`: small decision models attached to the database (UPGRADE_PLAN D5,
   docs/specs/decide.md).
   - Fixed, versioned question templates per decision and per backend: `supersedes`,

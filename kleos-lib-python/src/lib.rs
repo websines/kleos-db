@@ -1257,6 +1257,149 @@ impl CozoDbPy {
         out.set_item("reason", d.reason)?;
         Ok(out.into())
     }
+    /// Resolve entity mentions against the entity relation `relation`
+    /// (docs/specs/entity-resolution.md). `mentions` is a list of names or
+    /// dicts with `name`, `type`, `aliases`, `description`, `context`, `id`.
+    /// Options are the `::entity resolve` keys (`type`, `aliases`,
+    /// `description`, `embedding`, `lsh`, `fts`, `hnsw`, `embedder`,
+    /// `decider`, `k`, `max_candidates`, `threshold`, `tau_auto`, ...);
+    /// `commit=True` writes rows, merges and review links. Returns one dict
+    /// per mention: `{mention, name, outcome, entity, id, p, band,
+    /// decided_by, reason, candidates}`.
+    #[pyo3(signature = (relation, mentions, commit=false, **options))]
+    pub fn resolve_entities(
+        &self,
+        py: Python<'_>,
+        relation: &str,
+        mentions: &PyList,
+        commit: bool,
+        options: Option<&PyDict>,
+    ) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let mut cfg = EntityConfig::new(relation);
+        if let Some(o) = options {
+            for (k, v) in o.iter() {
+                let k: String = k.extract()?;
+                let v = py_to_value(v)?;
+                cfg.set(&k, &v).map_err(report2py)?;
+            }
+        }
+        let mut ms = Vec::with_capacity(mentions.len());
+        for m in mentions.iter() {
+            let mention = if let Ok(name) = m.extract::<String>() {
+                Mention::new(name)
+            } else {
+                let d: &PyDict = m.downcast()?;
+                let get_str = |k: &str| -> PyResult<Option<String>> {
+                    Ok(match d.get_item(k)? {
+                        Some(x) if !x.is_none() => Some(x.extract()?),
+                        _ => None,
+                    })
+                };
+                let name = get_str("name")?
+                    .ok_or_else(|| PyException::new_err("a mention dict needs 'name'"))?;
+                let mut x = Mention::new(name);
+                x.entity_type = get_str("type")?;
+                x.description = get_str("description")?;
+                x.context = get_str("context")?;
+                x.id = match d.get_item("id")? {
+                    Some(v) if !v.is_none() => Some(py_to_value(v)?),
+                    _ => None,
+                };
+                if let Some(a) = d.get_item("aliases")? {
+                    x.aliases = a.extract()?;
+                }
+                x
+            };
+            ms.push(mention);
+        }
+        let res = py
+            .allow_threads(|| db.resolve_entities(&cfg, &ms, ResolveOptions { commit }))
+            .map_err(report2py)?;
+        let out = PyList::empty(py);
+        for r in res {
+            let d = PyDict::new(py);
+            d.set_item("mention", r.mention)?;
+            d.set_item("name", r.name)?;
+            d.set_item("outcome", r.outcome.name())?;
+            d.set_item("entity", r.entity.map(|e| value_to_py(e, py)))?;
+            d.set_item("id", r.id.map(|e| value_to_py(e, py)))?;
+            d.set_item("p", r.p)?;
+            d.set_item("band", r.band.name())?;
+            d.set_item("decided_by", r.decided_by)?;
+            d.set_item("reason", r.reason)?;
+            let cands = PyList::empty(py);
+            for c in r.candidates {
+                let cd = PyDict::new(py);
+                cd.set_item("entity", value_to_py(c.entity, py))?;
+                cd.set_item("name", c.name)?;
+                cd.set_item("sources", c.sources)?;
+                cd.set_item("rule", c.rule)?;
+                cd.set_item("jaccard", c.jaccard)?;
+                cd.set_item("p", c.p)?;
+                cd.set_item("band", c.band.map(|b| b.name()))?;
+                cd.set_item("decided_by", c.decided_by)?;
+                cands.append(cd)?;
+            }
+            d.set_item("candidates", cands)?;
+            out.append(d)?;
+        }
+        Ok(out.into())
+    }
+    /// Merge entity `source` into `target` by hand (accepting a review link).
+    #[pyo3(signature = (relation, source, target, reason="manual merge"))]
+    pub fn merge_entities(&self, py: Python<'_>, relation: &str, source: &PyAny, target: &PyAny, reason: &str) -> PyResult<()> {
+        let db = self.db_ref()?;
+        let (a, b) = (py_to_value(source)?, py_to_value(target)?);
+        py.allow_threads(|| db.merge_entities(relation, &a, &b, reason)).map_err(report2py)
+    }
+    /// Undo the merge of `id`; returns what it had been merged into (or None).
+    pub fn split_entity(&self, py: Python<'_>, relation: &str, id: &PyAny) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let id = py_to_value(id)?;
+        let r = py.allow_threads(|| db.split_entity(relation, &id)).map_err(report2py)?;
+        Ok(match r {
+            Some(v) => value_to_py(v, py),
+            None => py.None(),
+        })
+    }
+    /// The canonical entity of `id`.
+    pub fn canonical_entity(&self, py: Python<'_>, relation: &str, id: &PyAny) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let id = py_to_value(id)?;
+        let r = py.allow_threads(|| db.canonical_entity(relation, &id)).map_err(report2py)?;
+        Ok(value_to_py(r, py))
+    }
+    /// Merge history (of `id` when given): list of dicts `{from, into,
+    /// action, at, p, decided_by, reason}`, oldest first.
+    #[pyo3(signature = (relation, id=None))]
+    pub fn entity_history(&self, py: Python<'_>, relation: &str, id: Option<&PyAny>) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let id = match id {
+            Some(v) => Some(py_to_value(v)?),
+            None => None,
+        };
+        let ev = py.allow_threads(|| db.entity_history(relation, id.as_ref())).map_err(report2py)?;
+        let out = PyList::empty(py);
+        for e in ev {
+            let d = PyDict::new(py);
+            d.set_item("from", value_to_py(e.from, py))?;
+            d.set_item("into", value_to_py(e.into, py))?;
+            d.set_item("action", e.action)?;
+            d.set_item("at", e.at)?;
+            d.set_item("p", e.p)?;
+            d.set_item("decided_by", e.decided_by)?;
+            d.set_item("reason", e.reason)?;
+            out.append(d)?;
+        }
+        Ok(out.into())
+    }
+    /// Possible same-as links awaiting review (named rows).
+    pub fn entity_pending(&self, py: Python<'_>, relation: &str) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let rows = py.allow_threads(|| db.entity_pending(relation)).map_err(report2py)?;
+        Ok(named_rows_to_py(rows, py))
+    }
     /// Fit a logistic probe (or with `probe=False` a calibration) for decider
     /// `name` and `template` on the labelled stored relation `relation` (last
     /// column = label); same as `::decider fit`. Persisted in this database.

@@ -1,0 +1,127 @@
+{"split":"adapt","gold":"alice_acme","name":"Alice Smith","type":"person","context":"Alice Smith is my engineering manager at Acme."}
+{"split":"adapt","gold":"alice_piano","name":"Alice Smith","type":"person","context":"Lily's piano teacher Alice Smith moved the lesson to Thursday."}
+{"split":"adapt","gold":"alice_acme","name":"Alice","type":"person","context":"Alice said the Acme launch slips to May."}
+{"split":"adapt","gold":"alice_acme","name":"A. Smith","type":"person","context":"Email from A. Smith about the Acme engineering budget review."}
+{"split":"adapt","gold":"alice_acme","name":"Alice (my manager)","type":"person","context":"Alice (my manager) approved my vacation request."}
+{"split":"adapt","gold":"alice_piano","name":"Mrs. Smith","type":"person","context":"The piano teacher, Mrs. Smith, wants Lily to practise scales every day."}
+{"split":"adapt","gold":"alice_acme","name":"Ms. Smith","type":"person","context":"Ms. Smith from Acme engineering called about the reorg."}
+{"split":"adapt","gold":"bob_neighbour","name":"Robert Jones","type":"person","context":"My neighbour Robert Jones has a spare key to the house."}
+{"split":"adapt","gold":"bob_neighbour","name":"Bob","type":"person","context":"Bob next door is watering the plants while we are away."}
+{"split":"adapt","gold":"bob_accountant","name":"Bob Jones","type":"person","context":"Bob Jones, our accountant at Baker and Co, filed the taxes."}
+{"split":"adapt","gold":"bob_neighbour","name":"Bob Jones","type":"person","context":"Bob Jones from next door borrowed the ladder again."}
+{"split":"adapt","gold":"bob_neighbour","name":"Rob","type":"person","context":"Rob, my neighbour, fixed the garden fence."}
+{"split":"adapt","gold":"bob_accountant","name":"Mr. Jones","type":"person","context":"Mr. Jones the accountant needs the receipts by Friday."}
+{"split":"adapt","gold":"acme","name":"Acme Corp","type":"org","context":"I work at Acme Corp in the platform team."}
+{"split":"adapt","gold":"acme","name":"Acme","type":"org","context":"Acme announced a hiring freeze."}
+{"split":"adapt","gold":"acme","name":"ACME Inc.","type":"org","context":"ACME Inc. offered me a promotion."}
+{"split":"adapt","gold":"acme","name":"Acme Corporation","type":"org","context":"Acme Corporation's offices are moving downtown."}
+{"split":"adapt","gold":"ibm","name":"International Business Machines","type":"org","context":"My uncle retired from International Business Machines."}
+{"split":"adapt","gold":"ibm","name":"IBM","type":"org","context":"IBM sent a recruiter message about a mainframe role."}
+{"split":"adapt","gold":"ibm","name":"IBM Corp.","type":"org","context":"IBM Corp. quarterly results came out."}
+{"split":"adapt","gold":"ibm","name":"Big Blue","type":"org","context":"Big Blue is hiring mainframe engineers again."}
+{"split":"adapt","gold":"nyc","name":"New York City","type":"place","context":"We are moving to New York City in the fall."}
+{"split":"adapt","gold":"nyc","name":"NYC","type":"place","context":"Apartment hunting in NYC is exhausting."}
+{"split":"adapt","gold":"nyc","name":"New York","type":"place","context":"Flight to New York lands at JFK at 6pm."}
+{"split":"adapt","gold":"paris_fr","name":"Paris","type":"place","context":"We flew to Paris to see the Louvre."}
+{"split":"adapt","gold":"paris_tx","name":"Paris, Texas","type":"place","context":"My uncle lives in Paris, Texas, near Dallas."}
+{"split":"adapt","gold":"paris_fr","name":"Paris, France","type":"place","context":"The conference is in Paris, France next June."}
+{"split":"adapt","gold":"paris_tx","name":"Paris TX","type":"place","context":"Driving from Dallas to Paris TX takes two hours."}
+{"split":"adapt","gold":"jonathan","name":"Jonathan Lee","type":"person","context":"My college roommate Jonathan Lee is getting married."}
+{"split":"adapt","gold":"jonathan","name":"Jonathon Lee","type":"person","context":"Jonathon Lee (my old roommate) is visiting next week."}
+{"split":"adapt","gold":"jonathan","name":"Jon","type":"person","context":"Jon from college sent the wedding invitation."}
+{"split":"adapt","gold":"mit","name":"MIT","type":"org","context":"My sister studies physics at MIT."}
+{"split":"adapt","gold":"mit","name":"Massachusetts Institute of Technology","type":"org","context":"She got into the Massachusetts Institute of Technology."}
+{"split":"adapt","gold":"mit","name":"M.I.T.","type":"org","context":"M.I.T. tuition is due in August."}
+{"split":"adapt","gold":"patel_gp","name":"Dr. Priya Patel","type":"person","context":"My GP is Dr. Priya Patel at the Elm Street clinic."}
+{"split":"adapt","gold":"patel_gp","name":"Dr. Patel","type":"person","context":"Dr. Patel prescribed antibiotics for the infection."}
+{"split":"adapt","gold":"patel_gym","name":"Raj Patel","type":"person","context":"Raj Patel from the gym invited me to his barbecue."}
+{"split":"adapt","gold":"patel_gp","name":"Priya","type":"person","context":"Priya at the Elm Street clinic moved my check-up."}
+{"split":"adapt","gold":"patel_gym","name":"Raj","type":"person","context":"Raj from the gym spotted me on the bench press."}
+{"split":"adapt","gold":"sam_brother","name":"Sam","type":"person","context":"My brother Sam is coming for dinner."}
+{"split":"adapt","gold":"sam_brother","name":"Samuel Green","type":"person","context":"My brother Samuel Green got a new job."}
+{"split":"adapt","gold":"samantha","name":"Samantha Ortiz","type":"person","context":"Samantha Ortiz, the realtor, sent three listings."}
+{"split":"adapt","gold":"samantha","name":"Sam Ortiz","type":"person","context":"Realtor Sam Ortiz scheduled the viewing for Saturday."}
+{"split":"adapt","gold":"sam_brother","name":"Sammy","type":"person","context":"Sammy (my brother) turns 30 next month."}
+{"split":"adapt","gold":"amazon_co","name":"Amazon","type":"org","context":"I ordered a new kettle from Amazon."}
+{"split":"adapt","gold":"amazon_river","name":"Amazon","type":"place","context":"We went kayaking on the Amazon in Brazil."}
+{"split":"adapt","gold":"amazon_co","name":"Amazon.com","type":"org","context":"Amazon.com refunded the broken kettle."}
+{"split":"adapt","gold":"amazon_river","name":"Amazon River","type":"place","context":"The Amazon River trip was the highlight of the year."}
+{"split":"adapt","gold":"mom","name":"Mom","type":"person","context":"Mom called about Sunday lunch."}
+{"split":"adapt","gold":"mom","name":"Linda Green","type":"person","context":"My mother Linda Green is visiting in May."}
+{"split":"adapt","gold":"google","name":"Google","type":"org","context":"I have an interview at Google on Monday."}
+{"split":"adapt","gold":"google","name":"Google LLC","type":"org","context":"The offer letter is from Google LLC."}
+{"split":"adapt","gold":"chicago","name":"Chicago","type":"place","context":"Layover in Chicago on the way home."}
+{"split":"adapt","gold":"chicago","name":"Chicago, IL","type":"place","context":"Shipping address is in Chicago, IL."}
+{"split":"adapt","gold":"tom_coach","name":"Tom Becker","type":"person","context":"Tom Becker coaches Lily's soccer team."}
+{"split":"adapt","gold":"tom_coach","name":"Coach Tom","type":"person","context":"Coach Tom cancelled practice because of rain."}
+{"split":"adapt","gold":"tom_plumber","name":"Tom","type":"person","context":"Tom the plumber is coming Tuesday to fix the leak."}
+{"split":"adapt","gold":"tom_plumber","name":"Thomas Reed","type":"person","context":"Thomas Reed, the plumber, sent his invoice."}
+{"split":"test","gold":"maria_globex","name":"Maria Garcia","type":"person","context":"Maria Garcia is the new CTO at Globex."}
+{"split":"test","gold":"maria_globex","name":"M. Garcia","type":"person","context":"M. Garcia signed the Globex contract."}
+{"split":"test","gold":"maria_yoga","name":"Maria Garcia","type":"person","context":"Maria Garcia from my yoga class lent me a mat."}
+{"split":"test","gold":"maria_globex","name":"Maria","type":"person","context":"Maria from Globex wants the roadmap by Friday."}
+{"split":"test","gold":"maria_globex","name":"Ms. Garcia (CTO)","type":"person","context":"Ms. Garcia (CTO) will join the board meeting."}
+{"split":"test","gold":"maria_yoga","name":"Maria","type":"person","context":"Maria from yoga brought cookies to class."}
+{"split":"test","gold":"maria_globex","name":"Dr. Maria Garcia","type":"person","context":"Dr. Maria Garcia, Globex CTO, gave the keynote."}
+{"split":"test","gold":"will_landlord","name":"William Turner","type":"person","context":"My landlord William Turner owns the whole building."}
+{"split":"test","gold":"will_landlord","name":"Bill Turner","type":"person","context":"Bill Turner (landlord) raised the rent by 5 percent."}
+{"split":"test","gold":"will_actor","name":"Will Smith","type":"person","context":"We watched a Will Smith movie on Friday."}
+{"split":"test","gold":"will_landlord","name":"Will","type":"person","context":"Will the landlord fixed the boiler."}
+{"split":"test","gold":"will_landlord","name":"W. Turner","type":"person","context":"Rent cheque made out to W. Turner, the landlord."}
+{"split":"test","gold":"will_actor","name":"Will Smith","type":"person","context":"Will Smith starred in Ali and Men in Black."}
+{"split":"test","gold":"globex","name":"Globex Corporation","type":"org","context":"Globex Corporation is acquiring our startup."}
+{"split":"test","gold":"globex","name":"Globex","type":"org","context":"Globex sent the term sheet."}
+{"split":"test","gold":"globex","name":"Globex Inc","type":"org","context":"Globex Inc legal team reviewed the deal."}
+{"split":"test","gold":"globex","name":"GLOBEX","type":"org","context":"GLOBEX stock jumped after the news."}
+{"split":"test","gold":"un","name":"United Nations","type":"org","context":"She interned at the United Nations in Geneva."}
+{"split":"test","gold":"un","name":"UN","type":"org","context":"The UN climate report came out today."}
+{"split":"test","gold":"un","name":"the U.N.","type":"org","context":"A job posting at the U.N. in New York."}
+{"split":"test","gold":"sf","name":"San Francisco","type":"place","context":"Conference trip to San Francisco in March."}
+{"split":"test","gold":"sf","name":"SF","type":"place","context":"Hotel in SF is booked near Union Square."}
+{"split":"test","gold":"sf","name":"San Fran","type":"place","context":"Cable cars in San Fran were fun."}
+{"split":"test","gold":"sf","name":"San Francisco, CA","type":"place","context":"Return address is San Francisco, CA 94103."}
+{"split":"test","gold":"springfield_il","name":"Springfield, Illinois","type":"place","context":"We visited the Lincoln museum in Springfield, Illinois."}
+{"split":"test","gold":"springfield_ma","name":"Springfield, Massachusetts","type":"place","context":"The Basketball Hall of Fame is in Springfield, Massachusetts."}
+{"split":"test","gold":"springfield_il","name":"Springfield","type":"place","context":"Springfield is the capital of Illinois and Lincoln's home town."}
+{"split":"test","gold":"springfield_ma","name":"Springfield, MA","type":"place","context":"Springfield, MA has the Hall of Fame we want to see."}
+{"split":"test","gold":"kate_dentist","name":"Katherine Wong","type":"person","context":"My dentist Katherine Wong recommended a night guard."}
+{"split":"test","gold":"kate_dentist","name":"Dr. Wong","type":"person","context":"Dr. Wong said I need a filling."}
+{"split":"test","gold":"kate_coach","name":"Kate Wong","type":"person","context":"Kate Wong, Lily's swimming coach, moved practice to 7am."}
+{"split":"test","gold":"kate_dentist","name":"Kate Wong","type":"person","context":"Kate Wong (dentist) appointment on Friday at the dental office."}
+{"split":"test","gold":"kate_dentist","name":"Katie","type":"person","context":"Katie at the dental office confirmed my cleaning."}
+{"split":"test","gold":"kate_coach","name":"Coach Kate","type":"person","context":"Coach Kate says Lily is ready for the swim meet."}
+{"split":"test","gold":"mike","name":"Michael O'Brien","type":"person","context":"My coworker Michael O'Brien on the data team."}
+{"split":"test","gold":"mike","name":"Mike OBrien","type":"person","context":"Mike OBrien shared the data team's dashboard."}
+{"split":"test","gold":"mike","name":"Mike","type":"person","context":"Mike from the data team is out sick."}
+{"split":"test","gold":"mike","name":"Micheal O'Brien","type":"person","context":"Micheal O'Brien (data team) reviewed my pull request."}
+{"split":"test","gold":"mike_bike","name":"Mike","type":"person","context":"Mike at the bike shop trued my wheel."}
+{"split":"test","gold":"stripe","name":"Stripe","type":"org","context":"Payments go through Stripe."}
+{"split":"test","gold":"stripe","name":"Stripe, Inc.","type":"org","context":"Stripe, Inc. sent the 1099 form."}
+{"split":"test","gold":"dad","name":"Dad","type":"person","context":"Dad's birthday is in June."}
+{"split":"test","gold":"dad","name":"David Green","type":"person","context":"My dad David Green retired last year."}
+{"split":"test","gold":"jpm","name":"JPMorgan Chase","type":"org","context":"My checking account is with JPMorgan Chase."}
+{"split":"test","gold":"jpm","name":"JP Morgan","type":"org","context":"JP Morgan approved the mortgage."}
+{"split":"test","gold":"jpm","name":"Chase","type":"org","context":"Chase flagged a suspicious charge on my card."}
+{"split":"test","gold":"lisbon","name":"Lisbon","type":"place","context":"Weekend trip to Lisbon in April."}
+{"split":"test","gold":"lisbon","name":"Lisboa","type":"place","context":"The tram in Lisboa was crowded."}
+{"split":"test","gold":"chen_advisor","name":"Elizabeth Chen","type":"person","context":"Elizabeth Chen, my PhD advisor, liked the paper draft."}
+{"split":"test","gold":"chen_advisor","name":"Liz","type":"person","context":"Liz (my advisor) wants the experiments rerun."}
+{"split":"test","gold":"chen_advisor","name":"Prof. Chen","type":"person","context":"Prof. Chen's lab meeting moved to Wednesday."}
+{"split":"test","gold":"chen_bike","name":"Wei Chen","type":"person","context":"Wei Chen from the bike shop ordered the part."}
+{"split":"test","gold":"chen_advisor","name":"Beth Chen","type":"person","context":"Beth Chen (advisor) signed my thesis form."}
+{"split":"test","gold":"chen_bike","name":"Mr. Chen","type":"person","context":"Mr. Chen at the bike shop says the part arrives Monday."}
+{"split":"test","gold":"oxford_uni","name":"University of Oxford","type":"org","context":"He did his masters at the University of Oxford."}
+{"split":"test","gold":"oxford_uni","name":"Oxford University","type":"org","context":"Oxford University sent the alumni magazine."}
+{"split":"test","gold":"oxford_city","name":"Oxford","type":"place","context":"We took the train to Oxford for the day."}
+{"split":"test","gold":"oxford_uni","name":"Oxford","type":"org","context":"Oxford offered her a scholarship."}
+{"split":"test","gold":"nina","name":"Nina Petrova","type":"person","context":"Nina Petrova is my new therapist."}
+{"split":"test","gold":"nina","name":"Dr. Petrova","type":"person","context":"Dr. Petrova suggested journaling before bed."}
+{"split":"test","gold":"nina","name":"Nina","type":"person","context":"Nina (therapist) moved our session to Thursday."}
+{"split":"test","gold":"nina_cousin","name":"Nina","type":"person","context":"My cousin Nina is getting married in Lisbon."}
+{"split":"test","gold":"ny_times","name":"The New York Times","type":"org","context":"I subscribed to The New York Times."}
+{"split":"test","gold":"ny_times","name":"NYT","type":"org","context":"The NYT article about housing was good."}
+{"split":"test","gold":"ny_times","name":"New York Times","type":"org","context":"New York Times crossword is my morning habit."}
+{"split":"test","gold":"microsoft","name":"Microsoft","type":"org","context":"Teams at Microsoft use Azure DevOps."}
+{"split":"test","gold":"microsoft","name":"Microsoft Corporation","type":"org","context":"Microsoft Corporation renewed our enterprise licence."}
+{"split":"test","gold":"microsoft","name":"MSFT","type":"org","context":"MSFT shares are up this year."}
+{"split":"test","gold":"microsoft","name":"Microsfot","type":"org","context":"Microsfot support finally answered my ticket."}
