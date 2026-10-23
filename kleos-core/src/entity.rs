@@ -1253,10 +1253,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                 .members(canon)
                 .iter()
                 .any(|id| snap.rows.get(*id).is_some_and(|r| r.description.is_some() || parse_name(&r.name).remark.is_some()));
+            // with a model, short exact names ("Maria Garcia", "Mike") are
+            // checked by it: same-name different people are common in memory
             let decisive = !has_decider
                 || cfg.exact_auto
                 || name_is_long(&norm)
-                || !(mention_has_context && entity_has_context);
+                || (!mention_has_context && !entity_has_context);
             if decisive {
                 out[i].rule_auto = Some(format!("rule|{}", out[i].cand.rule.clone().unwrap_or_default()));
             }
@@ -1449,7 +1451,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                 cols.push(c.clone());
                 vals.push(DataValue::List(m.aliases.iter().map(|a| DataValue::from(a.as_str())).collect()));
             }
-            let desc = m.description.clone().or(parsed.remark.clone());
+            // the evidence the mention came with describes the new entity
+            let desc = m
+                .description
+                .clone()
+                .or(parsed.remark.clone())
+                .or_else(|| m.context.as_deref().filter(|c| !c.is_empty()).map(|c| clip(c, 200)));
             if let Some(c) = &cfg.description {
                 cols.push(c.clone());
                 vals.push(desc.as_deref().map(DataValue::from).unwrap_or(DataValue::Null));
