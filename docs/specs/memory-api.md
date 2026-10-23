@@ -205,7 +205,7 @@ What the pending pairs were: below p 0.9 they were almost all two sentences on o
 
 These are harder than the held-out ones on retrieval: in 9 of 49, the top hit was an earlier *question* about the same thing ("how many engineers do I lead in my new role?"), and many true updates score just under τ (p 0.996, pending).
 
-**After the LoCoMo fix** (joining, speaker labels; same 23 questions, wave3/claims-fix): latest first 83%, stale first 17%, latest in top 10 100%, 91% with `hide_pending`, 0.43 superseded and 1.83 pending per question (1.09 supersedes, 0.74 duplicate); 2.6 claims per message instead of 2.8. Latency was measured on a machine shared with three other benchmark runs (p50 300 ms per message), so it is not comparable with the 144 ms above.
+**After the LoCoMo fix** (joining, speaker labels; same 23 questions, wave3/claims-fix): latest first 83%, stale first 17%, latest in top 10 100%, 91% with `hide_pending`, 0.43 superseded and 1.83 pending per question (1.09 supersedes, 0.74 duplicate); 2.6 claims per message instead of 2.8. LongMemEval_S (bench-l2): fts on all 500 questions R@5 0.952, R@10 0.958, T@5 0.869 (main 0.950, 0.960, 0.869); hybrid on the 119-question set R@5 0.992, R@10 0.992, T@5 0.910, identical to main (before claims: 0.992, 1.000, 0.930). Latency was measured on a machine shared with three other benchmark runs (p50 300 ms per message), so it is not comparable with the 144 ms above.
 
 **Life stream** (40 one-sentence turns, so every statement is one claim): unchanged. Main's memory code and this branch, back to back on the same machine:
 
