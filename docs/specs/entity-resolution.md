@@ -183,7 +183,75 @@ There is no fixed rule. Resolution writes and reads several relations, so a syst
 
 ## Evaluation
 
-See the results section below (`entity_eval.rs`).
+`cargo +1.99.0 run --release -p kleos --features infer-metal --example entity_eval -- --memory --dblp .bench-data/entity/dblp-acm`
+
+Setup:
+- Models: decider-nano (`nano-tune-v1`, q8, Metal) for `same_entity`, and potion-base-8M for the vector source in the ML variants.
+- The pair-decision cache is off, so throughput counts every model call.
+- Hardware: M3 with 16 GB, shared with two other agents' builds. Throughput is noisy: the same DBLP variant ran at 2–13 mentions/s across runs. The model costs about 25 ms per forward pass on Metal, two orders per pair.
+
+**What was fitted on what.** Every number below is on held-out data.
+- **Memory set:** split by hand into 58 adapt and 69 test mentions with **disjoint entities** (22 and 25).
+- **DBLP-ACM:** a seeded 30% hash split of the DBLP records gives 794 adapt and 1822 test mentions.
+- Two fits use only the adapt pairs the decider saw:
+  - **τ fit**: label threshold by accuracy, and `tau_auto` by the risk rule of decide.md, with α = 0.02 for memory and α = 0.01 for DBLP;
+  - **probe**: `fit_decider(…, "same_entity", adapt_pairs, probe = true)`, the `::decider fit` path, with C and τ chosen on out-of-fold predictions.
+- Neither the shipped `same_entity` defaults (threshold 0.5, τ 0.9) nor any prompt were changed.
+
+How to read the tables:
+- **Candidate recall:** the share of mentions with a true match whose match is among the candidates. **Top-M recall:** the same, within the candidates sent to the decider (M = 5 for memory, 3 for DBLP).
+- **P/R/F1:** over all mention pairs of the split (memory), or over the gold DBLP→ACM pairs (DBLP).
+- **Auto false merges:** wrong merges / all merges.
+
+### Memory-style mentions
+
+127 hand-written mentions in 47 entities. They include:
+- nicknames, initials and honorifics;
+- roles in parentheses;
+- acronyms;
+- typos;
+- same-name different people: two Alice Smiths, two Maria Garcias, Bob Jones the neighbour and Bob Jones the accountant, two Kate Wongs, Will the landlord and Will Smith;
+- same-name different places: Paris and Paris, Texas; two Springfields; Amazon the company and Amazon the river; Oxford the city and Oxford the university.
+
+The mentions are streamed in order with commit (test split shown).
+
+| Variant | Candidate recall | Top-M recall | P | R | F1 | Auto false merges | Mentions/s |
+|---|---|---|---|---|---|---|---|
+| baseline: exact normalized name, same type | – | – | 0.611 | 0.145 | 0.234 | **42.9%** (6/14) | ~10⁶ |
+| kleos, no ML (rules + LSH + FTS) | 0.932 | 0.932 | 0.611 | 0.145 | 0.234 | 42.9% (6/14) | ~2000 |
+| kleos + decider-nano, shipped calibration | 1.000 | 1.000 | **1.000** | 0.474 | 0.643 | **0%** (0/25) | 3 |
+| kleos + decider-nano, τ fitted on adapt | 1.000 | 1.000 | **1.000** | **0.632** | **0.774** | **0%** (0/32) | 3 |
+| kleos + decider-nano, probe fitted on adapt | 1.000 | 1.000 | 1.000 | 0.382 | 0.552 | 0% (0/22) | 2 |
+
+Notes:
+- Same-entity AUROC over the pairs the decider saw on test: 0.969 zero-shot, and **0.997 with the probe**. The probe's risk-controlled τ is very high (0.9997, from 224 adapt pairs), so its auto band is small.
+- The τ fit on adapt gave threshold 0.064 and τ 0.503, with 0 false on adapt.
+- The no-ML variant is as precise as the baseline here. Its exact-name auto-merges are the same-name different people. Initials, nicknames and acronyms are only linked for review.
+- The non-merged true pairs mostly sit in the Tentative band as review links, for example "Mom" / "Linda Green" and "Big Blue" / "IBM". There is no name overlap there, and the vector source did not bridge them.
+
+### DBLP-ACM (Leipzig, CC BY 4.0)
+
+ACM's 2294 records are the entities: title as the name, "authors; venue year" as the description. The 1822 test DBLP records are resolved in a dry run.
+
+| Variant | Candidate recall | Top-3 recall | P | R | F1 | Auto false merges | Mentions/s |
+|---|---|---|---|---|---|---|---|
+| baseline: exact normalized title, unique | – | – | 0.996 | 0.898 | 0.944 | 0.36% (5/1390) | ~10⁵ |
+| kleos, no ML (rules + LSH + FTS) | **1.000** | 0.994 | 0.967 | **0.936** | **0.951** | 3.28% (49/1493) | 139–1366 |
+| kleos + decider-nano, shipped calibration | 1.000 | 0.999 | 0.994 | 0.892 | 0.940 | 0.65% (9/1386) | 2–12 |
+| kleos + decider-nano, τ fitted on adapt (α 1%) | 1.000 | 0.999 | 0.995 | 0.879 | 0.933 | 0.51% (7/1363) | 3 |
+| kleos + decider-nano, probe fitted on adapt | 1.000 | 0.999 | **0.996** | 0.895 | 0.943 | **0.36%** (5/1386) | 13 |
+
+Notes:
+- Most DBLP-ACM matches have identical titles, so long exact titles are decided by the rule tier and the model sees only the residual pairs: 1434 pairs.
+- On those pairs, AUROC is 0.930 zero-shot and **0.994 with the probe**. Both auto bands are conservative, so the model adds precision but not recall over the exact-title baseline.
+- The MinHash rule (J ≥ 0.9, no model) reaches the best recall, but at a 3.3% false-merge rate. That is above the α the system targets, which is why it only applies when no decider is configured.
+- The remaining false merges are exact-title rule merges: identical titles of different records, as the baseline also makes.
+
+**Summary.**
+- Blocking recall is ≥ 0.99 on both sets.
+- On memory-style mentions, the decider is what makes merging safe. The baseline merges same-name different people 43% of the time; kleos with decider-nano made 0 false merges out of 32 and raised F1 from 0.23 to 0.77.
+- On bibliographic records it keeps precision at the exact-title level, but does not raise recall at a 1% risk target.
+- Throughput with a model is bounded by decider-nano's per-pass cost on Metal (about 25 ms × 2 orders × candidates). Rules-only runs at thousands of mentions per second.
 
 ## Caveats
 
