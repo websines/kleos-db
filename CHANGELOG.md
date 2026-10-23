@@ -11,6 +11,39 @@ to kleos.
 
 ### Added
 
+- Agent memory API (UPGRADE_PLAN H1 + E10, docs/specs/memory-api.md):
+  `remember` / `recall` / `forget` / `reflect` / `link` on a ready-made,
+  namespaced schema (`kleos_mem` with valid time, vectors, entities, mentions,
+  typed links, statement sources and a decision audit table), so an agent never
+  writes CozoScript.
+  - `remember` finds the top-k similar current memories (vector plus FTS),
+    batches `decide(supersedes)` and `decide(duplicate)` over them and acts on the
+    band. `auto` supersedes by ending the old memory's validity (never deleting)
+    or skips a duplicate and records the statement as another source.
+    `tentative` (and a likely supersede below the tuned threshold) inserts and
+    records a pending decision. Every result carries `decided_by`.
+  - Without models it degrades to add-only plus FTS, keeping two model-free
+    rules: exact-text duplicates and the value rules. It never errors because
+    ML is off.
+  - `recall` is hybrid search with `WeightedFusion`, over currently valid
+    memories by default, with `as_of` time travel, namespace, kind and entity
+    filters, and `hide_pending`. `forget` retracts (default) or erases (GDPR,
+    via `::erase`). `reflect` returns pending decisions, `::changes` and
+    contradiction candidates, without a model. `link` adds a typed edge.
+  - Entity linking goes through one hook, `memory::link_entities`: exact
+    normalised names for now, E3 later.
+  - Surfaces: Rust (`Db`/`DbInstance::remember`, `recall`, `forget`,
+    `reflect`, `link`, `memory_init`, `memory_call`); CozoScript
+    (`::memory init | remember | recall | forget | reflect | link`); Python
+    (`db.remember(text, ns=…)` etc.); HTTP (`POST /memory/:op`).
+  - On a scripted 40-turn life stream with decider-nano (nano-tune-v1, q8) and
+    EmbeddingGemma int8 on Metal: 12 of 15 gold supersessions were auto-applied
+    with 0 wrong. The 3 misses scored p 0.977–0.996, below τ 0.997, and were
+    kept as pending. 4 of 6 restatements were deduplicated with 0 wrong.
+    Recall returned the current fact first for 15 of 20 questions (18 of 20
+    with `hide_pending`). p50 latency, on a loaded machine: remember 355–655 ms
+    (5 candidates × 3 forward passes), recall 11–38 ms.
+
 - `decide()`: small decision models attached to the database (UPGRADE_PLAN D5,
   docs/specs/decide.md).
   - Fixed, versioned question templates per decision and per backend: `supersedes`,

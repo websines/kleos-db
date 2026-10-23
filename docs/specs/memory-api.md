@@ -71,7 +71,7 @@ Steps:
 |---|---|
 | `duplicate` is auto/yes and `supersedes` is not | Nothing is inserted. The statement becomes a `kleos_mem_source` row of the existing memory, and the result has `duplicate_of`. |
 | `supersedes` is auto/yes and `duplicate` is not | The new memory is inserted. Each such candidate gets a retraction row at `at` (E1 semantics, values copied), `current = false` on its vector, and a `supersedes` link. Candidates whose validity starts after `at` (a late arrival) are left pending instead. |
-| Tentative (label yes, band tentative), or two auto answers that disagree | The memory is inserted and the decision is recorded `pending`. |
+| Tentative (label yes, band tentative); `supersedes` with p ≥ 0.5 below the calibrated threshold (the review band, below); or two auto answers that disagree | The memory is inserted and the decision is recorded `pending`. `recall` flags the older memory with `pending_superseded_by`, and can hide it with `hide_pending`. |
 | None | Plain insert. |
 
 6. Link entities (see "Entity hook").
@@ -99,6 +99,10 @@ With the default weights (nano-tune-v1, [decide.md](decide.md)):
 | `duplicate` | threshold 0.091, τ 1.01 | AUROC 0.99, but never auto: with tuned weights, the auto band admitted elaborations as duplicates. Every model duplicate is therefore *tentative* and recorded for review. Auto duplicates come from the exact-text rule, or from a calibration or probe the user fits (`::decider fit … duplicate`). |
 | `relation` | threshold 0, τ 1.0 | Every answer is tentative, so it never acts. Its 4-way accuracy (0.905) needs a fitted probe, and its "update" label is the same NLI-contradiction signal that `supersedes` reads better. |
 
+**Review band.** The tuned `supersedes` calibration has threshold = τ = 0.997, so it has no tentative band: p = 0.99 comes back as "no", band none. `remember` keeps every `supersedes` answer with p ≥ 0.5 below the threshold as a pending decision. It never acts on one. Reads choose the policy, as the decide spec's safety guidance asks:
+- by default, both memories are returned and the older one is flagged;
+- with `hide_pending`, the flagged one is left out.
+
 So `remember` asks two binary questions. Each has its own validated prompt and calibration, and each band maps directly onto one action. The cost is about 3 forward passes per candidate: supersedes takes 1, and duplicate takes 2 because it is symmetric.
 
 Shortcuts not taken:
@@ -120,7 +124,8 @@ Shortcuts not taken:
 Options:
 - `ns`, `k` (default 10), `kind`, `entity` (a name);
 - `as_of`: valid time in µs;
-- `vector_weight`: default 0.6.
+- `vector_weight`: default 0.6;
+- `hide_pending`: leave out memories with a pending `supersedes` by a memory valid at the read time. Default false.
 
 It is one script:
 - The vector leg is HNSW over `kleos_mem_vec`, filtered to the namespace (and `current` unless `as_of` is set). Its score is −distance.
@@ -129,7 +134,7 @@ It is one script:
 - The result is joined with `kleos_mem` `@ 'NOW'` (or `@ $as_of`), plus the kind and entity filters, and ordered by score.
 - Both legs over-fetch (4k + 16, and 4× more with a filter), because the indexes also hold stale versions.
 
-Each hit has `id, text, score, kind, source, created, importance, valid_from, valid_to`. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
+Each hit has `id, text, score, kind, source, created, importance, valid_from, valid_to, pending_superseded_by`. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
 
 The vector leg always returns the nearest neighbours, so recall returns up to k memories even when none are relevant. There is no score cutoff.
 
@@ -236,7 +241,21 @@ A read-only principal may only use `recall` and `reflect`.
 
 ### Real scenario
 
-A 40-turn "user life" stream (`scripts/memory-api/life_stream.py`): moves, job changes, changing preferences, restatements and unrelated facts. It has 20 questions about the current facts, 3 of them `as_of`, and is run with decider-nano (nano-tune-v1, q8) and EmbeddingGemma int8 on Metal. The numbers are in the CHANGELOG entry and the commit report.
+A 40-turn "user life" stream (`scripts/memory-api/life_stream.py`): moves, job changes, changing preferences, restatements and unrelated facts. It has 20 questions, 3 of them `as_of`, and is run with decider-nano (nano-tune-v1, q8) and EmbeddingGemma int8 on Metal (`python3 scripts/memory-api/life_stream.py --run`; report in `.bench-data/memory-api/`).
+
+| | Result |
+|---|---|
+| Auto-supersede | 12 of 15 gold updates, **0 wrong** |
+| Missed supersedes | 3, scored p 0.996, 0.993 and 0.977 (τ 0.997): Berlin → Lisbon, and Spotify → Tidewater twice. All 3 were kept as pending through the review band. |
+| Duplicates | 4 of 6 skipped, 0 wrong. The 2 misses are paraphrases, recorded as tentative. |
+| Pending decisions | 13 in total, of which 4 are true supersedes. The false ones are cross-subject pairs: "my sister lives in Munich" against "I live in Berlin", and a cat against a dog. |
+| Recall, current fact first (top-1) | 15 / 20. With `hide_pending`: 18 / 20, but one time-travel answer was hidden by a false pending (the sister). |
+| Latency p50 (loaded machine, two other builds running) | remember 355–655 ms, recall 11–38 ms |
+
+What the numbers say:
+- The auto band is safe on this stream.
+- The misses all sit just under τ. The review band catches them, but it also flags different-subject pairs.
+- Same-subject candidates, which is what entity resolution (E3) will provide, are the precision lever for both. Until then, `hide_pending` stays off by default.
 
 ## Caveats
 
