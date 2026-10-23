@@ -14,7 +14,7 @@ Retrieval is the same on both builds wherever both ran. That covers every LongMe
 | | LongMemEval_S (500 q) | LongMemEval oracle file | LoCoMo (10 conv, 1,986 q) |
 |---|---|---|---|
 | `fts` | **all 500** | all 500 (sanity) | **all 10 / 1,986** |
-| `hybrid` (EmbeddingGemma) | 25 held-out KU + a stratified sample: HYB_N questions in total (6f9711f); 51 on 276f90f | the 78 KU questions | **all 10 / 1,986** |
+| `hybrid` (EmbeddingGemma) | **119**: the 25 held-out KU plus a stratified 99 (6f9711f, Metal); 51 on 276f90f (CPU, stopped early) | the 78 KU questions | **all 10 / 1,986** |
 | `sup` (+ decider-nano) | not run in the full haystack (see below) | the **25 held-out KU** questions | not run |
 | QA (GLM-4.7-Flash) | all 500 for `none` / `oracle` / `kleos_fts`; a stratified 99 (+ the hybrid set) for `full`, `kleos_hybrid` | the 25 held-out KU, every variant | stratified **301** of the 1,540 in categories 1–4, all conditions |
 
@@ -42,7 +42,18 @@ Retrieval is the same on both builds wherever both ran. That covers every LongMe
 
 **LongMemEval_S, `fts` vs `hybrid`, paired on the same questions:**
 
-HYB_TABLE
+119 questions: the 25 held-out KU plus a stratified 99, so KU is over-represented in "all".
+
+| split | n | `fts` R@5 | R@10 | Rall@10 | T@10 | NDCG@10 | `hybrid` R@5 | R@10 | Rall@10 | T@10 | NDCG@10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| all | 119 | 0.966 | 0.966 | 0.874 | 0.910 | 0.901 | **0.992** | **1.000** | **0.941** | **0.970** | **0.950** |
+| single-session | 30 | 0.967 | 0.967 | 0.967 | 0.889 | 0.967 | 1.000 | 1.000 | 1.000 | 1.000 | 0.988 |
+| multi-session | 24 | 0.958 | 0.958 | 0.667 | 0.875 | 0.814 | 1.000 | 1.000 | 0.875 | 0.958 | 0.921 |
+| temporal-reasoning | 25 | 0.960 | 0.960 | 0.800 | 0.880 | 0.844 | 0.960 | 1.000 | 0.840 | 0.920 | 0.889 |
+| knowledge-update | 32 | 1.000 | 1.000 | 1.000 | 1.000 | 0.982 | 1.000 | 1.000 | 1.000 | 1.000 | 0.994 |
+| abstention | 8 | 0.875 | 0.875 | 0.875 | – | 0.767 | 1.000 | 1.000 | 1.000 | – | 0.910 |
+
+LongMemEval_S is lexically easy at session level. Most of the haystack is unrelated ShareGPT/UltraChat filler, so BM25 alone finds an answer session in the top 5 for 95% of questions. The harder numbers are Rall (every evidence session) and T (the evidence turn itself). Hybrid adds most there, for example multi-session Rall@10 rises from 0.67 to 0.88.
 
 **Knowledge update: does a stale value outrank the current one?** These are oracle-file KU questions: the store holds only the evidence sessions, so both the old and the new value. There are 23 non-abstention questions among the 25 held out from decider training.
 
@@ -95,14 +106,33 @@ What the table shows:
 
 **LongMemEval_S, with full context (~106k tokens per question):**
 
-QA_HYB_TABLE
+QA_119 questions: the 25 held-out KU plus a stratified 99, so KU is over-represented in "all".
+
+| split | n | `fts` R@5 | R@10 | Rall@10 | T@10 | NDCG@10 | `hybrid` R@5 | R@10 | Rall@10 | T@10 | NDCG@10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| all | 119 | 0.966 | 0.966 | 0.874 | 0.910 | 0.901 | **0.992** | **1.000** | **0.941** | **0.970** | **0.950** |
+| single-session | 30 | 0.967 | 0.967 | 0.967 | 0.889 | 0.967 | 1.000 | 1.000 | 1.000 | 1.000 | 0.988 |
+| multi-session | 24 | 0.958 | 0.958 | 0.667 | 0.875 | 0.814 | 1.000 | 1.000 | 0.875 | 0.958 | 0.921 |
+| temporal-reasoning | 25 | 0.960 | 0.960 | 0.800 | 0.880 | 0.844 | 0.960 | 1.000 | 0.840 | 0.920 | 0.889 |
+| knowledge-update | 32 | 1.000 | 1.000 | 1.000 | 1.000 | 0.982 | 1.000 | 1.000 | 1.000 | 1.000 | 0.994 |
+| abstention | 8 | 0.875 | 0.875 | 0.875 | – | 0.767 | 1.000 | 1.000 | 1.000 | – | 0.910 |
+
+LongMemEval_S is lexically easy at session level. Most of the haystack is unrelated ShareGPT/UltraChat filler, so BM25 alone finds an answer session in the top 5 for 95% of questions. The harder numbers are Rall (every evidence session) and T (the evidence turn itself). Hybrid adds most there, for example multi-session Rall@10 rises from 0.67 to 0.88.
 
 **LoCoMo, a stratified 301 of categories 1–4** (Mem0's reader and judge prompts; GLM-4.7-Flash):
 
-LOCOMO_QA_TABLE
+| split | n | no memory | kleos_fts | **kleos_hybrid** | full conversation (~20k tokens) | evidence turns (oracle) |
+|---|---|---|---|---|---|---|
+| **cat 1–4** | 301 | 0.462 | 0.645 | **0.714** | 0.814 | 0.897 |
+| 1 multi-hop | 55 | 0.455 | 0.655 | 0.709 | 0.909 | 0.964 |
+| 2 temporal | 63 | 0.381 | 0.397 | 0.365 | 0.603 | 0.714 |
+| 3 open-domain | 19 | 0.474 | 0.474 | 0.526 | 0.737 | 0.789 |
+| 4 single-hop | 164 | 0.494 | 0.756 | 0.872 | 0.872 | 0.957 |
+
+(On 276f90f: kleos_fts 0.645 and kleos_hybrid 0.718. The other columns are cached and identical.)
 
 **How to read these.**
-- On LongMemEval, kleos top-10 retrieval with the same reader **matches or beats putting the whole 106k-token history in the prompt**. The difference is largest on knowledge update (0.79 vs 0.36): the long context confuses the reader about which value is current.
+- On LongMemEval, kleos top-10 retrieval with the same reader **beats putting the whole 106k-token history in the prompt**: hybrid 0.681 and fts 0.571, against 0.538 for full context. The gap is largest on multi-session (0.67 vs 0.21) and knowledge update (0.75–0.81 vs 0.53). The long context buries the facts and confuses the reader about which value is current.
 - On LoCoMo, full context (about 20k tokens) still wins by about 10 points.
 - The `ss-assistant` row is the cost of the unit choice: assistant replies are not stored, so kleos equals "no memory" there.
 - **LoCoMo's no-memory score is 0.46.** Mem0's lenient judge ("touches on the same topic") accepts plausible guesses, as Penfield's audit found. LongMemEval's stricter judge gives 0.08 for no memory.
@@ -134,11 +164,11 @@ One process, 16 GB Apple-silicon laptop. Rates include the in-process benchmark 
    - `hide_pending` fixes the ordering, but it costs recall and QA, because the review band also flags cross-topic pairs.
    - Sentence-level claim splitting before `decide`, which the coordinator has in progress, targets exactly this.
 2. **Multi-evidence questions.**
-   - **Rall@10** is 0.74 on LongMemEval multi-session and 0.12 (fts) / 0.20 (hybrid) on LoCoMo multi-hop: the top 10 rarely covers every evidence session.
+   - **Rall@10** is 0.74 on LongMemEval multi-session (fts, all 500; hybrid 0.88 on its sample) and 0.12 (fts) / 0.20 (hybrid) on LoCoMo multi-hop: the top 10 rarely covers every evidence session.
    - Recall returns near-duplicate turns from one session instead of diversifying.
 3. **Preference questions** (ss-preference R@5 0.77, NDCG 0.68).
    - The question ("Can you recommend…") shares few words with the turn that states the preference.
-   - Hybrid helps on LoCoMo (+0.11 R@5 overall), but the LongMemEval_S hybrid sample is too KU-heavy to say much here.
+   - Hybrid helps on LoCoMo (+0.11 R@5 overall). On the LongMemEval hybrid set only 6 preference questions ran, too few to judge.
 4. **LoCoMo adversarial (category 5):** hybrid ranks the evidence *lower* than fts (0.49 vs 0.58 R@5). The questions are near-misses that the embedding matches to the wrong speaker.
 5. **Embedding cost without Metal.** On CPU, EmbeddingGemma at 512 tokens per memory runs at about 2.4 remembers/s, which is too slow for bulk chat ingestion. Metal gives about 34/s.
 6. **Assistant content is not stored** in this setup (a harness choice; `--unit round` exists).
@@ -231,11 +261,27 @@ The harness recomputes the split exactly: sort by id, shuffle with `Random(20261
 
 ### Reproduce
 
+Re-running against a newer engine is one command. Point `ENGINE_SRC` at a checkout of it; a detached worktree of main is enough:
+
 ```zsh
-scripts/bench-l2/run.sh                         # build a wheel of this checkout, install it, run retrieval, report vs 276f90f
-QA=1 scripts/bench-l2/run.sh                    # plus QA (reads SYNTHETIC_KEY from the .env next to the checkout)
-SKIP_BUILD=1 KLEOS_BENCH_TAG=276f90f scripts/bench-l2/run.sh   # re-print an existing run
+git worktree add --detach .bench-data/bench-l2/engine-<rev> <rev>   # or any kleos checkout
+ENGINE_SRC=$PWD/.bench-data/bench-l2/engine-<rev> QA=1 scripts/bench-l2/run.sh
 ```
+
+What `run.sh` does:
+- builds the wheel (`RUSTUP_TOOLCHAIN=1.99.0 maturin build --release --features compact,infer-metal -m kleos-lib-python/Cargo.toml`) and installs it into `.bench-data/bench-l2/.venv`;
+- runs every retrieval set above, then (with `QA=1`) the QA sets;
+- prints `report.py --compare 276f90f`, i.e. old → new on the questions both builds ran.
+
+The tag is the checkout's last engine commit (`kleos-core`, `kleos-infer`, `kleos-lib-python`, `Cargo.lock`).
+
+Other uses:
+- `SKIP_BUILD=1 KLEOS_BENCH_TAG=<rev>` re-prints an existing run.
+- `COMPARE=6f9711f` changes the baseline.
+- `QA=1` reads `SYNTHETIC_KEY` from the `.env` next to the checkout, at call time. The key is never logged.
+- The model runs take about 15 min on Metal. The fts runs take minutes.
+
+**Quota.** All QA in this document used about 8.5% of the weekly Synthetic plan. `syn:small:text` does not count against the 500-request subscription window. Full-context LongMemEval prompts were 5 points of that.
 
 **Where things go.**
 - Results: `.bench-data/bench-l2/results/<git rev>/`.
