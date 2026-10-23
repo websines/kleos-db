@@ -35,11 +35,23 @@ pub struct SqliteStorage {
 ///
 /// You must provide a disk-based path: `:memory:` is not OK.
 /// If you want a pure memory storage, use [`new_cozo_mem`](crate::new_cozo_mem).
+/// How long a connection waits for another connection's lock before
+/// failing with `database is locked`. Several processes may share one
+/// database file; without a busy timeout any call made while another
+/// process writes fails at once (kleos fork).
+const BUSY_TIMEOUT_MS: usize = 5_000;
+
+fn open_conn(path: &Path) -> Result<ConnectionThreadSafe> {
+    let mut conn = Connection::open_thread_safe(path).into_diagnostic()?;
+    conn.set_busy_timeout(BUSY_TIMEOUT_MS).into_diagnostic()?;
+    Ok(conn)
+}
+
 pub fn new_cozo_sqlite(path: impl AsRef<Path>) -> Result<crate::Db<SqliteStorage>> {
     if path.as_ref().to_str() == Some("") {
         bail!("empty path for sqlite storage")
     }
-    let conn = Connection::open_thread_safe(&path).into_diagnostic()?;
+    let conn = open_conn(path.as_ref())?;
     let query = r#"
         create table if not exists cozo
         (
@@ -66,7 +78,7 @@ impl<'s> Storage<'s> for SqliteStorage {
     fn transact(&'s self, write: bool) -> Result<Self::Tx> {
         let conn = {
             match self.pool.lock().unwrap_or_else(|e| e.into_inner()).pop() {
-                None => Connection::open_thread_safe(&self.name).into_diagnostic()?,
+                None => open_conn(&self.name)?,
                 Some(conn) => conn,
             }
         };

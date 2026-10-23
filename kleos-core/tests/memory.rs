@@ -546,3 +546,227 @@ fn real_models_remember_and_recall() {
     assert!(hits[0].contains("Lisbon"), "{hits:?}");
     assert!(!hits.iter().any(|h| h == "I live in Berlin."), "{hits:?}");
 }
+
+// ------------------------------------------------------------- concurrency
+
+const PORTO: &str = "I moved to Porto last month.";
+
+/// The `Nli` tables for the race: both moves supersede Berlin and each other.
+fn race_nli(id: &str) -> Nli {
+    Nli {
+        id: id.to_string(),
+        contra: vec![(BERLIN, LISBON), (BERLIN, PORTO), (LISBON, PORTO), (PORTO, LISBON)],
+        entail: vec![],
+    }
+}
+
+/// Holds this process's first `n` decide calls in `wait(call index)` (a
+/// barrier between threads, or a file rendezvous between processes), so
+/// concurrent `remember`s plan before any of them commits.
+struct Held {
+    inner: Nli,
+    n: usize,
+    calls: std::sync::atomic::AtomicUsize,
+    wait: Box<dyn Fn(usize) + Send + Sync>,
+}
+
+impl Decider for Held {
+    fn model_id(&self) -> String {
+        self.inner.model_id()
+    }
+    fn weights_version(&self) -> Option<String> {
+        self.inner.weights_version()
+    }
+    fn decide(&self, reqs: &[DecideRequest], f: bool) -> miette::Result<Vec<DecideAnswer>> {
+        let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if i < self.n {
+            (self.wait)(i);
+        }
+        self.inner.decide(reqs, f)
+    }
+}
+
+/// Memories current now in namespace `race` among `texts`.
+fn current(db: &DbInstance, texts: &[&str]) -> Vec<String> {
+    let rows = db
+        .run_script(
+            "?[text] := *kleos_mem{ns: 'race', text @ 'NOW'}, text in $texts",
+            [(
+                "texts".to_string(),
+                DataValue::List(texts.iter().map(|t| DataValue::from(*t)).collect()),
+            )]
+            .into_iter()
+            .collect(),
+            ScriptMutability::Immutable,
+        )
+        .unwrap();
+    rows.rows.into_iter().map(|r| r[0].get_str().unwrap().to_string()).collect()
+}
+
+/// Two `remember`s on one topic planned at the same moment in one process:
+/// the later committer must see the earlier one and supersede it.
+#[test]
+fn concurrent_remembers_never_leave_two_current() {
+    let _guard = REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let b = barrier.clone();
+    let (emb, dec) = ("mem_emb_race", "mem_dec_race");
+    embed::register_embedder(emb, Arc::new(Words)).unwrap();
+    decide::register_decider(
+        dec,
+        Arc::new(Held {
+            inner: race_nli("mem-nli-race"),
+            n: 2,
+            calls: Default::default(),
+            wait: Box::new(move |_| {
+                b.wait();
+            }),
+        }),
+        Family::Nano,
+    )
+    .unwrap();
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.memory_init(InitOpts {
+        embedder: Some(emb.into()),
+        decider: Some(dec.into()),
+    })
+    .unwrap();
+    // seeded without the decider being asked (no candidates yet)
+    db.remember(BERLIN, RememberOpts { ns: ns("race"), at: Some(d(1)), ..Default::default() })
+        .unwrap();
+    let results: Vec<_> = std::thread::scope(|sc| {
+        let hs: Vec<_> = [LISBON, PORTO]
+            .into_iter()
+            .map(|t| {
+                let db = &db;
+                sc.spawn(move || db.remember(t, RememberOpts { ns: ns("race"), ..Default::default() }).unwrap())
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    embed::unregister_embedder(emb);
+    decide::unregister_decider(dec);
+    let cur = current(&db, &[BERLIN, LISBON, PORTO]);
+    assert_eq!(cur.len(), 1, "exactly one current home, got {cur:?}; {results:?}");
+    // the later committer superseded the earlier move (and Berlin)
+    let ids: BTreeSet<String> = results.iter().filter_map(|r| r.id.clone()).collect();
+    assert!(
+        results.iter().any(|r| r.superseded.iter().any(|x| ids.contains(x))),
+        "one move should supersede the other: {results:?}"
+    );
+}
+
+/// Child half of `concurrent_remembers_across_processes`, run only when
+/// spawned by it. Both children plan against the same state (rendezvous at
+/// their first decide call); child `a` then finishes planning only after
+/// child `b` has committed, so `a` commits a stale plan unless the write
+/// transaction notices.
+#[test]
+#[ignore]
+fn race_child() {
+    let Ok(path) = std::env::var("KLEOS_RACE_DB") else { return };
+    let text = std::env::var("KLEOS_RACE_TEXT").unwrap();
+    let dir = std::path::PathBuf::from(std::env::var("KLEOS_RACE_DIR").unwrap());
+    let me = std::env::var("KLEOS_RACE_ME").unwrap();
+    let wait_for = |pred: &dyn Fn() -> bool| {
+        let t = std::time::Instant::now();
+        while !pred() {
+            assert!(t.elapsed().as_secs() < 30, "rendezvous timed out");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    let (d2, me2) = (dir.clone(), me.clone());
+    embed::register_embedder("mem_emb_race", Arc::new(Words)).unwrap();
+    decide::register_decider(
+        "mem_dec_race",
+        Arc::new(Held {
+            inner: race_nli("mem-nli-race"),
+            // `a` also holds its second call (the duplicate template)
+            n: if me == "a" { 2 } else { 1 },
+            calls: Default::default(),
+            wait: Box::new(move |i| {
+                if i == 0 {
+                    std::fs::write(d2.join(format!("ready-{me2}")), b"").unwrap();
+                    wait_for(&|| d2.join("ready-a").exists() && d2.join("ready-b").exists());
+                } else {
+                    wait_for(&|| d2.join("done-b").exists());
+                }
+            }),
+        }),
+        Family::Nano,
+    )
+    .unwrap();
+    let db = DbInstance::new("sqlite", &path, "").unwrap();
+    let r = db.remember(&text, RememberOpts { ns: ns("race"), ..Default::default() }).unwrap();
+    if me == "b" {
+        std::fs::write(dir.join("done-b"), b"").unwrap();
+    }
+    eprintln!("CHILD {me}: superseded {:?}", r.superseded);
+}
+
+/// The same race between two processes sharing one SQLite file: the
+/// in-process gate cannot see across processes, so this exercises the
+/// namespace version row checked inside the write transaction.
+#[test]
+fn concurrent_remembers_across_processes() {
+    let base = std::env::temp_dir().join(format!("kleos-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let rdv = base.join("rdv");
+    std::fs::create_dir_all(&rdv).unwrap();
+    let path = base.join("mem.db");
+    {
+        let _guard = REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+        embed::register_embedder("mem_emb_race_parent", Arc::new(Words)).unwrap();
+        let db = DbInstance::new("sqlite", &path, "").unwrap();
+        db.memory_init(InitOpts {
+            embedder: Some("mem_emb_race_parent".into()),
+            decider: None,
+        })
+        .unwrap();
+        db.remember(BERLIN, RememberOpts { ns: ns("race"), at: Some(d(1)), ..Default::default() })
+            .unwrap();
+        // the children register the same embedder and decider under these names
+        db.memory_init(InitOpts {
+            embedder: None,
+            decider: Some("mem_dec_race".into()),
+        })
+        .unwrap();
+        db.run_script(
+            "?[key, value] <- [['embedder', 'mem_emb_race']] :put kleos_mem_config {key => value}",
+            Default::default(),
+            ScriptMutability::Mutable,
+        )
+        .unwrap();
+        embed::unregister_embedder("mem_emb_race_parent");
+    }
+    let exe = std::env::current_exe().unwrap();
+    let kids: Vec<_> = [("a", LISBON), ("b", PORTO)]
+        .into_iter()
+        .map(|(me, text)| {
+            std::process::Command::new(&exe)
+                .args(["race_child", "--exact", "--ignored", "--test-threads=1", "--nocapture"])
+                .env("KLEOS_RACE_DB", &path)
+                .env("KLEOS_RACE_TEXT", text)
+                .env("KLEOS_RACE_DIR", &rdv)
+                .env("KLEOS_RACE_ME", me)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for k in kids {
+        let out = k.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let db = DbInstance::new("sqlite", &path, "").unwrap();
+    let cur = current(&db, &[BERLIN, LISBON, PORTO]);
+    assert_eq!(cur.len(), 1, "exactly one current home across processes, got {cur:?}");
+    drop(db);
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -18,7 +18,9 @@
 //! plus FTS (and the model-free value rules); it never errors because ML is
 //! off.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use itertools::Itertools;
@@ -49,6 +51,13 @@ pub const MEM_SOURCE: &str = "kleos_mem_source";
 pub const MEM_DECISION: &str = "kleos_mem_decision";
 /// Store configuration: `{key => value}`.
 pub const MEM_CONFIG: &str = "kleos_mem_config";
+/// Per-namespace commit version: `{ns => seq}`. Every `remember` asserts in
+/// its write transaction that the version it planned against is unchanged,
+/// and bumps it; so does `forget`. The storage engine's transaction
+/// isolation then orders concurrent writers, in one process or several.
+pub const MEM_NS: &str = "kleos_mem_ns";
+/// Current schema version (2 added `kleos_mem_ns`).
+const SCHEMA_VERSION: i64 = 2;
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
@@ -60,6 +69,94 @@ const DEFAULT_VECTOR_WEIGHT: f64 = 0.6;
 /// threshold, is kept for review. The tuned decider-nano calibration has
 /// threshold = τ_auto (0.997), so it has no tentative band of its own.
 const REVIEW_P: f64 = 0.5;
+/// Lock-free planning attempts of a `remember` before it plans under the
+/// in-process commit lock.
+const OPTIMISTIC_ATTEMPTS: usize = 2;
+/// Attempts of a `remember` in all, counting the ones that lost a race with
+/// another process; after that it reports the namespace as busy.
+const COMMIT_ATTEMPTS: usize = 8;
+
+/// In-process commit gate of one namespace. Correctness comes from the
+/// `MEM_NS` version row checked inside the write transaction, which also
+/// covers other processes sharing the database; the gate only makes writers
+/// in one process take turns instead of colliding there: `remember` plans
+/// (candidate search, model calls) without holding anything, then commits
+/// under `lock` if `seq` is unchanged, and plans again otherwise. Keyed by
+/// namespace name only (shared across databases in one process, which can
+/// only cost a spurious re-plan).
+struct NsGate {
+    lock: Mutex<()>,
+    seq: AtomicU64,
+}
+
+/// A held commit lock; bumps the namespace's sequence when released.
+struct Commit<'a> {
+    gate: &'a NsGate,
+    _held: MutexGuard<'a, ()>,
+}
+
+impl NsGate {
+    fn seq(&self) -> u64 {
+        self.seq.load(Ordering::SeqCst)
+    }
+    fn commit(&self) -> Commit<'_> {
+        Commit {
+            gate: self,
+            _held: self.lock.lock().unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+}
+
+impl Drop for Commit<'_> {
+    fn drop(&mut self) {
+        // runs before the guard is released
+        self.gate.seq.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+static NS_GATES: LazyLock<Mutex<HashMap<String, Arc<NsGate>>>> = LazyLock::new(Default::default);
+
+fn ns_gate(ns: &str) -> Arc<NsGate> {
+    NS_GATES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(ns.to_string())
+        .or_insert_with(|| {
+            Arc::new(NsGate {
+                lock: Mutex::new(()),
+                seq: AtomicU64::new(0),
+            })
+        })
+        .clone()
+}
+
+/// Bumps a namespace's `MEM_NS` version (as one `{}` block of a script).
+fn bump_ns_head() -> String {
+    format!(
+        "{{cur[max(s)] := *{MEM_NS}{{ns: $ns, seq: s}} \
+           cur[max(s)] := s = 0 \
+           ?[ns, seq] := cur[s0], ns = $ns, seq = s0 + 1 \
+          :put {MEM_NS} {{ns => seq}}}}"
+    )
+}
+
+/// A write that lost to a concurrent transaction (storage-level conflict or
+/// lock), as opposed to a real error.
+fn is_contention(e: &miette::Report) -> bool {
+    let m = format!("{e:?}").to_ascii_lowercase();
+    ["busy", "locked", "conflict", "try again"].iter().any(|k| m.contains(k))
+}
+
+/// What a `remember` will do, decided before anything is written.
+struct Plan {
+    at: i64,
+    cands: Vec<Cand>,
+    sup: Vec<Option<Decision>>,
+    supersede: Vec<usize>,
+    duplicate: Option<(usize, f64)>,
+    audit: Vec<MemDecision>,
+    res: RememberResult,
+}
 
 fn now_micros() -> i64 {
     SystemTime::now()
@@ -589,6 +686,16 @@ impl<'s, S: Storage<'s>> Db<S> {
         self.run_script(script, params(p), ScriptMutability::Mutable)
     }
 
+    /// The namespace's `MEM_NS` version (0 before its first write).
+    fn ns_head(&'s self, ns: &str) -> Result<i64> {
+        Ok(self
+            .mem_q(&format!("?[seq] := *{MEM_NS}{{ns: $ns, seq}}"), vec![("ns", s(ns))])?
+            .rows
+            .first()
+            .and_then(|r| r[0].get_int())
+            .unwrap_or(0))
+    }
+
     fn mem_config(&'s self) -> Result<Option<MemConfig>> {
         let rows = match self.run_script(
             &format!("?[key, value] := *{MEM_CONFIG}{{key, value}}"),
@@ -615,6 +722,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                 _ => {}
             }
         }
+        if cfg.version < 2 {
+            // v1 stores predate the namespace version row
+            self.mem_q(&format!(":create {MEM_NS} {{ns: String => seq: Int}}"), vec![])?;
+            self.set_mem_config("version", Some("2".to_string()))?;
+            cfg.version = 2;
+        }
         Ok(Some(cfg))
     }
 
@@ -640,6 +753,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     format!("{{:create {MEM_LINK} {{ns: String, src: String, rel: String, dst: String => created: Int, p: Float?, decided_by: String?}}}}"),
                     format!("{{:create {MEM_SOURCE} {{ns: String, id: String, at: Int, stmt: String => source: String?, text: String}}}}"),
                     format!("{{:create {MEM_DECISION} {{ns: String, new: String, cand: String, template: String => label: String, p: Float, band: String, decided_by: String, reason: String?, status: String, at: Int}}}}"),
+                    format!("{{:create {MEM_NS} {{ns: String => seq: Int}}}}"),
                 ] {
                     self.mem_q(&stmt, vec![])?;
                 }
@@ -651,9 +765,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.mem_q(&format!("::index create {MEM_MENTION}:by_entity {{ns, eid}}"), vec![])?;
                 // the config relation last: its existence marks a complete schema
                 self.mem_q(&format!(":create {MEM_CONFIG} {{key: String => value: String?}}"), vec![])?;
-                self.set_mem_config("version", Some("1".to_string()))?;
+                self.set_mem_config("version", Some(SCHEMA_VERSION.to_string()))?;
                 MemConfig {
-                    version: 1,
+                    version: SCHEMA_VERSION,
                     ..Default::default()
                 }
             }
@@ -903,25 +1017,17 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect())
     }
 
-    /// Store `text` as a memory. Finds the top-k similar current memories of
-    /// the namespace, decides `supersedes` and `duplicate` for all of them in
-    /// one batch each, and acts on the band: `auto` supersedes (ends the old
-    /// memory's validity) or skips a duplicate (recording the statement as
-    /// another source of the existing memory); `tentative` inserts and
-    /// records a pending decision; `none` inserts. Never deletes. Without a
-    /// decider it uses the exact-text and value rules only; without an
-    /// embedder, FTS candidates only.
-    pub fn remember(&'s self, text: &str, opts: RememberOpts) -> Result<RememberResult> {
-        let text = text.trim();
-        if text.is_empty() {
-            bail!("`remember` needs a non-empty text");
-        }
-        let cfg = self.mem_ready(opts.embedder.as_deref())?;
-        let ns = ns_of(&opts.ns);
-        let at = opts.at.unwrap_or_else(now_micros);
-        let stmt = new_id("m");
-        let vec = self.embed_if_on(cfg.embedder.as_deref(), text)?;
-
+    /// The read-only half of `remember`: candidates, decisions and the
+    /// actions they imply. Nothing is written.
+    fn plan_remember(
+        &'s self,
+        cfg: &MemConfig,
+        ns: &str,
+        text: &str,
+        vec: &Option<Vec<f32>>,
+        at: i64,
+        opts: &RememberOpts,
+    ) -> Result<Plan> {
         // candidates: current memories of the namespace, hybrid-ranked
         let rows = self.mem_search(
             &cfg,
@@ -996,7 +1102,7 @@ impl<'s, S: Storage<'s>> Db<S> {
 
         // actions
         let mut res = RememberResult {
-            ns: ns.clone(),
+            ns: ns.to_string(),
             decider: decider.clone(),
             embedded: vec.is_some(),
             ..Default::default()
@@ -1051,113 +1157,200 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
 
-        let mem_id = match duplicate {
-            Some((i, _)) => cands[i].id.clone(),
-            None => stmt.clone(),
-        };
-        let now = now_micros();
-        let mut script = String::new();
-        let mut p = vec![
-            ("ns", s(&ns)),
-            ("id", s(&mem_id)),
-            ("stmt", s(&stmt)),
-            ("at", DataValue::from(at)),
-            ("now", DataValue::from(now)),
-            ("text", s(text)),
-            ("source", opt_s(&opts.source)),
-        ];
-        if duplicate.is_none() {
-            script.push_str(&format!(
-                "{{?[ns, id, vt, text, kind, source, created, importance] <- [[$ns, $id, [$at, true], $text, $kind, $source, $now, $importance]] \
-                  :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
-            ));
-            p.push(("kind", s(opts.kind.as_deref().unwrap_or(DEFAULT_KIND))));
-            p.push((
-                "importance",
-                opts.importance.map(DataValue::from).unwrap_or(DataValue::Null),
-            ));
-            if let (Some(v), Some(_)) = (&vec, cfg.dim) {
-                script.push_str(&format!(
-                    "{{?[ns, id, current, vec] <- [[$ns, $id, true, $vec]] :put {MEM_VEC} {{ns, id => current, vec}}}}"
-                ));
-                p.push((
-                    "vec",
-                    DataValue::List(v.iter().map(|x| DataValue::from(*x as f64)).collect()),
-                ));
+        Ok(Plan {
+            at,
+            cands,
+            sup,
+            supersede,
+            duplicate,
+            audit,
+            res,
+        })
+    }
+
+    /// Store `text` as a memory. Finds the top-k similar current memories of
+    /// the namespace, decides `supersedes` and `duplicate` for all of them in
+    /// one batch each, and acts on the band: `auto` supersedes (ends the old
+    /// memory's validity) or skips a duplicate (recording the statement as
+    /// another source of the existing memory); `tentative` inserts and
+    /// records a pending decision; `none` inserts. Never deletes. Without a
+    /// decider it uses the exact-text and value rules only; without an
+    /// embedder, FTS candidates only.
+    pub fn remember(&'s self, text: &str, opts: RememberOpts) -> Result<RememberResult> {
+        let text = text.trim();
+        if text.is_empty() {
+            bail!("`remember` needs a non-empty text");
+        }
+        let cfg = self.mem_ready(opts.embedder.as_deref())?;
+        let ns = ns_of(&opts.ns);
+        let stmt = new_id("m");
+        let vec = self.embed_if_on(cfg.embedder.as_deref(), text)?;
+
+        // concurrency: plan without holding anything, then write in one
+        // transaction that asserts the namespace version planned against is
+        // unchanged and bumps it (`MEM_NS`); a writer that lost the race, in
+        // this process or another, plans again and sees the winner. `at`
+        // defaults to the planning time, so the statement committed later is
+        // also the later one in valid time.
+        let gate = ns_gate(&ns);
+        let mut attempt = 0;
+        let (mut res, mem_id, duplicate) = loop {
+            let locked = attempt >= OPTIMISTIC_ATTEMPTS;
+            let held = if locked { Some(gate.commit()) } else { None };
+            let local = gate.seq();
+            let seen = self.ns_head(&ns)?;
+            let at = opts.at.unwrap_or_else(now_micros);
+            let plan = self.plan_remember(&cfg, &ns, text, &vec, at, &opts)?;
+            let commit = match held {
+                Some(c) => c,
+                None => gate.commit(),
+            };
+            if !locked && gate.seq() != local {
+                // another writer of this process committed meanwhile
+                drop(commit);
+                attempt += 1;
+                continue;
             }
-            if !supersede.is_empty() {
-                let old: Vec<String> = supersede.iter().map(|&i| cands[i].id.clone()).collect();
-                // E1 semantics: end the old memory's validity by appending a
-                // retraction row (values copied); nothing is deleted
+            let Plan {
+                at,
+                cands,
+                sup,
+                supersede,
+                duplicate,
+                audit,
+                mut res,
+            } = plan;
+
+            let mem_id = match duplicate {
+                Some((i, _)) => cands[i].id.clone(),
+                None => stmt.clone(),
+            };
+            let now = now_micros();
+            let mut script = String::new();
+            let mut p = vec![
+                ("ns", s(&ns)),
+                ("id", s(&mem_id)),
+                ("stmt", s(&stmt)),
+                ("at", DataValue::from(at)),
+                ("now", DataValue::from(now)),
+                ("text", s(text)),
+                ("source", opt_s(&opts.source)),
+            ];
+            if duplicate.is_none() {
                 script.push_str(&format!(
-                    "{{?[ns, id, vt, text, kind, source, created, importance] := *{MEM}{{ns, id, text, kind, source, created, importance @ 'NOW'}}, \
-                       ns = $ns, id in $old, vt = [$at, false] \
+                    "{{?[ns, id, vt, text, kind, source, created, importance] <- [[$ns, $id, [$at, true], $text, $kind, $source, $now, $importance]] \
                       :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
                 ));
-                if cfg.dim.is_some() {
+                p.push(("kind", s(opts.kind.as_deref().unwrap_or(DEFAULT_KIND))));
+                p.push((
+                    "importance",
+                    opts.importance.map(DataValue::from).unwrap_or(DataValue::Null),
+                ));
+                if let (Some(v), Some(_)) = (&vec, cfg.dim) {
                     script.push_str(&format!(
-                        "{{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $old, current = false \
-                          :update {MEM_VEC} {{ns, id => current}}}}"
+                        "{{?[ns, id, current, vec] <- [[$ns, $id, true, $vec]] :put {MEM_VEC} {{ns, id => current, vec}}}}"
+                    ));
+                    p.push((
+                        "vec",
+                        DataValue::List(v.iter().map(|x| DataValue::from(*x as f64)).collect()),
                     ));
                 }
-                let links: Vec<DataValue> = supersede
+                if !supersede.is_empty() {
+                    let old: Vec<String> = supersede.iter().map(|&i| cands[i].id.clone()).collect();
+                    // E1 semantics: end the old memory's validity by appending a
+                    // retraction row (values copied); nothing is deleted
+                    script.push_str(&format!(
+                        "{{?[ns, id, vt, text, kind, source, created, importance] := *{MEM}{{ns, id, text, kind, source, created, importance @ 'NOW'}}, \
+                           ns = $ns, id in $old, vt = [$at, false] \
+                          :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
+                    ));
+                    if cfg.dim.is_some() {
+                        script.push_str(&format!(
+                            "{{?[ns, id, current] := *{MEM_VEC}{{ns, id}}, ns = $ns, id in $old, current = false \
+                              :update {MEM_VEC} {{ns, id => current}}}}"
+                        ));
+                    }
+                    let links: Vec<DataValue> = supersede
+                        .iter()
+                        .map(|&i| {
+                            let d = sup[i].as_ref().unwrap();
+                            DataValue::List(vec![
+                                s(&ns),
+                                s(&mem_id),
+                                s("supersedes"),
+                                s(&cands[i].id),
+                                DataValue::from(now),
+                                DataValue::from(d.p),
+                                s(&d.decided_by()),
+                            ])
+                        })
+                        .collect();
+                    script.push_str(&format!(
+                        "{{?[ns, src, rel, dst, created, p, decided_by] <- $links \
+                          :put {MEM_LINK} {{ns, src, rel, dst => created, p, decided_by}}}}"
+                    ));
+                    p.push(("old", str_list(&old)));
+                    p.push(("links", DataValue::List(links)));
+                    res.superseded = old;
+                }
+            } else {
+                res.duplicate_of = Some(mem_id.clone());
+            }
+            // every statement is a source row of the memory it ended up in
+            script.push_str(&format!(
+                "{{?[ns, id, at, stmt, source, text] <- [[$ns, $id, $at, $stmt, $source, $text]] \
+                  :put {MEM_SOURCE} {{ns, id, at, stmt => source, text}}}}"
+            ));
+            if !audit.is_empty() {
+                let new_of = mem_id.clone();
+                let rows: Vec<DataValue> = audit
                     .iter()
-                    .map(|&i| {
-                        let d = sup[i].as_ref().unwrap();
+                    .map(|d| {
                         DataValue::List(vec![
                             s(&ns),
-                            s(&mem_id),
-                            s("supersedes"),
-                            s(&cands[i].id),
-                            DataValue::from(now),
+                            s(&new_of),
+                            s(&d.candidate),
+                            s(&d.template),
+                            s(&d.label),
                             DataValue::from(d.p),
-                            s(&d.decided_by()),
+                            s(&d.band),
+                            s(&d.decided_by),
+                            opt_s(&d.reason),
+                            s(if d.action == "pending" { "pending" } else { "applied" }),
+                            DataValue::from(now),
                         ])
                     })
                     .collect();
                 script.push_str(&format!(
-                    "{{?[ns, src, rel, dst, created, p, decided_by] <- $links \
-                      :put {MEM_LINK} {{ns, src, rel, dst => created, p, decided_by}}}}"
+                    "{{?[ns, new, cand, template, label, p, band, decided_by, reason, status, at] <- $audit \
+                      :put {MEM_DECISION} {{ns, new, cand, template => label, p, band, decided_by, reason, status, at}}}}"
                 ));
-                p.push(("old", str_list(&old)));
-                p.push(("links", DataValue::List(links)));
-                res.superseded = old;
+                p.push(("audit", DataValue::List(rows)));
             }
-        } else {
-            res.duplicate_of = Some(mem_id.clone());
-        }
-        // every statement is a source row of the memory it ended up in
-        script.push_str(&format!(
-            "{{?[ns, id, at, stmt, source, text] <- [[$ns, $id, $at, $stmt, $source, $text]] \
-              :put {MEM_SOURCE} {{ns, id, at, stmt => source, text}}}}"
-        ));
-        if !audit.is_empty() {
-            let new_of = mem_id.clone();
-            let rows: Vec<DataValue> = audit
-                .iter()
-                .map(|d| {
-                    DataValue::List(vec![
-                        s(&ns),
-                        s(&new_of),
-                        s(&d.candidate),
-                        s(&d.template),
-                        s(&d.label),
-                        DataValue::from(d.p),
-                        s(&d.band),
-                        s(&d.decided_by),
-                        opt_s(&d.reason),
-                        s(if d.action == "pending" { "pending" } else { "applied" }),
-                        DataValue::from(now),
-                    ])
-                })
-                .collect();
-            script.push_str(&format!(
-                "{{?[ns, new, cand, template, label, p, band, decided_by, reason, status, at] <- $audit \
-                  :put {MEM_DECISION} {{ns, new, cand, template => label, p, band, decided_by, reason, status, at}}}}"
-            ));
-            p.push(("audit", DataValue::List(rows)));
-        }
-        self.mem_q(&script, p)?;
+            // the version this plan was made against must still hold
+            script.insert_str(
+                0,
+                &format!("{{?[seq] := *{MEM_NS}{{ns: $ns, seq}}, seq != $seen :assert none}}"),
+            );
+            script.push_str(&bump_ns_head());
+            p.push(("seen", DataValue::from(seen)));
+            match self.mem_q(&script, p) {
+                Ok(_) => break (res, mem_id, duplicate),
+                Err(e) => {
+                    drop(commit);
+                    let moved = self.ns_head(&ns).map_or(false, |h| h != seen);
+                    if !(moved || is_contention(&e)) {
+                        return Err(e);
+                    }
+                    if attempt + 1 >= COMMIT_ATTEMPTS {
+                        bail!("memory namespace '{ns}' kept changing under `remember` ({COMMIT_ATTEMPTS} attempts); try again");
+                    }
+                    // back off before planning again: 1, 2, 4 .. 32 ms
+                    std::thread::sleep(std::time::Duration::from_millis(1 << attempt.min(5)));
+                    attempt += 1;
+                }
+            }
+        };
 
         if !opts.entities.is_empty() {
             res.entities = link_entities(self, &ns, &mem_id, text, &opts.entities)?
@@ -1269,6 +1462,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         };
         let ns = ns_of(&opts.ns);
+        // a forget changes what is current: commit under the namespace gate
+        // so a concurrent `remember` plans against the result
+        let gate = ns_gate(&ns);
+        let _commit = gate.commit();
         let mut ids: Vec<String> = opts.ids.clone();
         ids.extend(opts.id.clone());
         let by_filter = opts.kind.is_some() || opts.entity.is_some();
@@ -1330,6 +1527,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                       :update {MEM_VEC} {{ns, id => current}}}}"
                 ));
             }
+            script.push_str(&bump_ns_head());
             self.mem_q(
                 &script,
                 vec![("ns", s(&ns)), ("ids", str_list(&cur)), ("at", DataValue::from(at))],
@@ -1386,6 +1584,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                ?[ns, src, rel, dst] := *{MEM_LINK}{{ns, src, rel, dst}}, ns = $ns, gone[dst] \
                :rm {MEM_LINK} {{ns, src, rel, dst}}}}"
         ));
+        script.push_str(&bump_ns_head());
         self.mem_q(
             &script,
             vec![("ns", s(&ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))],

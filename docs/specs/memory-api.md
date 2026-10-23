@@ -76,7 +76,21 @@ Steps:
 
 6. Link entities (see "Entity hook").
 
-All writes of one `remember` go in one imperative script, so one transaction: the insert, retractions, vector, links, source and audit rows. The candidate read and the model calls happen before that transaction. Two concurrent `remember`s on the same topic can therefore both insert; a later `remember` or `reflect` sees both.
+All writes of one `remember` go in one imperative script, so one transaction: the insert, retractions, vector, links, source and audit rows. The candidate read and the model calls (about 0.5 s) happen before that transaction.
+
+**Concurrency** works the same within one process and across processes sharing a database:
+
+- **Version row.** Each namespace has a version row in `kleos_mem_ns {ns => seq}`. A `remember` notes the version before planning. Its write transaction then asserts that the version is unchanged (`:assert none`) and increments it. `forget` increments it too.
+- **Conflicts.** Two overlapping writers either fail that assertion or collide on the version row, depending on how the storage engine isolates transactions:
+  - mem and SQLite serialize writers;
+  - RocksDB and TiKV abort the later committer.
+- **Re-planning.** The loser plans again and sees the winner. For "moved to Lisbon" and "moved to Porto" saved at the same moment, the second commit supersedes the first, with the decision audited. Two current answers can't result.
+- **Time order.** `at` defaults to the planning time, taken after the version is read, so commit order and valid-time order agree.
+- **Busy namespace.** After 8 attempts, `remember` reports the namespace as busy.
+- **In-process gate.** Writers in one process also take turns under a per-namespace lock, so they rarely collide at all. The lock only speeds things up; correctness comes from the version row.
+- **SQLite busy timeout.** SQLite connections wait up to 5 s for another process's lock instead of failing at once with `database is locked`.
+
+Tests: `concurrent_remembers_never_leave_two_current` covers two threads held at a barrier. `concurrent_remembers_across_processes` covers two processes on one SQLite file, in the worst order: one commits a stale plan after the other has committed. With the in-transaction check removed, that test leaves both moves current.
 
 The result:
 - `action`: `added` or `duplicate`;

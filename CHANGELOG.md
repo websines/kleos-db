@@ -10,6 +10,10 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Memory API: concurrent `remember`s on one topic no longer leave two current facts.**
+  - A per-namespace version row (`kleos_mem_ns`) is asserted and bumped inside each write transaction, so the storage engine orders writers across threads and processes. A writer that lost the race plans again and supersedes the winner.
+  - The schema version is now 2, and v1 stores get the table on first use.
+  - SQLite connections now set a 5 s busy timeout, so several processes can share a database file without immediate `database is locked` errors.
 
 - Agent memory API (UPGRADE_PLAN H1 + E10, docs/specs/memory-api.md):
   `remember` / `recall` / `forget` / `reflect` / `link` on a ready-made,
