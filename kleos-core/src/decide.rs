@@ -90,6 +90,12 @@ pub trait Decider: Send + Sync {
     }
     /// Release the weights.
     fn unload(&self) {}
+    /// Version of the weights behind [`Decider::model_id`] that shipped
+    /// calibration defaults are keyed on (`base`, a fine-tune name, ...);
+    /// `None`: the family defaults.
+    fn weights_version(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Built-in deciders (cargo feature `infer`).
@@ -507,11 +513,17 @@ impl Calibration {
     /// Templates without labelled adapt data (`same_entity`, `important`)
     /// get a neutral 0.5 threshold and a conservative 0.9 auto threshold.
     pub fn default_for(template: Template, family: Family) -> Self {
+        Self::default_for_weights(template, family, None)
+    }
+    /// The shipped defaults for `template` on `family` for a weights version
+    /// ([`Decider::weights_version`]); unknown versions get the family's
+    /// defaults (those of the published checkpoint).
+    pub fn default_for_weights(template: Template, family: Family, weights: Option<&str>) -> Self {
         match family {
             Family::Custom(n) => family_templates(n)
                 .map(|t| (t.calibration)(template))
                 .unwrap_or_default(),
-            _ => defaults::calibration(template, family),
+            _ => defaults::calibration_for_weights(template, family, weights),
         }
     }
     /// Band of probability `p`.
@@ -582,8 +594,12 @@ pub struct Decision {
     pub confident: bool,
     /// Model id of the decider.
     pub model: String,
-    /// `zero_shot`, `calibrated` or `probe`.
+    /// `zero_shot`, `calibrated`, `probe` or `rule`.
     pub via: String,
+    /// Why a rule decided (`via == "rule"`), e.g. the value pre-check's
+    /// "money changed (1800 -> 2100)"; `None` for model decisions.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl Decision {
@@ -630,20 +646,7 @@ pub fn score_items(
             reqs.push(template.render(family, b, a));
         }
     }
-    let chunk = decider.max_batch().max(1);
-    let mut answers = Vec::with_capacity(reqs.len());
-    for c in reqs.chunks(chunk) {
-        let got = decider.decide(c, with_features)?;
-        if got.len() != c.len() {
-            bail!(
-                "decider '{}' returned {} answers for {} requests",
-                decider.model_id(),
-                got.len(),
-                c.len()
-            );
-        }
-        answers.extend(got);
-    }
+    let answers = cached_decide(decider, family, template, &reqs, with_features)?;
     let n_labels = template.labels().len();
     let mut out = Vec::with_capacity(items.len());
     for ans in answers.chunks(orders) {
@@ -678,6 +681,223 @@ pub fn score_items(
     Ok(out)
 }
 
+// ------------------------------------------------------------------ pair-decision cache
+
+/// Answers `reqs` through the process-wide decision cache: hits come from the
+/// cache, misses (deduplicated) go to the decider in chunks of
+/// [`Decider::max_batch`].
+fn cached_decide(
+    decider: &dyn Decider,
+    family: Family,
+    template: Template,
+    reqs: &[DecideRequest],
+    with_features: bool,
+) -> Result<Vec<DecideAnswer>> {
+    let model = decider.model_id();
+    let tag = decision_model_tag(&model);
+    let version = format!(
+        "{}|{}|{}|{}",
+        model,
+        decider.weights_version().unwrap_or_default(),
+        family.name(),
+        template.versioned(family)
+    );
+    let keys: Vec<DecisionKey> = reqs.iter().map(|r| decision_key(&tag, &version, r)).collect();
+    let mut out: Vec<Option<DecideAnswer>> = {
+        let mut c = DECISION_CACHE.lock().map_err(|_| miette!("decision cache poisoned"))?;
+        keys.iter().map(|k| c.get(k, with_features)).collect()
+    };
+    let mut first: HashMap<DecisionKey, usize> = HashMap::new();
+    let mut miss: Vec<usize> = vec![];
+    for (i, a) in out.iter().enumerate() {
+        if a.is_none() {
+            if let std::collections::hash_map::Entry::Vacant(e) = first.entry(keys[i]) {
+                e.insert(i);
+                miss.push(i);
+            }
+        }
+    }
+    let chunk = decider.max_batch().max(1);
+    for c in miss.chunks(chunk) {
+        let batch: Vec<DecideRequest> = c.iter().map(|&i| reqs[i].clone()).collect();
+        let got = decider.decide(&batch, with_features)?;
+        if got.len() != batch.len() {
+            bail!(
+                "decider '{}' returned {} answers for {} requests",
+                model,
+                got.len(),
+                batch.len()
+            );
+        }
+        let mut cache = DECISION_CACHE.lock().map_err(|_| miette!("decision cache poisoned"))?;
+        for (&i, a) in c.iter().zip(got) {
+            cache.insert(keys[i], &a);
+            out[i] = Some(a);
+        }
+    }
+    Ok(out
+        .iter()
+        .enumerate()
+        .map(|(i, a)| match a {
+            Some(a) => a.clone(),
+            None => out[first[&keys[i]]].clone().unwrap(),
+        })
+        .collect())
+}
+
+/// 8 bytes of model tag, 16 bytes of SHA-256 over (model version, template
+/// version, rendered request).
+type DecisionKey = [u8; 24];
+
+fn decision_model_tag(model: &str) -> [u8; 8] {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(model.as_bytes());
+    let mut t = [0u8; 8];
+    t.copy_from_slice(&d[..8]);
+    t
+}
+
+fn decision_key(tag: &[u8; 8], version: &str, r: &DecideRequest) -> DecisionKey {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [version, r.state.as_str(), r.question.as_str()]
+        .into_iter()
+        .chain(r.options.iter().map(String::as_str))
+    {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    let d = h.finalize();
+    let mut k = [0u8; 24];
+    k[..8].copy_from_slice(tag);
+    k[8..].copy_from_slice(&d[..16]);
+    k
+}
+
+/// Default decision-cache budget: 16 MiB (about 150k answers without
+/// features, ~1.7k with nano's 3 × 768 features).
+pub const DEFAULT_DECISION_CACHE_BYTES: usize = 16 << 20;
+
+/// Two-generation approximate LRU over raw answers (like the embedding
+/// cache): never above its byte budget, O(1) per operation.
+struct DecisionCache {
+    cur: HashMap<DecisionKey, Arc<DecideAnswer>>,
+    prev: HashMap<DecisionKey, Arc<DecideAnswer>>,
+    cur_bytes: usize,
+    capacity: usize,
+    hits: u64,
+    misses: u64,
+}
+
+impl DecisionCache {
+    fn bytes(a: &DecideAnswer) -> usize {
+        64 + 4 * (a.logits.len() + a.features.iter().map(Vec::len).sum::<usize>())
+    }
+    /// A hit needs features when `with_features`; an entry without them
+    /// counts as a miss then.
+    fn get(&mut self, k: &DecisionKey, with_features: bool) -> Option<DecideAnswer> {
+        let usable = |a: &DecideAnswer| !with_features || !a.features.is_empty();
+        let found = match self.cur.get(k) {
+            Some(a) if usable(a) => Some(a.clone()),
+            _ => match self.prev.get(k) {
+                Some(a) if usable(a) => {
+                    let a = a.clone();
+                    self.prev.remove(k);
+                    self.put(*k, a.clone());
+                    Some(a)
+                }
+                _ => None,
+            },
+        };
+        match found {
+            Some(a) => {
+                self.hits += 1;
+                Some(DecideAnswer {
+                    logits: a.logits.clone(),
+                    features: if with_features { a.features.clone() } else { vec![] },
+                })
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+    fn insert(&mut self, k: DecisionKey, a: &DecideAnswer) {
+        self.put(k, Arc::new(a.clone()));
+    }
+    fn put(&mut self, k: DecisionKey, a: Arc<DecideAnswer>) {
+        let b = Self::bytes(&a);
+        if self.capacity == 0 || b > self.capacity / 2 {
+            return;
+        }
+        if self.cur_bytes + b > self.capacity / 2 {
+            self.prev = std::mem::take(&mut self.cur);
+            self.cur_bytes = 0;
+        }
+        if let Some(old) = self.cur.insert(k, a) {
+            self.cur_bytes -= Self::bytes(&old);
+        }
+        self.cur_bytes += b;
+    }
+    fn drop_model(&mut self, tag: &[u8; 8]) {
+        let mut freed = 0;
+        self.cur.retain(|k, v| {
+            let keep = &k[..8] != tag;
+            if !keep {
+                freed += Self::bytes(v);
+            }
+            keep
+        });
+        self.cur_bytes -= freed;
+        self.prev.retain(|k, _| &k[..8] != tag);
+    }
+}
+
+lazy_static! {
+    static ref DECISION_CACHE: Mutex<DecisionCache> = Mutex::new(DecisionCache {
+        cur: HashMap::new(),
+        prev: HashMap::new(),
+        cur_bytes: 0,
+        capacity: DEFAULT_DECISION_CACHE_BYTES,
+        hits: 0,
+        misses: 0,
+    });
+}
+
+/// `(hits, misses, entries)` of the decision cache.
+pub fn decision_cache_stats() -> (u64, u64, usize) {
+    DECISION_CACHE
+        .lock()
+        .map(|c| (c.hits, c.misses, c.cur.len() + c.prev.len()))
+        .unwrap_or_default()
+}
+
+/// Set the decision-cache budget in bytes (0 disables it); drops every entry.
+pub fn set_decision_cache_capacity(bytes: usize) {
+    if let Ok(mut c) = DECISION_CACHE.lock() {
+        c.cur.clear();
+        c.prev.clear();
+        c.cur_bytes = 0;
+        c.capacity = bytes;
+    }
+}
+
+/// Drop every cached decision (counters are kept).
+pub fn clear_decision_cache() {
+    if let Ok(mut c) = DECISION_CACHE.lock() {
+        c.cur.clear();
+        c.prev.clear();
+        c.cur_bytes = 0;
+    }
+}
+
+fn drop_cached_decisions(model: &str) {
+    if let Ok(mut c) = DECISION_CACHE.lock() {
+        c.drop_model(&decision_model_tag(model));
+    }
+}
+
 /// Turn label probabilities into a [`Decision`] with `cal`'s thresholds.
 pub fn finish(template: Template, family: Family, model: &str, probs: Vec<f64>, cal: &Calibration, via: &str) -> Decision {
     let labels = template.labels();
@@ -703,6 +923,7 @@ pub fn finish(template: Template, family: Family, model: &str, probs: Vec<f64>, 
         confident: band != Band::Tentative,
         model: model.to_string(),
         via: via.to_string(),
+        reason: None,
     }
 }
 
@@ -710,6 +931,49 @@ pub fn finish(template: Template, family: Family, model: &str, probs: Vec<f64>, 
 /// This is the whole pipeline without any registry; the registry-based
 /// [`decide`] looks the three up and calls it.
 pub fn decide_with(
+    decider: &dyn Decider,
+    family: Family,
+    template: Template,
+    items: &[(&str, &str)],
+    cal: &Calibration,
+    probe: Option<&Probe>,
+) -> Result<Vec<Decision>> {
+    let mut out = decide_with_model(decider, family, template, items, cal, probe)?;
+    if value_rules_enabled() {
+        let pc;
+        let c = match probe {
+            Some(p) => {
+                pc = p.calibration();
+                &pc
+            }
+            None => cal,
+        };
+        for (d, (a, b)) in out.iter_mut().zip(items) {
+            if let Some((probs, reason)) = rules::apply_value_rule(template, a, b, &d.probs) {
+                let mut r = finish(template, family, &d.model, probs, c, "rule");
+                r.reason = Some(reason);
+                *d = r;
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub mod rules;
+
+static VALUE_RULES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Turn the value pre-check ([`rules`]) on or off, process-wide (default on).
+pub fn set_value_rules(enabled: bool) {
+    VALUE_RULES.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the value pre-check runs in [`decide_with`] / [`decide`].
+pub fn value_rules_enabled() -> bool {
+    VALUE_RULES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn decide_with_model(
     decider: &dyn Decider,
     family: Family,
     template: Template,
@@ -1395,13 +1659,19 @@ fn now() -> f64 {
 /// * `model`: `decider-nano` (default; also `nano` or
 ///   `tasksource/tasksource-decider-nano`) or `d1-omni` (`d1`,
 ///   `LiquidAI/d1-omni-600M`).
-/// * `precision`: `f32` (default for decider-nano), `f16`, `bf16`, `int8`,
-///   `int4`.
+/// * `precision`: `q8`/`int8` (default for decider-nano on CPU and Metal),
+///   `f32`, `f16`, `bf16`, `int4`.
 /// * `device`: `auto` (default), `cpu`, `metal`.
+/// * `path`: local weights directory (decider-nano layout).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeciderSpec {
     /// Model name or Hugging Face repo.
     pub model: Option<String>,
+    /// Local directory with weights in the decider-nano layout
+    /// (`config.json`, `tokenizer.json`, `model.safetensors`), e.g. a
+    /// fine-tune. Overrides the repo of `model` (which must then be
+    /// decider-nano or unset). The model id becomes the directory.
+    pub path: Option<String>,
     /// Weight precision.
     pub precision: Option<String>,
     /// Device preference.
@@ -1525,6 +1795,8 @@ pub(crate) fn register_with_info(name: &str, decider: Arc<dyn Decider>, info: De
     if name.is_empty() {
         bail!("a decider name must not be empty");
     }
+    // weights behind a model id (a local path) may have changed since
+    drop_cached_decisions(&info.model);
     let old = DECIDERS
         .write()
         .map_err(|_| miette!("decider registry poisoned"))?
@@ -1533,6 +1805,7 @@ pub(crate) fn register_with_info(name: &str, decider: Arc<dyn Decider>, info: De
         p.remove(name);
     }
     if let Some(old) = old {
+        drop_cached_decisions(&old.info.model);
         old.decider.unload();
     }
     Ok(())
@@ -1603,6 +1876,7 @@ pub fn disable_decider(name: &str) -> Result<bool> {
         .remove(name);
     match removed {
         Some(r) => {
+            drop_cached_decisions(&r.info.model);
             r.decider.unload();
             let custom = if r.info.spec.is_some() {
                 None
@@ -1768,7 +2042,7 @@ pub fn decide(name: &str, template: Template, items: &[(&str, &str)]) -> Result<
             family,
             template,
             items,
-            &Calibration::default_for(template, family),
+            &Calibration::default_for_weights(template, family, decider.weights_version().as_deref()),
             None,
         ),
     }

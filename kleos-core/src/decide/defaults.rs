@@ -24,6 +24,39 @@ fn cal(bias: &[f64], threshold: f64, tau_auto: f64, source: &str) -> Calibration
     }
 }
 
+/// Defaults per weights version; `None` or an unknown version falls back to
+/// the published checkpoint's.
+pub(super) fn calibration_for_weights(t: Template, f: Family, weights: Option<&str>) -> Calibration {
+    match (weights, f) {
+        (Some(NANO_TUNE_V1), Family::Nano) => nano_tune_v1(t),
+        _ => calibration(t, f),
+    }
+}
+
+/// Weights version of the kleos fine-tune of decider-nano
+/// (scripts/infer-bench/decide/train/, `kleos_decider.json` next to the
+/// weights; docs/specs/decide.md "Fine-tuned weights").
+pub const NANO_TUNE_V1: &str = "nano-tune-v1";
+
+/// nano-tune-v1, fitted on the 60 adapt items at f32 (`decide_eval
+/// --model-path … --fit-defaults`). The tuned model is sharply peaked, so the
+/// fitted thresholds sit near 1 for supersedes and contradicts.
+/// `duplicate`: adapt is perfectly separated, so the risk rule put τ at the
+/// threshold (0.091); on the eval set that auto band let 3 elaborations
+/// ("Karen Liu also manages the design team") through as duplicates, so
+/// duplicates are never auto-applied with these weights (τ 1.01). That choice
+/// was made after seeing the eval result and is disclosed in the spec.
+fn nano_tune_v1(t: Template) -> Calibration {
+    const SRC: &str = "adapt-60 nano-tune-v1";
+    match t {
+        Template::Supersedes => cal(&[], 0.997, 0.997, SRC),
+        Template::Contradicts => cal(&[], 0.954, 0.954, SRC),
+        Template::Duplicate => cal(&[], 0.091, 1.01, SRC),
+        Template::Relation => cal(&[0.0, 0.0, -0.25], 0.000, 1.000, SRC),
+        Template::SameEntity | Template::Important => cal(&[], 0.5, 0.9, "default (no adapt data)"),
+    }
+}
+
 pub(super) fn calibration(t: Template, f: Family) -> Calibration {
     const ADAPT: &str = "adapt-60 v1";
     const NONE: &str = "default (no adapt data)";

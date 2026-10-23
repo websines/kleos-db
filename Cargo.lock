@@ -3043,6 +3043,8 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "half",
+ "memmap2 0.9.11",
  "objc2",
  "safetensors 0.6.2",
  "serde",

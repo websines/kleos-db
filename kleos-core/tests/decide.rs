@@ -433,7 +433,8 @@ fn decide_fixed_rule_batches() {
     run(&db, ":create pairs {id: Int => old: String, new: String}").unwrap();
     let mut rows = vec![];
     for i in 0..10 {
-        let new = if i % 2 == 0 { "Tom moved to Lisbon" } else { "Tom likes jazz" };
+        // distinct texts: identical pairs would be answered once (decision cache)
+        let new = if i % 2 == 0 { format!("Tom moved to Lisbon (note {i})") } else { format!("Tom likes jazz (note {i})") };
         rows.push(format!("[{i}, 'Tom lives in Berlin', '{new}']"));
     }
     run(&db, &format!("?[id, old, new] <- [{}] :put pairs {{id => old, new}}", rows.join(", "))).unwrap();
@@ -464,6 +465,8 @@ fn decide_fixed_rule_batches() {
     )
     .unwrap();
     assert_eq!(run(&db, "?[count(id)] := *decisions{id}").unwrap().rows[0][0], DataValue::from(10));
+    // the second run was answered by the pair-decision cache
+    assert_eq!(m.calls.load(Ordering::SeqCst), 3);
     // wrong input arity / unknown template
     let e = err(&db, "p[id, a] := *pairs{id, old: a}\n?[a, b, c, d, e] <~ Decide(p[id, a], model: 'rule', template: 'supersedes')");
     assert!(e.contains("expects input rows [id, a, b]"), "{e}");
@@ -638,6 +641,72 @@ fn third_backend_registers_its_own_family() {
     decide::unregister_decider("jev1");
 }
 
+/// NLI logits that always say "entailment" (so supersedes p is low).
+fn always_entail(_: &DecideRequest) -> (Vec<f32>, Vec<Vec<f32>>) {
+    (vec![4.0, 0.0, -4.0], vec![vec![1.0]; 3])
+}
+
+#[test]
+fn defaults_follow_the_weights_version() {
+    let base = Calibration::default_for_weights(Template::Supersedes, Family::Nano, Some("base"));
+    assert_eq!(base, Calibration::default_for(Template::Supersedes, Family::Nano));
+    let tuned = Calibration::default_for_weights(Template::Supersedes, Family::Nano, Some("nano-tune-v1"));
+    assert!(tuned.source.contains("nano-tune-v1") && tuned.tau_auto <= 1.0, "{tuned:?}");
+    // fine-tuned duplicates never auto-apply (see defaults.rs)
+    let dup = Calibration::default_for_weights(Template::Duplicate, Family::Nano, Some("nano-tune-v1"));
+    assert!(dup.tau_auto > 1.0);
+    // unknown versions fall back to the published checkpoint's
+    let other = Calibration::default_for_weights(Template::Supersedes, Family::Nano, Some("custom"));
+    assert_eq!(other, base);
+}
+
+#[test]
+fn pair_decision_cache() {
+    let m = Mock::new("cache-mock-v1", 8, always_entail);
+    decide::register_decider("cachemock", m.clone(), Family::Nano).unwrap();
+    let items = [("Ava likes tea.", "Ava drinks tea daily."), ("Ava likes tea.", "Ava owns a bike.")];
+    let a = decide::decide("cachemock", Template::Supersedes, &items).unwrap();
+    let calls = m.calls.load(Ordering::SeqCst);
+    assert_eq!(m.seen.lock().unwrap().len(), 2);
+    // same pairs again: answered from the cache, no model call
+    let b = decide::decide("cachemock", Template::Supersedes, &items).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(m.calls.load(Ordering::SeqCst), calls);
+    // another template renders other requests (duplicate is symmetric: 2 orders x 2 items)
+    decide::decide("cachemock", Template::Duplicate, &items).unwrap();
+    assert_eq!(m.seen.lock().unwrap().len(), 2 + 4);
+    // duplicates inside one batch go to the model once
+    decide::decide("cachemock", Template::Contradicts, &[items[0], items[0], items[0]]).unwrap();
+    assert_eq!(m.seen.lock().unwrap().len(), 6 + 2);
+    // re-registering the model (weights may have changed) drops its entries
+    decide::register_decider("cachemock", m.clone(), Family::Nano).unwrap();
+    decide::decide("cachemock", Template::Supersedes, &items).unwrap();
+    assert_eq!(m.seen.lock().unwrap().len(), 8 + 2);
+    let (hits, _, _) = decide::decision_cache_stats();
+    assert!(hits >= 2);
+}
+
+#[test]
+fn value_rule_short_circuits_numbers_and_dates() {
+    let m = Mock::new("rule-mock-v1", 8, always_entail);
+    decide::register_decider("rulemock", m.clone(), Family::Nano).unwrap();
+    // only the value changed: the rule decides "update", whatever the model says
+    let d = decide::decide_one("rulemock", Template::Supersedes, "Ana's rent is €1,250 per month.", "Ana's rent is €1,320 per month.").unwrap();
+    assert_eq!(d.label, "yes");
+    assert_eq!(d.via, "rule");
+    assert!(d.reason.as_deref().unwrap().contains("1250 -> 1320"), "{d:?}");
+    let r = decide::decide_one("rulemock", Template::Relation, "The launch is scheduled for May 3.", "The launch is now scheduled for June 9.").unwrap();
+    assert_eq!((r.label.as_str(), r.via.as_str()), ("update", "rule"));
+    let dup = decide::decide_one("rulemock", Template::Duplicate, "Kai speaks two languages.", "Kai now speaks three languages.").unwrap();
+    assert_eq!(dup.label, "no");
+    // different events (date and amount differ) and value-free pairs: the model decides
+    let e = decide::decide_one("rulemock", Template::Supersedes, "Tom ran 5 km on Monday.", "Tom ran 10 km on Tuesday.").unwrap();
+    assert_ne!(e.via, "rule");
+    let n = decide::decide_one("rulemock", Template::Supersedes, "Ava likes tea.", "Ava hates tea.").unwrap();
+    assert_ne!(n.via, "rule");
+    assert!(n.reason.is_none());
+}
+
 /// The real decider-nano through `::decider enable` (feature `infer`; skips
 /// when the model is not in the Hugging Face cache).
 #[cfg(feature = "infer")]
@@ -665,5 +734,15 @@ fn real_decider_nano_end_to_end() {
     assert_eq!(row[5], DataValue::Bool(true));
     let e = err(&db, "::decider enable d1 {model: 'd1-omni'}");
     assert!(e.contains("d1-omni backend is not built into this kleos yet"), "{e}");
+    // local weights: `path` (here the cached snapshot itself; a fine-tune in practice)
+    let snap = kleos_infer::resolve_hf_file(kleos_infer::DECIDER_NANO_REPO, "model.safetensors").unwrap();
+    let dir = snap.parent().unwrap().to_str().unwrap().to_string();
+    run(&db, &format!("::decider enable localnano {{path: '{dir}', precision: 'f32'}}")).unwrap();
+    let local = db.decide("localnano", "supersedes", "Tom lives in Berlin.", "Tom moved to Lisbon in March and has settled in there.").unwrap();
+    assert!((local.p - up.p).abs() < 1e-6, "{local:?} {up:?}");
+    assert_eq!(local.model, dir);
+    let e = err(&db, "::decider enable badpath {path: '/nonexistent/nano'}");
+    assert!(e.contains("weights directory"), "{e}");
+    assert_eq!(run(&db, "::decider disable localnano").unwrap().rows[0][0], DataValue::from("OK"));
     assert_eq!(run(&db, "::decider disable realnano").unwrap().rows[0][0], DataValue::from("OK"));
 }

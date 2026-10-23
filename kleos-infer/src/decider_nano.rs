@@ -145,6 +145,7 @@ struct Weights {
 /// local HF cache on the first [`Decider::decide`] call.
 pub struct DeciderNano {
     repo: String,
+    weights_version: String,
     cfg: Config,
     engine: EngineConfig,
     weights: Mutex<Option<Arc<Weights>>>,
@@ -188,6 +189,11 @@ impl Row {
 /// ms/decision on a loaded machine).
 const CPU_PACK_TOKENS: usize = 512;
 
+/// Default cap on tokens per forward pass. Activations (and on Metal the
+/// pooled buffers candle keeps for them) scale with it; decisions are short,
+/// so a few thousand tokens already fill the GPU.
+pub const DECIDER_BATCH_TOKENS: usize = 1024;
+
 impl DeciderNano {
     /// The default checkpoint ([`DECIDER_NANO_REPO`]).
     pub fn new(cfg: EngineConfig) -> Result<Self> {
@@ -202,8 +208,18 @@ impl DeciderNano {
         if cfg.hidden_size % cfg.num_attention_heads != 0 {
             return Err(Error::Config("hidden_size is not a multiple of the head count".into()));
         }
+        // `kleos_decider.json` next to the weights names the weights version
+        // that shipped calibration defaults are keyed on (e.g. a fine-tune);
+        // the published checkpoint is "base", any other directory "custom".
+        let weights_version = hub::resolve_hf_file(repo, "kleos_decider.json")
+            .ok()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("weights_version").and_then(|x| x.as_str()).map(str::to_string))
+            .unwrap_or_else(|| if repo == DECIDER_NANO_REPO { "base".into() } else { "custom".into() });
         Ok(Self {
             repo: repo.to_string(),
+            weights_version,
             cfg,
             engine,
             weights: Mutex::new(None),
@@ -223,6 +239,13 @@ impl DeciderNano {
     /// The device the weights live on, once loaded.
     pub fn device_name(&self) -> Option<String> {
         self.loaded_info().map(|(d, _)| d.to_string())
+    }
+
+    /// Weights version: `base` for the published checkpoint, the
+    /// `weights_version` of a `kleos_decider.json` beside local weights, else
+    /// `custom`.
+    pub fn weights_version(&self) -> &str {
+        &self.weights_version
     }
 
     /// The engine settings this model was built with.
@@ -392,7 +415,7 @@ impl DeciderNano {
         }
         lines.sort_by_key(|(r, _)| r.ids.len());
         let mut out: Vec<Option<DecideAnswer>> = vec![None; rows.len()];
-        let budget = self.engine.max_batch_tokens.max(1);
+        let budget = self.batch_tokens();
         let _run = self.run.lock().unwrap();
         let mut i = 0;
         while i < lines.len() {
@@ -413,7 +436,23 @@ impl DeciderNano {
             }
             i = j;
         }
+        // Every intermediate of the forward passes is dropped by now; one more
+        // sync lets candle's Metal allocator free its pooled activation
+        // buffers (it drops unused ones only on synchronize), so the
+        // footprint between calls is the weights, not the last batch's
+        // working set.
+        w.device.synchronize()?;
         Ok(out.into_iter().map(|a| a.unwrap()).collect())
+    }
+
+    /// Tokens per forward pass: the engine's budget, capped at
+    /// [`DECIDER_BATCH_TOKENS`] (`KLEOS_DECIDER_BATCH_TOKENS` overrides).
+    fn batch_tokens(&self) -> usize {
+        let cap = std::env::var("KLEOS_DECIDER_BATCH_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DECIDER_BATCH_TOKENS);
+        self.engine.max_batch_tokens.min(cap).max(1)
     }
 
     fn forward(&self, w: &Weights, rows: &[&Row], with_features: bool) -> Result<Vec<DecideAnswer>> {

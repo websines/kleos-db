@@ -32,6 +32,15 @@ impl DevicePref {
         })
     }
 
+    /// Whether this preference runs on the Apple GPU in this build.
+    pub fn is_metal(self) -> bool {
+        match self {
+            DevicePref::Cpu => false,
+            DevicePref::Metal => true,
+            DevicePref::Auto => cfg!(feature = "metal") && matches!(self.device(), Ok(Device::Metal(_))),
+        }
+    }
+
     pub(crate) fn device(self) -> Result<Device> {
         match self {
             DevicePref::Cpu => Ok(Device::Cpu),

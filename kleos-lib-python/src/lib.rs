@@ -1176,7 +1176,9 @@ impl CozoDbPy {
     /// process-wide, like `::decider enable`). `model` is `'decider-nano'`
     /// (default) or `'d1-omni'`; needs a build with the `infer` feature. With
     /// no keyword arguments a disabled decider comes back as it was.
-    #[pyo3(signature = (name, model=None, precision=None, device=None))]
+    /// `path` loads decider-nano weights from a local directory (e.g. a
+    /// fine-tune) instead of the Hugging Face cache.
+    #[pyo3(signature = (name, model=None, precision=None, device=None, path=None))]
     pub fn enable_decider(
         &self,
         py: Python<'_>,
@@ -1184,10 +1186,12 @@ impl CozoDbPy {
         model: Option<String>,
         precision: Option<String>,
         device: Option<String>,
+        path: Option<String>,
     ) -> PyResult<()> {
         self.db_ref()?;
         let spec = ::kleos::decide::DeciderSpec {
             model,
+            path,
             precision,
             device,
         };
@@ -1222,7 +1226,7 @@ impl CozoDbPy {
     /// Decide with a fixed template (`supersedes`, `same_entity`,
     /// `duplicate`, `contradicts`, `relation`, `important`). Returns a dict
     /// `{label, p, probs, band, confident, model, template, template_version,
-    /// via, decided_by}`. `b` is omitted for `important`.
+    /// via, reason, decided_by}`. `b` is omitted for `important`.
     #[pyo3(signature = (template, a, b=None, model="nano"))]
     pub fn decide(
         &self,
@@ -1248,6 +1252,7 @@ impl CozoDbPy {
         out.set_item("template", d.template)?;
         out.set_item("template_version", d.template_version)?;
         out.set_item("via", d.via)?;
+        out.set_item("reason", d.reason)?;
         Ok(out.into())
     }
     /// Fit a logistic probe (or with `probe=False` a calibration) for decider

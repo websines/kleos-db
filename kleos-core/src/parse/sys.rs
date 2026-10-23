@@ -193,6 +193,7 @@ fn parse_decider_op(
                     ("enable", "model") => spec.model = Some(as_str(&val)?),
                     ("enable", "precision") => spec.precision = Some(as_str(&val)?),
                     ("enable", "device") => spec.device = Some(as_str(&val)?),
+                    ("enable", "path") => spec.path = Some(as_str(&val)?),
                     ("fit", "probe") => opts.probe = as_bool(&val)?,
                     ("fit", "wilson") => opts.wilson = as_bool(&val)?,
                     ("fit", "alpha") => {
@@ -202,7 +203,7 @@ fn parse_decider_op(
                         }
                     }
                     ("enable", other) => bail!(
-                        "unknown option '{other}' for `::decider enable`: expected model, precision or device"
+                        "unknown option '{other}' for `::decider enable`: expected model, path, precision or device"
                     ),
                     (_, other) => bail!(
                         "unknown option '{other}' for `::decider fit`: expected probe, alpha or wilson"

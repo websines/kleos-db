@@ -27,13 +27,25 @@ use kleos_infer::{DeciderNano, DECIDER_NANO_REPO};
 
 use super::{register_with_info, DecideAnswer, DecideRequest, Decider, DeciderInfo, DeciderSpec, Family};
 
-/// Default weight precision of decider-nano (see docs/specs/decide.md).
+/// Reference precision of decider-nano (what calibrations were fitted at).
 pub const DECIDER_NANO_PRECISION: Precision = Precision::F32;
+
+/// Default weight precision of decider-nano for a device: int8 (Q8_0) on
+/// both the CPU and the Apple GPU. Measured against f32 on 922 decisions
+/// (docs/specs/decide.md, "Precision and memory"): 1 flip, every AUROC within
+/// 0.002, a quarter of the f32 weight memory, and no slower than f16 on
+/// Metal. f16 (1 flip, max |Δp| 0.008) is the higher-fidelity option at about
+/// 130 MB more.
+pub fn default_precision(device: DevicePref) -> Precision {
+    let _ = device;
+    Precision::Q8
+}
 
 /// Wraps any `kleos_infer::Decider`.
 pub struct InferDecider<D> {
     inner: D,
     device: fn(&D) -> Option<String>,
+    weights: fn(&D) -> Option<String>,
 }
 
 impl<D: kleos_infer::Decider> Decider for InferDecider<D> {
@@ -72,6 +84,9 @@ impl<D: kleos_infer::Decider> Decider for InferDecider<D> {
     fn unload(&self) {
         self.inner.unload()
     }
+    fn weights_version(&self) -> Option<String> {
+        (self.weights)(&self.inner)
+    }
 }
 
 /// Register any `kleos-infer` decider under `name`, speaking `family`.
@@ -81,6 +96,7 @@ pub fn register_infer_decider<D: kleos_infer::Decider + 'static>(name: &str, d: 
         Arc::new(InferDecider {
             inner: d,
             device: |_| None,
+            weights: |_| None,
         }),
         family,
     )
@@ -114,17 +130,30 @@ fn resolve(model: Option<&str>) -> Result<Builtin> {
 
 /// Build and register the built-in model `spec` describes.
 pub(crate) fn enable_from_spec(name: &str, spec: DeciderSpec) -> Result<()> {
-    let mut engine = EngineConfig {
-        precision: DECIDER_NANO_PRECISION,
-        ..EngineConfig::default()
-    };
-    if let Some(p) = &spec.precision {
-        engine.precision = Precision::parse(p).map_err(|e| miette!("{e}"))?;
-    }
+    let mut engine = EngineConfig::default();
     if let Some(d) = &spec.device {
         engine.device = DevicePref::parse(d).map_err(|e| miette!("{e}"))?;
     }
-    match resolve(spec.model.as_deref())? {
+    engine.precision = match &spec.precision {
+        Some(p) => Precision::parse(p).map_err(|e| miette!("{e}"))?,
+        None => default_precision(engine.device),
+    };
+    let target = match &spec.path {
+        Some(path) => {
+            if !matches!(resolve(spec.model.as_deref())?, Builtin::Nano(_)) {
+                bail!("cannot enable decider '{name}': `path` holds decider-nano weights, but `model` names another model");
+            }
+            let dir = std::path::Path::new(path);
+            if !dir.join("model.safetensors").is_file() || !dir.join("config.json").is_file() {
+                bail!(
+                    "cannot enable decider '{name}': '{path}' is not a decider-nano weights directory (needs config.json, tokenizer.json and model.safetensors)"
+                );
+            }
+            Builtin::Nano(path.clone())
+        }
+        None => resolve(spec.model.as_deref())?,
+    };
+    match target {
         Builtin::Nano(repo) => {
             let d = DeciderNano::with_repo(&repo, engine.clone()).map_err(|e| {
                 miette!("cannot enable decider '{name}' ({repo}): {e}; download it once with `hf download {repo}`")
@@ -134,6 +163,7 @@ pub(crate) fn enable_from_spec(name: &str, spec: DeciderSpec) -> Result<()> {
                 Arc::new(InferDecider {
                     inner: d,
                     device: |d: &DeciderNano| d.device_name(),
+                    weights: |d: &DeciderNano| Some(d.weights_version().to_string()),
                 }),
                 DeciderInfo {
                     kind: "decider-nano",
@@ -142,7 +172,8 @@ pub(crate) fn enable_from_spec(name: &str, spec: DeciderSpec) -> Result<()> {
                     precision: Some(engine.precision.name().to_string()),
                     device_pref: Some(device_name(engine.device).to_string()),
                     spec: Some(DeciderSpec {
-                        model: Some(repo),
+                        path: spec.path.clone(),
+                        model: if spec.path.is_some() { spec.model.clone() } else { Some(repo) },
                         precision: Some(engine.precision.name().to_string()),
                         device: Some(device_name(engine.device).to_string()),
                     }),
