@@ -429,6 +429,139 @@ mod imp {
             .collect())
     }
 
+    /// The lineage of an Engram namespace: memory branches
+    /// (docs/specs/memory-branches.md, "Engram") give overlays the same
+    /// copy-on-write view as memories. `[(ns, cut)]`, nearest first; a
+    /// namespace with no branch row, or a store without the memory schema,
+    /// is itself only.
+    fn lineage<'s, S: Storage<'s>>(db: &'s Db<S>, ns: &str) -> Result<Vec<(String, Option<i64>)>> {
+        if !rel_exists(db, crate::memory::branch::MEM_BRANCH)? {
+            return Ok(vec![(ns.to_string(), None)]);
+        }
+        Ok(db.mem_scope(ns)?.levels.into_iter().map(|l| (l.ns, l.cut)).collect())
+    }
+
+    /// Fact ids with any version in `ns`.
+    fn fact_ids<'s, S: Storage<'s>>(db: &'s Db<S>, fp: &str, ns: &str) -> Result<BTreeSet<String>> {
+        if !rel_exists(db, ENGRAM_FACTS)? {
+            return Ok(BTreeSet::new());
+        }
+        Ok(query(db, &format!("?[fact] := *{ENGRAM_FACTS}{{fp: $fp, ns: $ns, fact}}"), params([("fp", s(fp)), ("ns", s(ns))]))?
+            .into_iter()
+            .filter_map(|r| r[0].get_str().map(|x| x.to_string()))
+            .collect())
+    }
+
+    /// Row keys with any version in `ns`.
+    fn row_keys<'s, S: Storage<'s>>(db: &'s Db<S>, fp: &str, ns: &str) -> Result<BTreeSet<(u64, i64)>> {
+        if !rel_exists(db, ENGRAM_ROWS)? {
+            return Ok(BTreeSet::new());
+        }
+        Ok(query(db, &format!("?[layer, row] := *{ENGRAM_ROWS}{{fp: $fp, ns: $ns, layer, row}}"), params([("fp", s(fp)), ("ns", s(ns))]))?
+            .into_iter()
+            .map(|r| (r[0].get_int().unwrap_or(0) as u64, r[1].get_int().unwrap_or(0)))
+            .collect())
+    }
+
+    /// The facts of a namespace's view at `t`: its own, and each ancestor's
+    /// at `min(t, cut)` for the facts no nearer level has a version of.
+    fn facts_view<'s, S: Storage<'s>>(db: &'s Db<S>, fp: &str, ns: &str, t: i64) -> Result<BTreeMap<String, FactRec>> {
+        let lin = lineage(db, ns)?;
+        if lin.len() == 1 {
+            return facts_at(db, fp, ns, t);
+        }
+        let mut out = BTreeMap::new();
+        let mut owned: BTreeSet<String> = BTreeSet::new();
+        for (lns, cut) in &lin {
+            let tl = cut.map_or(t, |c| t.min(c));
+            for (id, rec) in facts_at(db, fp, lns, tl)? {
+                if !owned.contains(&id) {
+                    out.insert(id, rec);
+                }
+            }
+            owned.extend(fact_ids(db, fp, lns)?);
+        }
+        Ok(out)
+    }
+
+    /// The rows of a namespace's view at `t`, with the namespace each comes
+    /// from: per `(layer, row)` the nearest level with any version owns it
+    /// (a branch's retracted row masks its ancestors' value).
+    fn rows_view<'s, S: Storage<'s>>(db: &'s Db<S>, fp: &str, ns: &str, t: i64) -> Result<BTreeMap<(u64, i64), (String, RowRec)>> {
+        let lin = lineage(db, ns)?;
+        let mut out = BTreeMap::new();
+        let mut owned: BTreeSet<(u64, i64)> = BTreeSet::new();
+        for (lns, cut) in &lin {
+            let tl = cut.map_or(t, |c| t.min(c));
+            for (k, rec) in rows_at(db, fp, lns, tl)? {
+                if !owned.contains(&k) {
+                    out.insert(k, (lns.clone(), rec));
+                }
+            }
+            if lin.len() > 1 {
+                owned.extend(row_keys(db, fp, lns)?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Copy-up for a branch's write: the versions (at or before the cut) of
+    /// the facts and rows among `facts` / `rows` that an ancestor owns,
+    /// re-keyed to the branch, so its `as_of` reads keep the inherited
+    /// history once the branch owns them.
+    fn copy_up<'s, S: Storage<'s>>(
+        db: &'s Db<S>,
+        fp: &str,
+        lin: &[(String, Option<i64>)],
+        facts: &BTreeSet<String>,
+        rows: &BTreeSet<(u64, i64)>,
+    ) -> Result<(Vec<Vec<DataValue>>, Vec<Vec<DataValue>>)> {
+        let me = lin[0].0.as_str();
+        let mut fleft: BTreeSet<String> = facts.difference(&fact_ids(db, fp, me)?).cloned().collect();
+        let mut rleft: BTreeSet<(u64, i64)> = rows.difference(&row_keys(db, fp, me)?).cloned().collect();
+        let (mut fout, mut rout) = (vec![], vec![]);
+        for (lns, cut) in &lin[1..] {
+            if fleft.is_empty() && rleft.is_empty() {
+                break;
+            }
+            let c = DataValue::from(cut.unwrap_or(i64::MAX));
+            let have = fact_ids(db, fp, lns)?;
+            let mine: Vec<String> = fleft.iter().filter(|f| have.contains(*f)).cloned().collect();
+            if !mine.is_empty() {
+                fout.extend(query(
+                    db,
+                    &format!(
+                        "?[{FACT_COLS}] := fact in $ids, *{ENGRAM_FACTS}{{fp: $fp, ns: $from, fact, vt, text, target, phrasings, rows, decided_by, source, payload}}, \
+                         to_int(vt) <= $c, fp = $fp, ns = $me"
+                    ),
+                    params([("fp", s(fp)), ("from", s(lns)), ("me", s(me)), ("c", c.clone()), ("ids", strs(&mine))]),
+                )?);
+                for f in mine {
+                    fleft.remove(&f);
+                }
+            }
+            let have = row_keys(db, fp, lns)?;
+            let mine: Vec<(u64, i64)> = rleft.iter().filter(|k| have.contains(*k)).cloned().collect();
+            if !mine.is_empty() {
+                let keys = DataValue::List(
+                    mine.iter().map(|k| DataValue::List(vec![DataValue::from(k.0 as i64), DataValue::from(k.1)])).collect(),
+                );
+                rout.extend(query(
+                    db,
+                    &format!(
+                        "?[{ROW_COLS}] := k in $keys, layer = get(k, 0), row = get(k, 1), \
+                         *{ENGRAM_ROWS}{{fp: $fp, ns: $from, layer, row, vt, vec, facts}}, to_int(vt) <= $c, fp = $fp, ns = $me"
+                    ),
+                    params([("fp", s(fp)), ("from", s(lns)), ("me", s(me)), ("c", c), ("keys", keys)]),
+                )?);
+                for k in mine {
+                    rleft.remove(&k);
+                }
+            }
+        }
+        Ok((fout, rout))
+    }
+
     fn validate_rows(m: &EngramModel, rows: &[RowEdit]) -> Result<()> {
         let mut seen = BTreeSet::new();
         for r in rows {
@@ -633,7 +766,9 @@ mod imp {
             validate_rows(&m, &w.rows)?;
             let t = w.at.unwrap_or_else(now_us);
             let fp = m.fingerprint.as_str();
-            let live = facts_at(self, fp, &w.ns, t)?;
+            // on a memory branch, the facts current in its view (spec
+            // memory-branches.md, "Engram")
+            let live = facts_view(self, fp, &w.ns, t)?;
             let mut out = vec![];
             let new_ids: BTreeSet<&str> = w.facts.iter().map(|f| f.id.as_str()).collect();
             if new_ids.len() != w.facts.len() || w.facts.iter().any(|f| f.id.is_empty()) {
@@ -665,7 +800,7 @@ mod imp {
             let written: BTreeSet<(u64, i64)> = w.rows.iter().map(|r| (r.layer, r.row)).collect();
             let mut row_puts: Vec<Vec<DataValue>> = w.rows.iter().map(|r| row_put(fp, &w.ns, r, t)).collect();
             if !stale.is_empty() {
-                for (k, rec) in rows_at(self, fp, &w.ns, t)? {
+                for (k, (_, rec)) in rows_view(self, fp, &w.ns, t)? {
                     if written.contains(&k) || !rec.facts.iter().any(|f| stale.contains(f.as_str())) {
                         continue;
                     }
@@ -687,6 +822,24 @@ mod imp {
             for r in &w.rows {
                 out.push(vec![s("row"), s(&format!("{}:{}", r.layer, r.row)), s("written")]);
             }
+            // a branch copies up the inherited facts and rows it changes
+            let lin = lineage(self, &w.ns)?;
+            if lin.len() > 1 {
+                let fk: BTreeSet<String> = w
+                    .retract
+                    .iter()
+                    .chain(w.facts.iter().map(|f| &f.id))
+                    .filter(|id| live.contains_key(*id))
+                    .cloned()
+                    .collect();
+                let rk: BTreeSet<(u64, i64)> = row_puts
+                    .iter()
+                    .map(|r| (r[2].get_int().unwrap_or(0) as u64, r[3].get_int().unwrap_or(0)))
+                    .collect();
+                let (cf, cr) = copy_up(self, fp, &lin, &fk, &rk)?;
+                fact_puts.splice(0..0, cf);
+                row_puts.splice(0..0, cr);
+            }
             commit(self, fact_puts, row_puts, vec![], vec![])?;
             Ok(status_rows(&["kind", "id", "action"], out))
         }
@@ -705,7 +858,10 @@ mod imp {
         /// Materialise the overlay of a namespace stack (most general first,
         /// e.g. `["org", "user", "agent"]`: a row in a later namespace
         /// overrides the same row in an earlier one) as of valid time `as_of`
-        /// (µs, default now). `expect_fingerprint`, when given, must match.
+        /// (µs, default now). A memory branch in the stack reads through its
+        /// lineage (docs/specs/memory-branches.md, "Engram"); each row names
+        /// the namespace it came from. `expect_fingerprint`, when given, must
+        /// match.
         pub fn engram_materialize(
             &'s self,
             model_name: &str,
@@ -722,13 +878,14 @@ mod imp {
             let mut merged: BTreeMap<(u64, i64), OverlayRow> = BTreeMap::new();
             if rel_exists(self, ENGRAM_ROWS)? {
                 for ns in namespaces {
-                    for (k, rec) in rows_at(self, &m.fingerprint, ns, t)? {
+                    // a memory branch reads through its lineage
+                    for (k, (owner, rec)) in rows_view(self, &m.fingerprint, ns, t)? {
                         merged.insert(
                             k,
                             OverlayRow {
                                 layer: k.0,
                                 row: k.1,
-                                ns: ns.clone(),
+                                ns: owner,
                                 facts: rec.facts,
                                 vec: bf16::from_le_bytes(&rec.vec),
                             },
@@ -980,7 +1137,7 @@ mod imp {
             if !rel_exists(self, ENGRAM_FACTS)? {
                 return Ok(vec![]);
             }
-            Ok(facts_at(self, &m.fingerprint, ns, as_of.unwrap_or_else(now_us))?
+            Ok(facts_view(self, &m.fingerprint, ns, as_of.unwrap_or_else(now_us))?
                 .into_iter()
                 .map(|(id, f)| {
                     let at = f.at;

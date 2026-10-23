@@ -1,6 +1,6 @@
 # Memory API: remember, recall, forget, reflect, link
 
-Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring. Diverse recall, entity expansion, the context output, speaker roles and valid-from filters: wave3/recall. Statement text in list hits and write-time dates (event times): wave3/dates.
+Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Branches (fork, rewind, merge, diff, discard) are specified in [memory-branches.md](memory-branches.md) (wave4/fork). Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring. Diverse recall, entity expansion, the context output, speaker roles and valid-from filters: wave3/recall. Statement text in list hits and write-time dates (event times): wave3/dates.
 
 Code:
 - `kleos-core/src/memory.rs`: schema, the operations, entity resolution and the same-subject gate, scoring, the access buffer and the JSON entry point;
@@ -48,10 +48,11 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 | `kleos_mem_event` | `{ns, id, n => start, end, granularity, kind, expr}` | Event times: the temporal expressions in a memory's text ("yesterday", "last summer", "since 2019"), resolved against its `at` into `[start, end)` µs, one row per expression (see "Dates"). |
 | `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`, and `engram` when an Engram model is attached. It is created last, so its presence marks a complete schema. |
 | `kleos_engram_queue` | `{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}` | Only with an Engram model attached (feature `engram`): one job per memory change for the overlay worker. See "Engram attachment". |
+| `kleos_mem_branch`, `kleos_mem_copied`, `kleos_mem_merge` | see [memory-branches.md](memory-branches.md) | Branch rows, the copy-up log and the merge log (schema version 6). |
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
 
-The schema version is 5. A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`; a v4 store gains `kleos_mem_event`, filled from the stored memories (each text parsed against its first valid-from).
+The schema version is 6 (6 added the branch relations). A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`; a v4 store gains `kleos_mem_event`, filled from the stored memories (each text parsed against its first valid-from). A v5 store gains the branch relations, empty.
 
 **Why vectors live in a sibling relation.**
 - The dimension is unknown until an embedder is chosen. With a separate relation, a store created without one can gain vectors later: `::memory init {embedder: …}` creates the relation and backfills it.
@@ -474,6 +475,10 @@ The job's `qid` is the `kleos_mem_ns` version its commit produces, computed in t
 The hook is one function, `memory_engram::enqueue`, called from the write-script assembly of `remember` and of both `forget` modes. It returns nothing when no model is attached or the feature is off, so the memory API's behaviour and cost are unchanged then.
 
 `forget` erase runs `::erase kleos_mem` as its own statement, after the transaction that cleans up and enqueues the Engram erase job. A crash between the two leaves the memory present and its overlay being erased. Repeating the `forget` completes it, since erase is idempotent. The opposite order could have left an erased memory whose Engram rows still answer.
+
+### Branches
+
+`fork`, `rewind`, `merge`, `diff`, `discard` and `branches` are memory ops too (`::memory fork {from, to}`, `Db::memory_fork`, Python `memory_fork`, `POST /memory/fork`, …). A branch is a copy-on-write view of its parent. Every op above works on a branch, with reads routed through the lineage and writes to inherited memories copied up. See [memory-branches.md](memory-branches.md).
 
 ### Entity resolution
 

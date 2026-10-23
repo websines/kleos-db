@@ -149,3 +149,34 @@ def test_claims_split_and_forget_statement(db):
     # forget of the statement id covers its claims
     f = db.forget(stmt, ns="c")
     assert f["ids"] == [f"{stmt}.2", f"{stmt}.3"]
+
+
+def test_branches_fork_merge_diff_rewind_discard(db):
+    """Memory branches (docs/specs/memory-branches.md) from Python, model-free:
+    the value rule supersedes the inherited rent in the branch and again in
+    main on merge."""
+    db.remember("My rent is $1,800 per month.", ns="main", at=d(1))
+    db.remember("I have a dog named Rex.", ns="main", at=d(2))
+    f = db.memory_fork("main", "try")
+    assert (f["ns"], f["parent"], f["depth"]) == ("try", "main", 1)
+    r = db.remember("My rent is $2,100 per month.", ns="try")
+    assert len(r["superseded"]) == 1
+    texts = lambda ns: {h["text"] for h in db.recall("rent dog", ns=ns, k=10, record_access=False)}
+    assert texts("try") == {"My rent is $2,100 per month.", "I have a dog named Rex."}
+    assert texts("main") == {"My rent is $1,800 per month.", "I have a dog named Rex."}
+    df = db.memory_diff("main", "try")
+    assert [a["text"] for a in df["added"]] == ["My rent is $2,100 per month."]
+    assert [(x["text"], x["reason"]) for x in df["removed"]] == [("My rent is $1,800 per month.", "superseded")]
+    dry = db.memory_merge("try", dry_run=True)
+    assert dry["dry_run"] and len(dry["diff"]["added"]) == 1
+    assert texts("main") == {"My rent is $1,800 per month.", "I have a dog named Rex."}
+    m = db.memory_merge("try")
+    assert m["into"] == "main" and m["statements"] == 1
+    assert texts("main") == {"My rent is $2,100 per month.", "I have a dog named Rex."}
+    rw = db.memory_rewind("main", d(3))
+    assert texts("main") == {"My rent is $1,800 per month.", "I have a dog named Rex."}
+    db.memory_rewind("main", rw["undo"])
+    assert texts("main") == {"My rent is $2,100 per month.", "I have a dog named Rex."}
+    assert [b["ns"] for b in db.memory_branches()] == ["try"]
+    assert db.memory_discard("try")["discarded"] == ["try"]
+    assert db.memory_branches() == []

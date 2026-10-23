@@ -54,7 +54,7 @@ erase_op = {"erase" ~ compound_ident ~ expr}
 lineage_op = {"lineage" ~ compound_ident ~ expr ~ memory_at?}
 // kleos fork: agent memory API (UPGRADE_PLAN H1/E10; docs/specs/memory-api.md)
 mem_api_op = {"memory" ~ mem_verb ~ (mem_opts | expr ~ mem_opts?)?}
-mem_verb = {"init" | "remember" | "recall" | "forget" | "reflect" | "link" | "set" | "flush"}
+mem_verb = {"init" | "remember" | "recall" | "forget" | "reflect" | "link" | "set" | "flush" | "fork" | "rewind" | "merge" | "diff" | "discard" | "branches"}
 mem_opts = {"{" ~ (index_opt_field ~ ("," ~ index_opt_field)* ~ ","?)? ~ "}"}
 // kleos fork: runtime on/off switch for embedders (docs/specs/embedder-toggle.md)
 embedder_op = {"embedder" ~ (embedder_list | embedder_enable | embedder_disable | embedder_backfill)}
