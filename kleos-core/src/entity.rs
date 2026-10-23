@@ -1325,6 +1325,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             for (mi, cands) in scored.iter().enumerate() {
                 let (_, m, p) = &parsed[mi];
                 let mtext = mention_text(m, p.remark.as_deref());
+                // an unambiguous rule match settles the mention: no model call
+                if cands.iter().any(|c| c.rule_auto.is_some()) {
+                    continue;
+                }
                 for (ci, c) in cands.iter().enumerate().take(cfg.max_candidates) {
                     if c.rule_auto.is_none() {
                         pairs.push((mi, ci));

@@ -181,7 +181,7 @@ fn candidates_from_lsh_and_fts() {
     let db = mem();
     people(&db);
     let c = cfg(None);
-    let r = dry(&db, &c, &[Mention::new("Microsfot").with_type("org")]);
+    let r = dry(&db, &c, &[Mention::new("Microsofft").with_type("org")]);
     let cand = r[0].candidates.iter().find(|c| c.entity == s("o1")).expect("typo found");
     assert!(cand.sources.iter().any(|x| x == "lsh"), "{:?}", cand.sources);
     // FTS finds a shared token the rules do not cover
