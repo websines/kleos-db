@@ -106,6 +106,94 @@ pub enum SysOp {
     /// kleos fork: `::decider list | enable | disable | fit | fitted |
     /// forget` (docs/specs/decide.md).
     Decider(DeciderOp),
+    /// kleos fork: `::entity resolve | merge | split | history | pending |
+    /// reject` (docs/specs/entity-resolution.md).
+    Entity(EntityOp),
+}
+
+/// `::entity ...` (kleos fork).
+#[derive(Debug)]
+pub(crate) enum EntityOp {
+    /// Resolve mentions; options configure the relation (`commit: true` writes).
+    Resolve {
+        config: crate::entity::EntityConfig,
+        mentions: Vec<crate::entity::Mention>,
+        commit: bool,
+    },
+    /// Merge `from` into `into` by hand.
+    Merge(String, DataValue, DataValue),
+    /// Undo the merge of an id.
+    Split(String, DataValue),
+    /// Merge history, optionally of one id.
+    History(String, Option<DataValue>),
+    /// Pending possible-same-as links.
+    Pending(String),
+    /// Reject a possible-same-as link.
+    Reject(String, DataValue, DataValue),
+}
+
+fn parse_entity_op(
+    inner: crate::parse::Pair<'_>,
+    param_pool: &BTreeMap<String, DataValue>,
+) -> Result<EntityOp> {
+    let inner = inner.into_inner().next().unwrap();
+    let op_rule = inner.as_rule();
+    let mut parts = inner.into_inner();
+    let rel = parts.next().unwrap().as_str().to_string();
+    let val = |p: Option<crate::parse::Pair<'_>>| -> Result<DataValue> {
+        build_expr(p.unwrap(), param_pool)?.eval_to_const()
+    };
+    Ok(match op_rule {
+        Rule::entity_resolve => {
+            let ms = val(parts.next())?;
+            let mentions = match &ms {
+                DataValue::List(l) => l
+                    .iter()
+                    .map(crate::entity::Mention::from_value)
+                    .collect::<Result<Vec<_>>>()?,
+                v => bail!("`::entity resolve` takes a list of mentions, got {v:?}"),
+            };
+            let mut config = crate::entity::EntityConfig::new(rel);
+            let mut commit = false;
+            for opt in parts {
+                let mut o = opt.into_inner();
+                let key = o.next().unwrap().as_str();
+                let v = build_expr(o.next().unwrap(), param_pool)?.eval_to_const()?;
+                if key == "commit" {
+                    commit = v
+                        .get_bool()
+                        .ok_or_else(|| miette!("`::entity resolve` option 'commit' must be a boolean"))?;
+                } else {
+                    config.set(key, &v)?;
+                }
+            }
+            EntityOp::Resolve {
+                config,
+                mentions,
+                commit,
+            }
+        }
+        Rule::entity_merge => {
+            let from = val(parts.next())?;
+            let into = val(parts.next())?;
+            EntityOp::Merge(rel, from, into)
+        }
+        Rule::entity_reject => {
+            let a = val(parts.next())?;
+            let b = val(parts.next())?;
+            EntityOp::Reject(rel, a, b)
+        }
+        Rule::entity_split => EntityOp::Split(rel, val(parts.next())?),
+        Rule::entity_history => {
+            let id = match parts.next() {
+                Some(p) => Some(build_expr(p, param_pool)?.eval_to_const()?),
+                None => None,
+            };
+            EntityOp::History(rel, id)
+        }
+        Rule::entity_pending => EntityOp::Pending(rel),
+        r => unreachable!("{:?}", r),
+    })
 }
 
 /// `::decider ...` (kleos fork).
@@ -416,6 +504,7 @@ pub(crate) fn parse_sys(
         )?),
         Rule::embedder_op => SysOp::Embedder(parse_embedder_op(inner, param_pool)?),
         Rule::decider_op => SysOp::Decider(parse_decider_op(inner, param_pool)?),
+        Rule::entity_op => SysOp::Entity(parse_entity_op(inner, param_pool)?),
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,

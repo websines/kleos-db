@@ -2768,6 +2768,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             // kleos fork: embedder on/off switch (process-wide state, no tx)
             SysOp::Embedder(op) => self.run_embedder_op(op, read_only, true),
             SysOp::Decider(op) => self.run_decider_op(op, read_only, true),
+            SysOp::Entity(_) => {
+                bail!("`::entity` must run as a script of its own, not inside an imperative block")
+            }
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3549,6 +3552,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             // runs its own scripts (docs/specs/embedder-toggle.md)
             SysOp::Embedder(op) => return self.run_embedder_op(op, read_only, false),
             SysOp::Decider(op) => return self.run_decider_op(op, read_only, false),
+            // kleos fork: entity resolution runs its own scripts
+            SysOp::Entity(op) => return self.run_entity_op(op, read_only),
             SysOp::KillRunning(id) => {
                 let queries = self.running_queries.lock().unwrap();
                 return Ok(match queries.get(id) {

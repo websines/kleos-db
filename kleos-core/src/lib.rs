@@ -150,6 +150,9 @@ pub use decide::{
     deciders, disable_decider, enable_decider, register_decider, Band, DecideAnswer,
     DecideRequest, Decider, DeciderSpec, DeciderStatus, Decision, Family, Template,
 };
+pub use entity::{
+    Candidate, EntityConfig, MergeEvent, Mention, Outcome, Resolution, ResolveOptions,
+};
 pub use embed::{
     disable_embedder, embedders, enable_embedder, register_embedder, Embedder, EmbedderSpec,
     EmbedderStatus,
@@ -160,6 +163,7 @@ pub mod cypher;
 pub mod data;
 pub mod decide;
 pub mod embed;
+pub mod entity;
 pub(crate) mod fixed_rule;
 pub(crate) mod fts;
 /// Test-support metric, not a public API: process-wide FTS posting-scan
@@ -1321,6 +1325,118 @@ impl DbInstance {
             DbInstance::Sled(db) => db.forget_decider_fit(name, template),
             #[cfg(feature = "storage-tikv")]
             DbInstance::TiKv(db) => db.forget_decider_fit(name, template),
+        }
+    }
+    /// Resolve entity mentions (docs/specs/entity-resolution.md). See [crate::Db::resolve_entities].
+    pub fn resolve_entities(&self, cfg: &EntityConfig, mentions: &[Mention], opts: ResolveOptions) -> Result<Vec<Resolution>> {
+        match self {
+            DbInstance::Mem(db) => db.resolve_entities(cfg, mentions, opts),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.resolve_entities(cfg, mentions, opts),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.resolve_entities(cfg, mentions, opts),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.resolve_entities(cfg, mentions, opts),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.resolve_entities(cfg, mentions, opts),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.resolve_entities(cfg, mentions, opts),
+        }
+    }
+    /// Merge entity `from` into `into` by hand. See [crate::Db::merge_entities].
+    pub fn merge_entities(&self, relation: &str, from: &DataValue, into: &DataValue, reason: &str) -> Result<()> {
+        match self {
+            DbInstance::Mem(db) => db.merge_entities(relation, from, into, reason),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.merge_entities(relation, from, into, reason),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.merge_entities(relation, from, into, reason),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.merge_entities(relation, from, into, reason),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.merge_entities(relation, from, into, reason),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.merge_entities(relation, from, into, reason),
+        }
+    }
+    /// Undo the merge of `id`. See [crate::Db::split_entity].
+    pub fn split_entity(&self, relation: &str, id: &DataValue) -> Result<Option<DataValue>> {
+        match self {
+            DbInstance::Mem(db) => db.split_entity(relation, id),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.split_entity(relation, id),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.split_entity(relation, id),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.split_entity(relation, id),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.split_entity(relation, id),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.split_entity(relation, id),
+        }
+    }
+    /// Merge history. See [crate::Db::entity_history].
+    pub fn entity_history(&self, relation: &str, id: Option<&DataValue>) -> Result<Vec<MergeEvent>> {
+        match self {
+            DbInstance::Mem(db) => db.entity_history(relation, id),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.entity_history(relation, id),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.entity_history(relation, id),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.entity_history(relation, id),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.entity_history(relation, id),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.entity_history(relation, id),
+        }
+    }
+    /// Possible same-as links awaiting review. See [crate::Db::entity_pending].
+    pub fn entity_pending(&self, relation: &str) -> Result<NamedRows> {
+        match self {
+            DbInstance::Mem(db) => db.entity_pending(relation),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.entity_pending(relation),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.entity_pending(relation),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.entity_pending(relation),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.entity_pending(relation),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.entity_pending(relation),
+        }
+    }
+    /// Reject a possible same-as link. See [crate::Db::reject_entity_link].
+    pub fn reject_entity_link(&self, relation: &str, a: &DataValue, b: &DataValue) -> Result<bool> {
+        match self {
+            DbInstance::Mem(db) => db.reject_entity_link(relation, a, b),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.reject_entity_link(relation, a, b),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.reject_entity_link(relation, a, b),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.reject_entity_link(relation, a, b),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.reject_entity_link(relation, a, b),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.reject_entity_link(relation, a, b),
+        }
+    }
+    /// The canonical entity of `id`. See [crate::Db::canonical_entity].
+    pub fn canonical_entity(&self, relation: &str, id: &DataValue) -> Result<DataValue> {
+        match self {
+            DbInstance::Mem(db) => db.canonical_entity(relation, id),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => db.canonical_entity(relation, id),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => db.canonical_entity(relation, id),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => db.canonical_entity(relation, id),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => db.canonical_entity(relation, id),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => db.canonical_entity(relation, id),
         }
     }
     /// Dispatcher method. See [crate::Db::backfill_embeddings].
