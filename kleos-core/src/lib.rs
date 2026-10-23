@@ -1372,6 +1372,14 @@ impl DbInstance {
     pub fn link(&self, opts: memory::LinkOpts) -> Result<JsonValue> {
         dispatch_db!(self, db => db.link(opts))
     }
+    /// Dispatcher method. See [crate::Db::memory_set].
+    pub fn memory_set(&self, opts: memory::SetOpts) -> Result<JsonValue> {
+        dispatch_db!(self, db => db.memory_set(opts))
+    }
+    /// Dispatcher method. See [crate::Db::memory_flush].
+    pub fn memory_flush(&self) -> Result<usize> {
+        dispatch_db!(self, db => db.memory_flush())
+    }
     /// Dispatcher method. See [crate::Db::memory_call].
     pub fn memory_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
         dispatch_db!(self, db => db.memory_call(op, args))

@@ -174,6 +174,9 @@ pub struct Db<S> {
     /// Host-registered re-rank models (kleos fork, hybrid C2), resolved by
     /// the per-`Db` `Rerank` fixed rule. See [`Db::register_reranker`].
     rerankers: crate::fixed_rule::utilities::rerank::RerankerRegistry,
+    /// Access counts the memory API's `recall` has not written yet (E4;
+    /// flushed in batches by `Db::memory_flush`).
+    pub(crate) mem_access: Arc<crate::memory::AccessBuf>,
     pub(crate) tokenizers: Arc<TokenizerCache>,
     #[cfg(not(target_arch = "wasm32"))]
     callback_count: Arc<AtomicU32>,
@@ -439,6 +442,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             running_queries: Default::default(),
             fixed_rules: Arc::new(ShardedLock::new(fixed_rules)),
             rerankers,
+            mem_access: Default::default(),
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
@@ -3562,7 +3566,14 @@ impl<'s, S: Storage<'s>> Db<S> {
                 if read_only && op != "recall" && op != "reflect" {
                     bail!("`::memory {op}` cannot run in read-only mode");
                 }
-                let out = self.memory_call(op, args.clone())?;
+                let mut args = args.clone();
+                if read_only && op == "recall" {
+                    // a read-only script does not count accesses
+                    if let serde_json::Value::Object(m) = &mut args {
+                        m.insert("record_access".to_string(), serde_json::Value::Bool(false));
+                    }
+                }
+                let out = self.memory_call(op, args)?;
                 return Ok(crate::memory::memory_rows(op, out));
             }
             // kleos fork: entity resolution runs its own scripts

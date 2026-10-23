@@ -809,7 +809,7 @@ async fn text_query(
 }
 
 /// Agent memory API (kleos fork; docs/specs/memory-api.md): `POST
-/// /memory/{init|remember|recall|forget|reflect|link}` with the op's options
+/// /memory/{init|remember|recall|forget|reflect|link|set|flush}` with the op's options
 /// as a JSON object (`text` for remember, `query` for recall, `id`/`ids` for
 /// forget). Answers `{"ok": true, "result": ...}`. Only `recall` and
 /// `reflect` are allowed on a read-only (immutable) principal.
@@ -824,6 +824,13 @@ async fn memory_op(
             StatusCode::FORBIDDEN,
             json!({"ok": false, "message": format!("memory {op} needs write access")}).into(),
         );
+    }
+    let mut args = args;
+    if matches!(mutability, ScriptMutability::Immutable) && op == "recall" {
+        // a read-only principal's recalls are not counted as accesses
+        if let serde_json::Value::Object(m) = &mut args {
+            m.insert("record_access".to_string(), serde_json::Value::Bool(false));
+        }
     }
     let result = spawn_blocking(move || st.db.memory_call(&op, args)).await;
     match result {

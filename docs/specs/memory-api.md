@@ -1,9 +1,9 @@
 # Memory API: remember, recall, forget, reflect, link
 
-Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10.
+Status: implemented (wave2/memory-api), UPGRADE_PLAN H1 + E10. Entity resolution in `remember` (E3) and memory scoring (E4, C6): wave2/mem-scoring.
 
 Code:
-- `kleos-core/src/memory.rs`: schema, the five operations, the entity hook and the JSON entry point;
+- `kleos-core/src/memory.rs`: schema, the operations, entity resolution and the same-subject gate, scoring, the access buffer and the JSON entry point;
 - `parse/sys.rs` and `cozoscript.pest` (`mem_api_op`): the `::memory` ops;
 - `lib.rs`: `DbInstance` dispatch;
 - `kleos-lib-python/src/lib.rs`: Python methods;
@@ -34,14 +34,19 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 |---|---|---|
 | `kleos_mem` | `{ns, id, vt: Validity => text, kind, source?, created, importance?}` | The memories. `vt` is valid time: assertions and retractions are rows, so history, `@ T` and `::history` keep answering. FTS index `kleos_mem:fts` (Simple tokenizer, lowercase, English stemmer, stopwords). |
 | `kleos_mem_vec` | `{ns, id => current: Bool, vec: <F32; D>}` | One vector per memory. Created when an embedder is set, with `D` taken from the embedder. HNSW index `kleos_mem_vec:hnsw` (cosine). `current` is false once the memory is superseded or retracted. |
-| `kleos_mem_entity` | `{ns, eid => name, norm, kind?, created}` | Entities. Index `by_norm {ns, norm}`. |
+| `kleos_mem_entity` | `{ns, eid => name, norm, kind?, created}` | Entity rows, one per name form. Index `by_norm {ns, norm}`. Merges of rows into one entity live in `kleos_entity_merge` and review links in `kleos_entity_link` (E3's relations, `relation = 'kleos_mem_entity'`). |
 | `kleos_mem_mention` | `{ns, id, eid}` | Memory → entity. Index `by_entity {ns, eid}`. |
 | `kleos_mem_link` | `{ns, src, rel, dst => created, p?, decided_by?}` | Typed links between memories and entities. `remember` writes `new -[supersedes]-> old` with the decision's p and `decided_by`. |
 | `kleos_mem_source` | `{ns, id, at, stmt => source?, text}` | Provenance: one row per statement behind a memory, so a duplicate adds a row here instead of a memory. |
 | `kleos_mem_decision` | `{ns, new, cand, template => label, p, band, decided_by, reason?, status, at}` | The audit table: every decision that was applied (`status: applied`) or left for review (`pending`). |
+| `kleos_mem_ns` | `{ns => seq}` | The namespace version (see "Concurrency"). |
+| `kleos_mem_access` | `{ns, id => n, last}` | Access counts and the last access (µs), written by batched flushes (see "Ranking"). |
+| `kleos_mem_life` | `{ns, id => expires?, archived?}` | Expiry and archive time (µs). Only memories with a TTL or in the archive have a row. |
 | `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`. It is created last, so its presence marks a complete schema. |
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
+
+The schema version is 3. A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use.
 
 **Why vectors live in a sibling relation.**
 - The dimension is unknown until an embedder is chosen. With a separate relation, a store created without one can gain vectors later: `::memory init {embedder: …}` creates the relation and backfills it.
@@ -53,19 +58,22 @@ Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `k
 ### remember(text, opts)
 
 Options:
-- `ns`, `kind`, `source`, `importance`;
-- `entities`: names;
+- `ns`, `kind`, `source`, `importance` (in [0, 1]);
+- `entities`: names the statement is about. Include the subject: `user` (or the user's name) for first-person statements, `Anna` for "my sister Anna …". They are resolved to the namespace's entities (see "Entity resolution") and gate supersession;
 - `at`: valid-from, in µs; the default is now;
+- `ttl` (µs after `at`) or `expires` (absolute µs): past it, recall leaves the memory out by default;
 - `k`: the number of candidates, default 5;
 - `decider`;
 - `embedder`: only used when this call creates the store.
 
 Steps:
 1. Embed the text, if the store's embedder is enabled.
-2. Find the top-k current memories of the namespace with the same hybrid search as `recall`: the vector leg uses the document vector, with an FTS fallback.
-3. Exact rule, model-free: a candidate whose words equal the new text's (lower case, punctuation ignored) is a duplicate with band `auto`, `decided_by = kleos|duplicate@v1|exact`.
-4. For the remaining candidates, run `decide(supersedes)` and `decide(duplicate)` with `(old = candidate, new = text)`. Each is one batched call over all candidates.
-5. Act on the bands:
+2. Find the top-k current memories of the namespace with the same hybrid search as `recall`: the vector leg uses the document vector, with an FTS fallback. Archived and expired memories are candidates too, but never duplicate targets (a restatement must not vanish into a hidden memory).
+3. Resolve `entities` (see "Entity resolution") and read the candidates' entities.
+4. **Same-subject gate.** When the new statement and a candidate both have entities, `supersedes` may act only if they share a canonical entity. If they share only an entity that one of the new names *may* be (an Auto or Tentative candidate that was not taken), the supersede is capped at pending. If they share nothing, the `supersedes` question is not asked at all; the candidate is listed in the result's `gated`. When either side has no entities, nothing changes. `duplicate` is not gated.
+5. Exact rule, model-free: a candidate whose words equal the new text's (lower case, punctuation ignored) is a duplicate with band `auto`, `decided_by = kleos|duplicate@v1|exact`.
+6. For the remaining candidates, run `decide(supersedes)` (not for gated ones) and `decide(duplicate)` with `(old = candidate, new = text)`. Each is one batched call over all candidates.
+7. Act on the bands:
 
 | Outcome | Action |
 |---|---|
@@ -74,13 +82,13 @@ Steps:
 | Tentative (label yes, band tentative); `supersedes` with p ≥ 0.5 below the calibrated threshold (the review band, below); or two auto answers that disagree | The memory is inserted and the decision is recorded `pending`. `recall` flags the older memory with `pending_superseded_by`, and can hide it with `hide_pending`. |
 | None | Plain insert. |
 
-6. Link entities (see "Entity hook").
-
-All writes of one `remember` go in one imperative script, so one transaction: the insert, retractions, vector, links, source and audit rows. The candidate read and the model calls (about 0.5 s) happen before that transaction.
+All writes of one `remember` go in one imperative script, so one transaction: the insert, retractions, vector, links, source and audit rows, the expiry row, and the entity rows, merges, review links and mentions. The candidate read, entity resolution and the model calls (about 0.5 s) happen before that transaction.
 
 **Concurrency** works the same within one process and across processes sharing a database:
 
-- **Version row.** Each namespace has a version row in `kleos_mem_ns {ns => seq}`. A `remember` notes the version before planning. Its write transaction then asserts that the version is unchanged (`:assert none`) and increments it. `forget` increments it too.
+- **Version row.** Each namespace has a version row in `kleos_mem_ns {ns => seq}`. A `remember` notes the version before planning. Its write transaction then asserts that the version is unchanged (`:assert none`) and increments it. `forget` and `set` increment it too (the archive and expiry decide which memories may be duplicate targets).
+- **Entities.** Entity resolution reads the namespace's entities while planning, and its writes (new rows, merges, review links, mentions) go in the `remember` transaction, under the same version check. Two concurrent `remember`s that both introduce "Anna" cannot create two Annas: the loser re-plans and finds the winner's row. Entity ids are fresh per plan, so merge and link keys never collide across namespaces. Hand edits through `::entity merge/split` do not bump the version; they change only how later statements are gated.
+- **Access counts** are written outside all of this: `recall` buffers them in memory, and a flush is a separate small transaction on `kleos_mem_access` that never reads or writes the version row, so reads never conflict with `remember`.
 - **Conflicts.** Two overlapping writers either fail that assertion or collide on the version row, depending on how the storage engine isolates transactions:
   - mem and SQLite serialize writers;
   - RocksDB and TiKV abort the later committer.
@@ -97,7 +105,9 @@ The result:
 - `id`, `superseded` and `duplicate_of`;
 - `tentative`: the pending decisions;
 - `decisions`: all of them, including `none`;
-- `entities`, `embedded` and `decider`.
+- `gated`: candidates whose `supersedes` question was skipped (different subjects);
+- `entities` (the entity rows mentioned), `entity_links` (per name: `eid`, `canonical`, `outcome` `match | possible | new`, `created`, `decided_by`, `p`);
+- `embedded` and `decider`.
 
 Each decision carries the candidate, template, label, p, band, `decided_by`, reason and action.
 
@@ -136,27 +146,83 @@ Shortcuts not taken:
 ### recall(query, opts)
 
 Options:
-- `ns`, `k` (default 10), `kind`, `entity` (a name);
+- `ns`, `k` (default 10), `kind`;
+- `entity`: a name. Every memory mentioning any row of that entity's cluster (its merged names) matches;
 - `as_of`: valid time in µs;
 - `vector_weight`: default 0.6;
-- `hide_pending`: leave out memories with a pending `supersedes` by a memory valid at the read time. Default false.
+- `hide_pending`: leave out memories with a pending `supersedes` by a memory valid at the read time. Default false;
+- `include_archived`, `include_expired`: default false;
+- ranking: `blend` (default true), `recency_weight`, `half_life_days`, `importance_weight`, `access_weight` (see "Ranking");
+- `record_access`: count the returned memories as accessed. Default true; read-only `::memory recall` scripts never count.
 
 It is one script:
 - The vector leg is HNSW over `kleos_mem_vec`, filtered to the namespace (and `current` unless `as_of` is set). Its score is −distance.
 - The text leg is FTS over `kleos_mem`, filtered to the namespace. The query is the words of the text OR-ed, so user text is never parsed as FTS syntax.
 - `WeightedFusion` combines them with weights `[semantic 0.6, text 0.4]` and the theory-based norms `neg_cosine_distance` / `bm25`. Min-max is unstable on the short lists memory search produces.
-- The result is joined with `kleos_mem` `@ 'NOW'` (or `@ $as_of`), plus the kind and entity filters, and ordered by score.
+- The result is joined with `kleos_mem` `@ 'NOW'` (or `@ $as_of`), plus the kind and entity filters. Archived memories, and memories whose expiry is at or before the read time, are left out unless asked. The order is by relevance; with the blend on, a window of max(2k + 10, k) is fetched and re-ranked.
 - Both legs over-fetch (4k + 16, and 4× more with a filter), because the indexes also hold stale versions.
 
-Each hit has `id, text, score, kind, source, created, importance, valid_from, valid_to, pending_superseded_by`. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
+Each hit has `id, text, score, relevance, recency, kind, source, created, importance, valid_from, valid_to, pending_superseded_by, access_count, last_access, expires, archived`. The validity interval is the one that contains the read time; `valid_to` is null while the memory is still valid. Only memories valid at the read time are returned, so a superseded fact never shows up as current, and `as_of` reads the past.
 
 The vector leg always returns the nearest neighbours, so recall returns up to k memories even when none are relevant. There is no score cutoff.
 
+#### Ranking (E4, C6)
+
+```
+score = relevance
+      + recency_weight    · 2^(−age / half_life)                      age = read time − valid_from
+      + importance_weight · (importance − 0.5)                        null importance counts as 0.5
+      + access_weight     · min(1, ln(1 + accesses) / ln(1 + 100))
+```
+
+| Option | Default | Notes |
+|---|---|---|
+| `blend` | true | false: `score = relevance` and the old fetch size and order, exactly |
+| `recency_weight` | 0.1 | a memory stated now gets +0.1, one a half-life old +0.05 |
+| `half_life_days` | 30 | the read time is `as_of` when given, so past reads decay from then |
+| `importance_weight` | 0.2 | importance 1 → +0.1, 0 → −0.1, unset → 0 |
+| `access_weight` | 0 | recorded, not ranked by default (below) |
+
+`relevance` is the `WeightedFusion` score, in [0, 1]. It is returned with every hit, together with `recency`, `importance` and `access_count`, so a caller can re-rank with its own formula. In CozoScript the signals are plain columns: `importance` on `kleos_mem`, `valid_from` from the validity, `n`/`last` on `kleos_mem_access`, `expires`/`archived` on `kleos_mem_life`. For example:
+
+```
+?[id, text, s] := *kleos_mem{ns: 'u', id, text, importance @ 'NOW'},
+                  *kleos_mem_access{ns: 'u', id, n}, s = coalesce(importance, 0.5) + 0.1 * ln(1 + n)
+:order -s
+```
+
+Why these defaults:
+- **Recency** favours the newer of two similarly relevant memories, which is usually the current one. Decay is from the read time, so after a long idle period every memory has decayed alike and relevance decides.
+- **Importance** is never inferred: the `important` template is unvalidated. It is the caller's (`remember {importance}`, `set {importance}`), and unset memories are neutral.
+- **Access counts** weigh 0 by default. Every returned hit counts as an access, including the nearest-neighbour filler of unrelated queries, so a positive weight is self-reinforcing. On the life stream, 0.05 flipped a near-tie (a relevance gap of 0.0007) the wrong way. They are recorded and returned either way; pass `access_weight` to use them.
+
+**Access counting.** `recall` adds the returned ids to an in-memory buffer of its `Db` (one map update, no write). The buffer is flushed by the `recall` that finds 64 memories pending or 1 s since the last flush, or by `Db::memory_flush` / `::memory flush`. A flush is one small transaction: `n = stored + buffered`, only for memories that still exist. A failed flush (read-only store, conflict) keeps the counts buffered (up to 100 000 memories). `recall` adds buffered counts to stored ones, so ranking sees exact counts. Counts still buffered when the process exits are lost; call `memory_flush` before closing a database to keep them.
+
+#### Expiry and the archive tier
+
+- `remember {ttl}` (µs after `at`) or `{expires}` sets an expiry. From then on, recall leaves the memory out unless `include_expired`. A past read (`as_of`) before the expiry still sees it. Expiry does not end validity.
+- **Archive:** `forget {mode: 'archive'}` (by id, ids, kind, entity, `expired: true` or `all`) or `set {archived: true}` moves memories to the archive tier. They stay valid and keep their history, links and vectors; recall leaves them out unless `include_archived`. `set {archived: false}` brings them back.
+- `forget {mode: 'archive', expired: true}` archives every current memory past its expiry.
+
+### set(id | ids, opts)
+
+Changes scoring metadata; the text and validity are untouched.
+- `importance` in [0, 1]. It is rewritten in place on the memory's current row: importance is not versioned, so `@ T` reads see the new value too.
+- `ttl` (µs from now), `expires` (absolute), or `no_ttl: true` to remove the expiry.
+- `archived: true | false`.
+
+It commits under the namespace version, like `forget`. It returns `{ns, ids}`: the ids that are current.
+
+### flush
+
+Writes the buffered access counts now. Returns `{flushed}`, the number of memories written.
+
 ### forget(id | filter, mode)
 
-- Targets: `id` or `ids`, or a filter `kind` / `entity`, or `all: true` for a whole namespace. A call without any of these is an error.
+- Targets: `id` or `ids`, or a filter `kind` / `entity` / `expired: true` (current memories past their expiry, not yet archived), or `all: true` for a whole namespace. A call without any of these is an error.
 - `mode: 'retract'` (the default) ends validity at `at` (default now) with a retraction row and clears `current` on the vector. History and `as_of` recall keep the memory.
-- `mode: 'erase'` (GDPR) calls `::erase kleos_mem` on the keys. That deletes every version, with its FTS entries, and writes the salted `kleos_evict_audit` marker. It then removes the memory's vector, source rows, mentions, links and audit rows, and any entity left with no mention.
+- `mode: 'archive'` moves current memories to the archive tier (above).
+- `mode: 'erase'` (GDPR) calls `::erase kleos_mem` on the keys. That deletes every version, with its FTS entries, and writes the salted `kleos_evict_audit` marker. It then removes the memory's vector, source rows, mentions, links, audit rows, access counts (stored and buffered) and expiry row, and any entity left with no mention, with the entity merges and review links that touch it.
 - Returns `{mode, ids}`: the memories that were current (retract) or existed (erase).
 
 ### reflect(ns, opts)
@@ -166,7 +232,7 @@ Minimal and model-free; real consolidation is E7. Options: `since` (µs, default
 It returns:
 - `pending`: the tentative decisions, newest first, with both texts;
 - `changes`: `::changes kleos_mem {from: since, prefix: [ns]}`, i.e. `added` and `ended` by valid time;
-- `contradictions`: pending `supersedes` decisions, plus pairs of current memories that share an entity and whose values differ by the value rules (`update` or `hint`). Up to 30 memories per entity are compared.
+- `contradictions`: pending `supersedes` decisions, plus pairs of current memories that share an entity (canonical, so merged names count as one) and whose values differ by the value rules (`update` or `hint`). Up to 30 memories per entity are compared.
 
 There is no op yet to accept or reject a pending decision. To act on one, `forget` the old memory or the new one.
 
@@ -174,9 +240,18 @@ There is no op yet to accept or reject a pending decision. To act on one, `forge
 
 Adds `kleos_mem_link {ns, from, rel, to}` with optional `p`. Both ends must be memories or entities of the namespace.
 
-### Entity hook
+### Entity resolution
 
-`memory::link_entities(db, ns, memory_id, text, names)` is the only place entities are resolved. For now it matches the exact normalised name (lower case, collapsed whitespace, outer punctuation trimmed) of the names passed in `entities`, and creates an entity when there is none. It does no NER. Entity resolution (E3, `entity.rs`, a parallel branch) is meant to replace this function's body; `text` is passed in so it can extract mentions itself.
+`remember` resolves the names in `entities` with E3's `resolve_entities` ([entity-resolution.md](entity-resolution.md)) over the memory schema's own entity relation, `kleos_mem_entity`, scoped to the namespace (`EntityConfig.scope = ("ns", ns)`). There is no NER: the names are the caller's.
+
+- Mentions are passed without context. So an exact, unique name of the namespace (after E3's normalisation: honorifics, punctuation and company suffixes dropped) is the same entity by rule, with no model call. Other near names (initials, nicknames, first names, MinHash) go to `decide(same_entity)` with the store's decider, or are judged by the rules when there is none.
+- **Auto → link to the existing entity.** The memory mentions the cluster's row with the same name when there is one. A new name form ("Dr. Alice Smith" for "Alice Smith") gets its own row and a merge row into the canonical entity (`decided_by`, p and reason kept).
+- **Tentative → a review link.** A new entity, with a `kleos_entity_link` row (status `pending`) to each likely match. `::entity pending kleos_mem_entity` lists them; `::entity merge` / `reject` settle them.
+- **None → a new entity.**
+- **Non-transitive.** Each name is decided against one canonical profile. Other Auto or Tentative candidates only get review links.
+- **Non-destructive.** Merges are valid-time rows; `::entity split kleos_mem_entity <eid>` undoes one, and later reads (the entity filter, the gate, reflect) follow the current merges.
+
+Resolution is read-only while planning; its writes go in the `remember` transaction (see "Concurrency"). The entity filter of `recall` and `forget` matches every row of the named entity's cluster.
 
 ## Surfaces
 
@@ -192,6 +267,8 @@ let hits = db.recall("where do I live?", RecallOpts { ns: Some("alice".into()), 
 db.forget(ForgetOpts { ns: Some("alice".into()), id: r.id, mode: Some("erase".into()), ..Default::default() })?;
 db.reflect(ReflectOpts { ns: Some("alice".into()), ..Default::default() })?;
 db.link(LinkOpts { ns: Some("alice".into()), from: a, to: b, rel: "works_at".into(), p: None })?;
+db.memory_set(SetOpts { ns: Some("alice".into()), id: r.id.clone(), importance: Some(0.9), ..Default::default() })?;
+db.memory_flush()?;
 db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "alice"}))?;
 ```
 
@@ -203,14 +280,18 @@ db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "
 ::memory recall 'where do I live?' {ns: 'alice', k: 5, as_of: 1767225600000000}
 ::memory forget $id {ns: 'alice', mode: 'erase'}
 ::memory forget {ns: 'alice', kind: 'preference'}
+::memory forget {ns: 'alice', expired: true, mode: 'archive'}
+::memory set $id {ns: 'alice', importance: 0.9, ttl: 86400000000}
+::memory set $id {ns: 'alice', archived: false}
+::memory flush
 ::memory reflect 'alice' {since: 0}
 ::memory link {ns: 'alice', from: $a, to: $b, rel: 'works_at'}
 ```
 
 Output:
-- `recall` returns one row per hit: `id, text, score, kind, valid_from, valid_to, created, source, importance`.
+- `recall` returns one row per hit: `id, text, score, kind, valid_from, valid_to, created, source, importance, pending_superseded_by, relevance, recency, access_count, last_access, expires, archived`.
 - The other ops return one row with a column per result field. Lists of plain values become lists; records become JSON.
-- `recall` and `reflect` run in read-only scripts. The others are refused there, and inside imperative blocks, because they run their own transactions.
+- `recall` and `reflect` run in read-only scripts (a read-only recall does not count accesses). The others are refused there, and inside imperative blocks, because they run their own transactions.
 - Unknown options are errors.
 
 **Python:**
@@ -251,7 +332,12 @@ A read-only principal may only use `recall` and `reflect`.
 - namespace isolation and the kind filter;
 - entity linking, the entity filter, `link` and reflect contradictions;
 - the `::memory` ops in read-only mode, plus the JSON entry point;
-- no ML at all: lazy init, FTS only, value-rule supersede, exact duplicate.
+- no ML at all: lazy init, FTS only, value-rule supersede, exact duplicate;
+- entity resolution: one entity per name across memories, a new name form merged (and split back), initials as a review link that caps a supersede at pending, the entity filter following merges, erase removing entities with their merges and links (`entities_resolve_merge_review_and_split`);
+- the same-subject gate: the sister's city never supersedes the user's, the user's move does, and a statement without entities is not gated (`entities_gate_supersedes_to_shared_subjects`); two concurrent `remember`s introducing the same new entities leave one row each (`concurrent_remembers_never_leave_two_current`);
+- ranking: recency decay and half-life, importance from `remember` and `set`, blend off = relevance with unchanged scores (`recency_and_importance_rank_and_blend_off_is_relevance`);
+- access counts: buffered, flushed, not counted by read-only scripts, flushes never touch the namespace version, ranked only with `access_weight`, dropped on erase (`access_counts_are_buffered_flushed_and_ranked`);
+- TTL and the archive tier: exclusion, `as_of` before expiry, no duplicate into an expired memory, archiving expired memories, archive and restore by id, TTL set and removed later (`ttl_expiry_and_archive_tier`).
 
 ### Real scenario
 

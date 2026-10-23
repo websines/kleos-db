@@ -67,16 +67,24 @@ fn main() -> miette::Result<()> {
     let mut dup_wrong = vec![];
     let mut dup_missed = vec![];
     let mut tentative = 0;
+    let mut gated = 0;
+    let mut pending_sup_true = 0;
+    let mut pending_sup_false = vec![];
     let mut log = vec![];
     for (i, tn) in turns.iter().enumerate() {
         let text = tn["text"].as_str().unwrap();
         let day = tn["day"].as_i64().unwrap();
+        let entities: Vec<String> = tn["entities"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
         let t = Instant::now();
         let r = db.remember(
             text,
             RememberOpts {
                 ns: Some("user".into()),
                 at: Some(T0 + day * DAY),
+                entities,
                 ..Default::default()
             },
         )?;
@@ -114,20 +122,46 @@ fn main() -> miette::Result<()> {
             (None, None) => {}
         }
         tentative += r.tentative.len();
+        gated += r.gated.len();
+        // pending supersedes: right when the candidate is a gold target
+        for d in r.tentative.iter().filter(|d| d.template == "supersedes") {
+            match id_turn.get(&d.candidate) {
+                Some(j) if gold_sup.contains(j) => pending_sup_true += 1,
+                j => pending_sup_false.push(json!({"turn": i, "text": text, "candidate": d.candidate_text,
+                    "candidate_turn": j, "p": d.p})),
+            }
+        }
         log.push(json!({"turn": i, "text": text, "result": r}));
     }
 
     let qs = data["questions"].as_array().unwrap();
     let mut policies = vec![];
     let mut rec_ms = vec![];
-    for hide in [false, true] {
+    let mut rec_off_ms = vec![];
+    // the default ranking (blend of relevance, recency, importance and
+    // access count) first, then relevance alone (`blend: false`); then the
+    // same read at the stream's own "now" (day 126), where recency matters
+    let stream_now = turns.iter().map(|t| t["day"].as_i64().unwrap()).max().unwrap() + 1;
+    for (hide, blend, at_stream) in [
+        (false, true, false),
+        (true, true, false),
+        (false, false, false),
+        (true, false, false),
+        (false, true, true),
+        (true, true, true),
+        (false, false, true),
+        (true, false, true),
+    ] {
     let mut correct = 0;
     let mut stale_top = 0;
     let mut stale_in_k = 0;
     let mut answers = vec![];
     for q in qs {
         let query = q["query"].as_str().unwrap();
-        let as_of = q["as_of_day"].as_i64().map(|d| T0 + d * DAY);
+        let as_of = q["as_of_day"]
+            .as_i64()
+            .or(at_stream.then_some(stream_now))
+            .map(|d| T0 + d * DAY);
         let t = Instant::now();
         let hits = db.recall(
             query,
@@ -136,12 +170,16 @@ fn main() -> miette::Result<()> {
                 k: Some(3),
                 as_of,
                 hide_pending: hide,
+                blend: Some(blend),
                 ..Default::default()
             },
         )?;
-        if !hide {
-            // the second pass hits the query-embedding cache
+        if !hide && blend && !at_stream {
+            // later passes hit the query-embedding cache
             rec_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        if !hide && !blend && !at_stream {
+            rec_off_ms.push(t.elapsed().as_secs_f64() * 1e3);
         }
         let top = hits.first().map(|h| h.text.clone()).unwrap_or_default();
         let ok = q["expect"].as_str().unwrap().split('|').any(|e| top.contains(e));
@@ -159,9 +197,74 @@ fn main() -> miette::Result<()> {
         answers.push(json!({"query": query, "as_of_day": q["as_of_day"], "ok": ok, "top": top,
             "hits": hits.iter().map(|h| json!([h.text, h.score, h.pending_superseded_by.len()])).collect::<Vec<_>>()}));
     }
-    policies.push(json!({"hide_pending": hide, "questions": qs.len(), "correct_top1": correct,
+    policies.push(json!({"hide_pending": hide, "blend": blend, "read_at_stream_time": at_stream, "questions": qs.len(), "correct_top1": correct,
         "accuracy": correct as f64 / qs.len() as f64, "stale_top1": stale_top, "stale_in_top3": stale_in_k,
         "answers": answers}));
+    }
+
+    // recall latency with the query embedding cached, blend on and off
+    let (mut warm_on, mut warm_off) = (vec![], vec![]);
+    for _ in 0..3 {
+        for q in qs {
+            for blend in [true, false] {
+                let t = Instant::now();
+                db.recall(
+                    q["query"].as_str().unwrap(),
+                    RecallOpts {
+                        ns: Some("user".into()),
+                        k: Some(3),
+                        as_of: q["as_of_day"].as_i64().map(|d| T0 + d * DAY),
+                        blend: Some(blend),
+                        record_access: Some(false),
+                        ..Default::default()
+                    },
+                )?;
+                let ms = t.elapsed().as_secs_f64() * 1e3;
+                if blend { warm_on.push(ms) } else { warm_off.push(ms) }
+            }
+        }
+    }
+    // the recency blend at the stream's "now": weights and half-lives
+    // (accesses not recorded; importance is unset in this stream)
+    let mut sweep = vec![];
+    for half_life in [7.0, 30.0, 90.0] {
+        for wr in [0.0, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1] {
+            for hide in [false, true] {
+                let (mut correct, mut stale_in_k) = (0, 0);
+                for q in qs {
+                    let as_of = q["as_of_day"].as_i64().unwrap_or(stream_now);
+                    let hits = db.recall(
+                        q["query"].as_str().unwrap(),
+                        RecallOpts {
+                            ns: Some("user".into()),
+                            k: Some(3),
+                            as_of: Some(T0 + as_of * DAY),
+                            hide_pending: hide,
+                            recency_weight: Some(wr),
+                            half_life_days: Some(half_life),
+                            record_access: Some(false),
+                            ..Default::default()
+                        },
+                    )?;
+                    let top = hits.first().map(|h| h.text.as_str()).unwrap_or_default();
+                    if q["expect"].as_str().unwrap().split('|').any(|e| top.contains(e)) {
+                        correct += 1;
+                    }
+                    let stale: Vec<&str> = q["stale"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+                    if hits.iter().any(|h| stale.iter().any(|s| h.text.contains(s))) {
+                        stale_in_k += 1;
+                    }
+                }
+                sweep.push(json!({"half_life_days": half_life, "recency_weight": wr, "hide_pending": hide,
+                    "correct_top1": correct, "stale_in_top3": stale_in_k}));
+            }
+        }
+    }
+    for x in &sweep {
+        println!(
+            "sweep at stream time: half-life {:>4} d, recency weight {:<5}, hide_pending {:<5}: {}/{} top-1, stale in top-3 {}",
+            x["half_life_days"], x["recency_weight"], x["hide_pending"], x["correct_top1"], qs.len(), x["stale_in_top3"]
+        );
     }
 
     let gold_sups: usize = turns.iter().map(|t| t["supersedes"].as_array().map_or(0, |a| a.len())).sum();
@@ -175,27 +278,38 @@ fn main() -> miette::Result<()> {
         "duplicate": {"gold": gold_dups, "right": dup_right, "wrong": dup_wrong.len(), "missed": dup_missed.len(),
                       "wrong_detail": dup_wrong, "missed_detail": dup_missed},
         "tentative_decisions": tentative,
+        "gated_supersedes_checks": gated,
+        "pending_supersedes": {"true": pending_sup_true, "false": pending_sup_false.len(), "false_detail": pending_sup_false},
         "latency_ms": {"remember_p50": pct(&mut rem_ms.clone(), 0.5), "remember_p90": pct(&mut rem_ms.clone(), 0.9),
-                       "recall_p50": pct(&mut rec_ms.clone(), 0.5), "recall_p90": pct(&mut rec_ms.clone(), 0.9)},
+                       "recall_p50": pct(&mut rec_ms.clone(), 0.5), "recall_p90": pct(&mut rec_ms.clone(), 0.9),
+                       "recall_blend_off_p50": pct(&mut rec_off_ms.clone(), 0.5),
+                       "recall_cached_blend_on_p50": pct(&mut warm_on.clone(), 0.5),
+                       "recall_cached_blend_off_p50": pct(&mut warm_off.clone(), 0.5)},
+        "recency_sweep": sweep,
         "log": log,
     });
     std::fs::write(&out_path, serde_json::to_string_pretty(&report).unwrap()).expect("write report");
     for p in report["recall"].as_array().unwrap() {
         println!(
-            "recall (hide_pending {}): {}/{} top-1 correct, stale top-1 {}, stale in top-3 {}",
-            p["hide_pending"], p["correct_top1"], p["questions"], p["stale_top1"], p["stale_in_top3"]
+            "recall (hide_pending {}, blend {}, stream time {}): {}/{} top-1 correct, stale top-1 {}, stale in top-3 {}",
+            p["hide_pending"],
+            p["blend"],
+            p["read_at_stream_time"], p["correct_top1"], p["questions"], p["stale_top1"], p["stale_in_top3"]
         );
     }
     println!(
         "auto-supersede right {sup_right} / wrong {} / missed {} of {gold_sups}; \
-         duplicates right {dup_right} / wrong {} / missed {} of {gold_dups}; tentative {tentative}; \
-         remember p50 {:.1} ms, recall p50 {:.1} ms; load {load_s:.1} s\nreport: {out_path}",
+         duplicates right {dup_right} / wrong {} / missed {} of {gold_dups}; tentative {tentative} \
+         (pending supersedes true {pending_sup_true} / false {}); supersedes checks skipped (different subjects) {gated}; remember p50 {:.1} ms, recall p50 {:.1} ms (cached query vector: blend on {:.1} ms, off {:.1} ms); load {load_s:.1} s\nreport: {out_path}",
         sup_wrong.len(),
         sup_missed.len(),
         dup_wrong.len(),
         dup_missed.len(),
+        pending_sup_false.len(),
         pct(&mut rem_ms, 0.5),
         pct(&mut rec_ms, 0.5),
+        pct(&mut warm_on, 0.5),
+        pct(&mut warm_off, 0.5),
     );
     Ok(())
 }

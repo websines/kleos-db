@@ -99,6 +99,11 @@ pub struct EntityConfig {
     /// decider even when both sides carry context (default: only for long,
     /// specific names, see the spec).
     pub exact_auto: bool,
+    /// Resolve within one partition of the relation only: rows whose column
+    /// `.0` equals `.1` (the memory API passes `("ns", <namespace>)`). The
+    /// scope column is then part of the key, before the id column; index
+    /// hits outside the scope are dropped.
+    pub scope: Option<(String, DataValue)>,
 }
 
 impl EntityConfig {
@@ -124,6 +129,7 @@ impl EntityConfig {
             threshold: None,
             tau_auto: None,
             exact_auto: false,
+            scope: None,
         }
     }
 
@@ -886,7 +892,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         Ok(rows.rows.iter().any(|r| r.first().and_then(|v| v.get_str()) == Some(name)))
     }
 
-    fn ensure_entity_relations(&'s self) -> Result<()> {
+    pub(crate) fn ensure_entity_relations(&'s self) -> Result<()> {
         if !self.entity_relation_exists(ENTITY_MERGES)? {
             self.run_script(
                 &format!(
@@ -922,13 +928,18 @@ impl<'s, S: Storage<'s>> Db<S> {
         let ti = slot(&cfg.type_col, &mut binds, &mut heads);
         let ai = slot(&cfg.aliases, &mut binds, &mut heads);
         let di = slot(&cfg.description, &mut binds, &mut heads);
+        let mut scope_param = BTreeMap::new();
+        if let Some((col, v)) = &cfg.scope {
+            binds.push(format!("{col}: $scope"));
+            scope_param.insert("scope".to_string(), v.clone());
+        }
         let script = format!(
             "?[{}] := *{}{{{}}}",
             heads.join(", "),
             cfg.relation,
             binds.join(", ")
         );
-        let rows = self.run_script(&script, Default::default(), ScriptMutability::Immutable)?;
+        let rows = self.run_script(&script, scope_param, ScriptMutability::Immutable)?;
         let mut snap = Snapshot::default();
         for r in rows.rows {
             let name = match &r[1] {
@@ -1456,6 +1467,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             let parsed = parse_name(&m.name);
             let mut cols = vec![cfg.id.clone(), cfg.name.clone()];
             let mut vals = vec![id.clone(), DataValue::from(m.name.as_str())];
+            if let Some((col, v)) = &cfg.scope {
+                cols.insert(0, col.clone());
+                vals.insert(0, v.clone());
+            }
             if let Some(c) = &cfg.type_col {
                 cols.push(c.clone());
                 vals.push(m.entity_type.as_deref().map(DataValue::from).unwrap_or(DataValue::Null));
@@ -1485,7 +1500,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             let heads: Vec<String> = (0..cols.len()).map(|i| format!("c{i}")).collect();
             let spec: Vec<String> = cols.iter().zip(&heads).map(|(c, h)| format!("{c} = {h}")).collect();
-            let (k, v) = spec.split_at(1);
+            let (k, v) = spec.split_at(if cfg.scope.is_some() { 2 } else { 1 });
             self.run_script(
                 &format!(
                     "?[{}] <- $rows :put {} {{{} => {}}}",

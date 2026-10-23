@@ -23,49 +23,52 @@ import os
 import subprocess
 from pathlib import Path
 
-# (day, text, gold): gold is {"supersedes": [turn, ...]} for a turn that
-# replaces earlier facts, {"duplicate_of": turn} for a restatement, or {}.
+# (day, text, gold, entities): gold is {"supersedes": [turn, ...]} for a turn
+# that replaces earlier facts, {"duplicate_of": turn} for a restatement, or {}.
+# entities are what an agent would pass in `remember(entities=...)`: the
+# subject the statement is about ("user" for first-person statements, "Anna"
+# for the sister, "Max" for the dog) plus the named things in it.
 TURNS = [
-    (1, "I live in Berlin.", {}),
-    (2, "I work as a software engineer at Siemens.", {}),
-    (3, "My favourite food is ramen.", {}),
-    (4, "I have a dog named Max.", {}),
-    (5, "I prefer tea over coffee.", {}),
-    (6, "My sister Anna lives in Munich.", {}),
-    (7, "I play tennis on Saturdays.", {}),
-    (8, "My rent is €1,200 per month.", {}),
-    (10, "I'm learning Spanish.", {}),
-    (12, "I live in Berlin.", {"duplicate_of": 0}),
-    (15, "My favourite movie is Inception.", {}),
-    (20, "I drive a 2015 Volkswagen Golf.", {}),
-    (30, "I moved to Lisbon last week.", {"supersedes": [0]}),
-    (31, "My rent is now €1,500 per month.", {"supersedes": [7]}),
-    (35, "I quit Siemens and joined Spotify as a product manager.", {"supersedes": [1]}),
-    (36, "I prefer tea over coffee.", {"duplicate_of": 4}),
-    (40, "My dog Max loves the beach.", {}),
-    (42, "My favourite food is now sushi, I'm over ramen.", {"supersedes": [2]}),
-    (45, "I stopped playing tennis; now I go climbing on Saturdays.", {"supersedes": [6]}),
-    (50, "My sister Anna moved from Munich to Hamburg.", {"supersedes": [5]}),
-    (55, "I'm allergic to peanuts.", {}),
-    (60, "I drink coffee every morning now; I no longer prefer tea.", {"supersedes": [4]}),
-    (62, "My birthday is on March 3rd.", {}),
-    (65, "I sold my Golf and bought a Tesla Model 3.", {"supersedes": [11]}),
-    (70, "I'm learning Spanish.", {"duplicate_of": 8}),
-    (72, "My partner's name is Sam.", {}),
-    (75, "I work as a product manager at Spotify.", {"duplicate_of": 14}),
-    (80, "My favourite movie is Interstellar.", {"supersedes": [10]}),
-    (85, "I go to the gym three times a week.", {}),
-    (90, "I moved again, from Lisbon to Porto.", {"supersedes": [12]}),
-    (92, "My rent in Porto is €1,100 per month.", {"supersedes": [13]}),
-    (95, "I adopted a cat called Luna.", {}),
-    (100, "I'm allergic to peanuts.", {"duplicate_of": 20}),
-    (105, "I now go to the gym five times a week.", {"supersedes": [28]}),
-    (110, "Sam and I got engaged.", {}),
-    (115, "I left Spotify to start my own company, Tidewater Labs.", {"supersedes": [14, 26]}),
-    (118, "I finished learning Spanish and now I'm learning Portuguese.", {"supersedes": [8]}),
-    (120, "My sister Anna is a doctor.", {}),
-    (122, "I read a lot of science fiction.", {}),
-    (125, "My favourite food is sushi.", {"duplicate_of": 17}),
+    (1, "I live in Berlin.", {}, ["user", "Berlin"]),
+    (2, "I work as a software engineer at Siemens.", {}, ["user", "Siemens"]),
+    (3, "My favourite food is ramen.", {}, ["user"]),
+    (4, "I have a dog named Max.", {}, ["user", "Max"]),
+    (5, "I prefer tea over coffee.", {}, ["user"]),
+    (6, "My sister Anna lives in Munich.", {}, ["Anna", "Munich"]),
+    (7, "I play tennis on Saturdays.", {}, ["user"]),
+    (8, "My rent is €1,200 per month.", {}, ["user"]),
+    (10, "I'm learning Spanish.", {}, ["user"]),
+    (12, "I live in Berlin.", {"duplicate_of": 0}, ["user", "Berlin"]),
+    (15, "My favourite movie is Inception.", {}, ["user"]),
+    (20, "I drive a 2015 Volkswagen Golf.", {}, ["user"]),
+    (30, "I moved to Lisbon last week.", {"supersedes": [0]}, ["user", "Lisbon"]),
+    (31, "My rent is now €1,500 per month.", {"supersedes": [7]}, ["user"]),
+    (35, "I quit Siemens and joined Spotify as a product manager.", {"supersedes": [1]}, ["user", "Siemens", "Spotify"]),
+    (36, "I prefer tea over coffee.", {"duplicate_of": 4}, ["user"]),
+    (40, "My dog Max loves the beach.", {}, ["Max"]),
+    (42, "My favourite food is now sushi, I'm over ramen.", {"supersedes": [2]}, ["user"]),
+    (45, "I stopped playing tennis; now I go climbing on Saturdays.", {"supersedes": [6]}, ["user"]),
+    (50, "My sister Anna moved from Munich to Hamburg.", {"supersedes": [5]}, ["Anna", "Munich", "Hamburg"]),
+    (55, "I'm allergic to peanuts.", {}, ["user"]),
+    (60, "I drink coffee every morning now; I no longer prefer tea.", {"supersedes": [4]}, ["user"]),
+    (62, "My birthday is on March 3rd.", {}, ["user"]),
+    (65, "I sold my Golf and bought a Tesla Model 3.", {"supersedes": [11]}, ["user"]),
+    (70, "I'm learning Spanish.", {"duplicate_of": 8}, ["user"]),
+    (72, "My partner's name is Sam.", {}, ["user", "Sam"]),
+    (75, "I work as a product manager at Spotify.", {"duplicate_of": 14}, ["user", "Spotify"]),
+    (80, "My favourite movie is Interstellar.", {"supersedes": [10]}, ["user"]),
+    (85, "I go to the gym three times a week.", {}, ["user"]),
+    (90, "I moved again, from Lisbon to Porto.", {"supersedes": [12]}, ["user", "Lisbon", "Porto"]),
+    (92, "My rent in Porto is €1,100 per month.", {"supersedes": [13]}, ["user", "Porto"]),
+    (95, "I adopted a cat called Luna.", {}, ["user", "Luna"]),
+    (100, "I'm allergic to peanuts.", {"duplicate_of": 20}, ["user"]),
+    (105, "I now go to the gym five times a week.", {"supersedes": [28]}, ["user"]),
+    (110, "Sam and I got engaged.", {}, ["user", "Sam"]),
+    (115, "I left Spotify to start my own company, Tidewater Labs.", {"supersedes": [14, 26]}, ["user", "Spotify", "Tidewater Labs"]),
+    (118, "I finished learning Spanish and now I'm learning Portuguese.", {"supersedes": [8]}, ["user"]),
+    (120, "My sister Anna is a doctor.", {}, ["Anna"]),
+    (122, "I read a lot of science fiction.", {}, ["user"]),
+    (125, "My favourite food is sushi.", {"duplicate_of": 17}, ["user"]),
 ]
 
 # (query, expected substring of the top hit (any of "a|b"), stale texts that
@@ -108,7 +111,7 @@ def main():
     bench = Path(base) / "memory-api"
     bench.mkdir(parents=True, exist_ok=True)
     data = {
-        "turns": [{"day": d, "text": t, **g} for d, t, g in TURNS],
+        "turns": [{"day": d, "text": t, "entities": e, **g} for d, t, g, e in TURNS],
         "questions": [
             {"query": q, "expect": e, "stale": s, "as_of_day": a} for q, e, s, a in QUESTIONS
         ],
