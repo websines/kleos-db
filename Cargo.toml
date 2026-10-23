@@ -6,8 +6,10 @@ members = [
     "kleos-bin",
     "kleos-core-examples",
     "kleos-infer",
+    "kleos-engram",
 ]
-# kleos-infer (ML inference, UPGRADE_PLAN D2) is opt-in: a bare `cargo build`
+# kleos-infer (ML inference, UPGRADE_PLAN D2) and kleos-engram (Engram
+# addressing; docs/specs/engram-overlay.md) are opt-in: a bare `cargo build`
 # at the root keeps building only the database crates.
 default-members = [
     "kleos-core",

@@ -1,0 +1,27 @@
+[package]
+name = "kleos-engram"
+version = "0.1.0"
+edition = "2021"
+description = "DeepSeek Engram addressing for kleos: tokenizer compression, multi-head N-gram hashing, model fingerprints and the overlay export format"
+license = "MPL-2.0"
+repository = "https://github.com/websines/kleos-db"
+keywords = ["engram", "ngram", "kleos"]
+categories = ["science"]
+
+[features]
+default = ["tokenizer"]
+## Build the compressed token map from a Hugging Face `tokenizer.json`
+## (and hash text). Without it, specs are built from a precomputed token map.
+tokenizer = ["dep:tokenizers"]
+
+[dependencies]
+# Same pin and features as kleos-infer.
+tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+half = "2"
+
+[[bin]]
+name = "kleos-engram"
+required-features = ["tokenizer"]
