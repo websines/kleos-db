@@ -1140,7 +1140,7 @@ fn claims_split_store_and_recall_with_context() {
     // CozoScript and JSON surfaces take the option and return the claims
     let rows = db
         .run_script(
-            "::memory remember 'I like tea. I play chess.' {ns: 'j', split: 'auto'}",
+            "::memory remember 'I drink green tea. I play chess on Sundays.' {ns: 'j', split: 'auto'}",
             Default::default(),
             ScriptMutability::Mutable,
         )
@@ -1219,7 +1219,7 @@ fn claims_questions_are_not_decided() {
     let qid = q.id.unwrap();
     let r = db
         .remember(
-            "Can you recommend a bar in Berlin. Thanks! I live in Berlin.",
+            "Can you recommend a bar in Berlin? Which district has the best nightlife? I live in Berlin.",
             RememberOpts { ns: ns("u"), at: Some(d(3)), min_similarity: Some(-1.0), ..Default::default() },
         )
         .unwrap();
@@ -1331,7 +1331,7 @@ fn concurrent_claim_remembers_never_leave_two_current() {
     let opts = |t: Option<i64>| RememberOpts { ns: ns("race"), at: t, min_similarity: Some(-1.0), ..Default::default() };
     db.remember(&format!("{BERLIN} {MAX}"), opts(Some(d(1)))).unwrap();
     let results: Vec<_> = std::thread::scope(|sc| {
-        let hs: Vec<_> = [format!("{LISBON} I like jazz."), format!("{PORTO} I like tea.")]
+        let hs: Vec<_> = [format!("{LISBON} I play jazz piano."), format!("{PORTO} I drink green tea.")]
             .into_iter()
             .map(|t| {
                 let db = &db;
@@ -1342,7 +1342,7 @@ fn concurrent_claim_remembers_never_leave_two_current() {
     });
     embed::unregister_embedder(emb);
     decide::unregister_decider(dec);
-    let cur = current(&db, &[BERLIN, LISBON, PORTO, MAX, "I like jazz.", "I like tea."]);
+    let cur = current(&db, &[BERLIN, LISBON, PORTO, MAX, "I play jazz piano.", "I drink green tea."]);
     assert_eq!(cur.len(), 4, "one home and the three other claims, got {cur:?}; {results:?}");
     assert_eq!(cur.iter().filter(|t| [BERLIN, LISBON, PORTO].contains(&t.as_str())).count(), 1, "{cur:?}");
     let claims: BTreeSet<String> = results.iter().flat_map(|r| r.claims.iter().filter_map(|c| c.id.clone())).collect();
