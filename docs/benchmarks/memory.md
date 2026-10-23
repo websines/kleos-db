@@ -174,6 +174,119 @@ One process, 16 GB Apple-silicon laptop. Rates include the in-process benchmark 
 6. **Assistant content is not stored** in this setup (a harness choice; `--unit round` exists).
 7. **LongMemEval date quirk.** 44 of the 500 questions (40 of them temporal-reasoning) have an answer session dated *after* `question_date`. kleos's `as_of` correctly hides those "future" facts: reading at the question date drops R@5 from 0.954 to 0.912 and temporal-reasoning R@5 from 0.953 to 0.803. So the headline reads at "now", and `--as-of question` is not used for LongMemEval_S as released.
 
+## After: recall diversity, context output and speaker roles (wave3/recall)
+
+Status: 2026-10-23, branch `wave3/recall` on main 92ef789. The features are described in [memory-api.md](../specs/memory-api.md): "Diversity", "Entity expansion", "Context output", "Speaker roles" and "Valid-from filters".
+
+**How "before" and "after" were measured.**
+- Every row comes from one build of this branch and one ingest per question or conversation. Several recall option sets are applied to the same store (`retrieval.py --configs`).
+- `base` is `diversity: false`, which is main's recall exactly: the same fetch, window and order. Where the main rerun (`1c1bf81`) ran the same conversation, `base` agrees with it (LoCoMo conv-26 hybrid R@5 0.373 against 0.387, R@10 0.407 against 0.400).
+- `default` is this branch's defaults: one hit per statement and no source cap or MMR penalty.
+- `mmr05` adds `mmr_weight: 0.05`, and `src2` adds `max_per_source: 2`.
+- Builds: `fts` LongMemEval and LoCoMo ran on the first build, which fetched the index legs deeper when diversity was on. With FTS alone that changes nothing, because one leg gives the same top window. The hybrid rows ran on the final recall code (`54f5ad9`, Metal).
+
+**Main's claims change these numbers before any recall change does.** Since 92ef789 `remember` splits a message into claims, so the hits are sentences.
+- On LoCoMo that splits "Caroline: Yes, I did. It was amazing! …" into a fragment that carries only the speaker's name.
+- The fragment embeds close to every "Caroline's …" question.
+- So LoCoMo `hybrid` R@5 fell from **0.661** (6f9711f, whole turns) to **0.421** (main, `base`). `fts` is unaffected (0.554 → 0.536).
+- The write-path fix is separate work (`wave3/claims-fix`). The LoCoMo hybrid and QA rows below are therefore measured on main's degraded store. They will move once that fix lands, and the recall changes should be re-measured on top of it.
+
+### Retrieval
+
+**LongMemEval_S `hybrid`, the 119 questions** (EmbeddingGemma on Metal):
+
+| split | n | `base` Rall@5 | Rall@10 | T@10 | NDCG@10 | `default` Rall@5 | Rall@10 | T@10 | NDCG@10 | `mmr05` Rall@10 | `src2` Rall@10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| all | 119 | 0.849 | 0.950 | 0.970 | 0.947 | 0.857 | **0.958** | **0.980** | 0.950 | 0.958 | 0.975 |
+| single-session | 30 | 1.000 | 1.000 | 1.000 | 0.959 | 1.000 | 1.000 | 1.000 | 0.959 | 1.000 | 1.000 |
+| multi-session | 24 | 0.583 | 0.917 | 1.000 | 0.933 | 0.625 | **0.958** | 1.000 | 0.940 | 0.958 | 0.958 |
+| temporal-reasoning | 25 | 0.680 | 0.840 | 0.880 | 0.891 | 0.680 | 0.840 | 0.920 | 0.901 | 0.840 | 0.920 |
+| knowledge-update | 32 | 1.000 | 1.000 | 1.000 | 0.997 | 1.000 | 1.000 | 1.000 | 0.997 | 1.000 | 1.000 |
+
+R@5 is 0.992 for every config, and ss-user is 1.000 for every config.
+
+**LongMemEval_S `fts`, all 500:**
+
+| split | n | `base` R@5 | Rall@5 | Rall@10 | T@10 | `default` R@5 | Rall@5 | Rall@10 | T@10 | `src2` Rall@10 | `src2` T@10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| all | 500 | 0.950 | 0.758 | 0.836 | 0.909 | 0.952 | 0.770 | **0.846** | 0.914 | 0.856 | 0.893 |
+| ss-user | 64 | 0.984 | 0.984 | 0.984 | 0.953 | 0.984 | 0.984 | 0.984 | 0.969 | 0.984 | 0.938 |
+| multi-session | 121 | 0.975 | 0.537 | 0.702 | 0.909 | 0.975 | 0.562 | **0.719** | 0.909 | **0.744** | 0.909 |
+| temporal-reasoning | 127 | 0.953 | 0.724 | 0.803 | 0.898 | 0.953 | 0.740 | **0.819** | 0.898 | 0.835 | 0.890 |
+| knowledge-update | 72 | 1.000 | 0.917 | 0.986 | 1.000 | 1.000 | 0.931 | 0.986 | 1.000 | 0.986 | 0.972 |
+
+KU latest@5 rises from 0.931 to 0.944, and stale-first stays at 0.472. The MMR penalty with word overlap (`fts` has no vectors) is slightly worse: Rall@10 0.842 against 0.846.
+
+**LoCoMo, all 10 conversations, categories 1–4** (1,536 questions; NDCG@10 counts an evidence turn once, see Metrics):
+
+| variant | config | R@5 | R@10 | Rall@10 | NDCG@10 | multi-hop R@5 | multi-hop Rall@10 | single-hop R@5 |
+|---|---|---|---|---|---|---|---|---|
+| `fts` | base | 0.536 | 0.617 | 0.499 | 0.417 | 0.411 | 0.103 | 0.558 |
+| `fts` | default | 0.538 | 0.620 | 0.502 | 0.418 | 0.411 | 0.106 | 0.560 |
+| `fts` | + mmr 0.05 | 0.542 | 0.624 | 0.505 | 0.420 | 0.429 | 0.106 | 0.561 |
+| `fts` | + source cap 3 | 0.532 | 0.603 | 0.482 | 0.412 | 0.408 | 0.106 | 0.553 |
+| `hybrid` | base | 0.421 | 0.479 | 0.370 | 0.327 | 0.376 | 0.064 | 0.448 |
+| `hybrid` | default | 0.422 | 0.482 | 0.372 | 0.328 | 0.376 | 0.064 | 0.449 |
+| `hybrid` | mmr05 | 0.427 | 0.486 | 0.375 | 0.330 | 0.387 | 0.064 | 0.455 |
+| `hybrid` | src2 | 0.408 | 0.446 | 0.336 | 0.314 | 0.376 | 0.053 | 0.424 |
+
+**Oracle-file KU** (`hybrid`, 78 questions, both values stored): identical for `base` and `default`. Latest@5 is 1.000 and stale-first 0.486. Diversity does not touch the knowledge-update ordering.
+
+**What this says.**
+- **The statement cap is a safe default.** It never lowered R@5 or a single-evidence split, and it lifts multi-evidence coverage wherever claims stack:
+  - LongMemEval multi-session Rall@10: +0.04 hybrid, +0.02 fts;
+  - temporal Rall@10: +0.02 fts;
+  - with assistant turns stored: +0.05 (below).
+- **A per-session cap is not a default.** It helps LongMemEval, where evidence spreads across sessions (multi-session Rall@10 0.744 with `fts`, hybrid temporal 0.920). It hurts LoCoMo, where several evidence turns sit in one session (R@10 −0.04 hybrid). It is there for callers whose sources are sessions (`max_per_source`).
+- **MMR at 0.05** is small: +0.005 on LoCoMo, ±0.004 on LongMemEval. It is left at 0.
+- **LoCoMo multi-hop Rall@10 stays low** (0.06 hybrid, 0.10 fts). Diversity cannot add evidence that the search never ranks: the second hop does not share words or meaning with the question.
+- **Deeper index legs were tried and dropped.** Letting diversity fetch the index legs deeper (half the pool) raised LoCoMo hybrid R@10 but cut R@5 (0.394 → 0.358 on 3 conversations). Deeper BM25 legs let the name-only fragments above into the fusion. So the diverse selection picks from the same index fetch as before.
+
+**Entity expansion** (LoCoMo hybrid; entities from a crude capitalised-word list plus the speaker, `--entities caps`; there is no NER):
+
+| | n | R@5 | R@10 | Rall@10 | multi-hop Rall@10 |
+|---|---|---|---|---|---|
+| default (10 conv) | 1,536 | 0.435 | 0.493 | 0.382 | 0.060 |
+| `expand`, weight 0.5 (10 conv) | 1,536 | 0.435 | 0.492 | 0.381 | 0.060 |
+| default (3 conv) | 383 | 0.371 | 0.405 | 0.319 | 0.027 |
+| `expand`, weight 0.9 (3 conv) | 383 | 0.345 | 0.389 | 0.300 | 0.041 |
+| `expand`, weight 1.0 (3 conv) | 383 | 0.316 | 0.368 | 0.287 | 0.041 |
+
+- At 0.5 the expanded memories almost never reach the top 10.
+- At 0.9 and above they displace better hits: multi-hop gains one question and everything else loses.
+- So expansion stays off by default. It needs real entities (the GLiNER evaluation) and a relevance signal of the expanded memory's own before it can help.
+
+**Assistant turns** (LongMemEval_S `fts`, all 500, `--unit user+assistant`): every assistant reply is stored with `role: 'assistant'` beside the user messages. That is 494 memories per question against 245.
+
+| split | n | user only, `default` T@10 | + assistant, `base` T@10 | + assistant, `default` R@5 | Rall@10 | T@10 |
+|---|---|---|---|---|---|---|
+| all | 500 | 0.914 | 0.825 | 0.944 | 0.834 | 0.850 |
+| ss-assistant | 56 | 0.800 | 0.911 | 1.000 | 1.000 | 0.911 |
+| ss-user | 64 | 0.969 | 0.859 | 0.984 | 0.984 | 0.906 |
+| multi-session | 121 | 0.909 | 0.818 | 0.975 | 0.719 | 0.835 |
+| knowledge-update | 72 | 1.000 | 0.931 | 1.000 | 0.944 | 0.958 |
+
+- The assistant's evidence turn is now found (ss-assistant T@10 0.80 → 0.91; user-only T counted user turns of the right session).
+- The cost is to user-evidence questions: twice as many memories, and long assistant replies split into many claims.
+- The statement cap matters most here: multi-session Rall@10 0.669 → 0.719 against `base`.
+- `assistant_weight` 0.05 is on in both columns.
+- QA is below.
+
+### QA: list vs structured context (same retrieval)
+
+The reader and judge are as before: GLM-4.7-Flash, thinking off, Mem0's LoCoMo prompts and LongMemEval's prompts. All three conditions use the same recall (`default`, k = 10):
+- `list`: the harness's dated list of hit texts, as in every earlier table. Since claims, those texts are sentences.
+- `stmt`: the same list with each claim replaced by its whole statement (`context`), once per statement. That is what the list showed before claims.
+- `context`: `recall {format: 'context'}`. The budget is 3000 tokens (LongMemEval) or 1500 (LoCoMo). It shows groups, dates, `previously` lines and up to 600 characters of each statement. The median block is about 710 tokens on LoCoMo.
+
+QA_TABLES
+
+### Weaknesses after this work
+
+1. **Claim fragments dominate the vector leg on chat turns.** This was the biggest LoCoMo loss in this run (hybrid R@5 0.66 → 0.42), and it comes from the write path (`wave3/claims-fix`). Every LoCoMo hybrid and QA number above should be re-measured after it.
+2. **Multi-hop evidence that the question does not mention** is still missed (LoCoMo multi-hop Rall@10 ≤ 0.11). Diversity cannot help it, and entity expansion did not help with crude entities.
+3. **Storing assistant turns** costs user-evidence turns in the top 10 (T@10 0.914 → 0.850; ss-user 0.969 → 0.906). The statement cap and `assistant_weight` 0.05 recover part of it. A higher weight, or `role: 'user'` for questions about the user, is untested.
+
 ## Method
 
 ### What is measured

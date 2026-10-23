@@ -79,13 +79,12 @@ CONFIGS = {
 def parse_configs(spec):
     out = {}
     for part in [x for x in (spec or "").split(";") if x.strip()]:
+        if "=" in part:  # name={json}
+            k, v = part.split("=", 1)
+            out[k.strip()] = json.loads(v)
+            continue
         for name in part.split(","):
-            name = name.strip()
-            if "=" in name:
-                k, v = name.split("=", 1)
-                out[k.strip()] = json.loads(v)
-                break
-            out[name] = CONFIGS[name]
+            out[name.strip()] = CONFIGS[name.strip()]
     return out
 
 

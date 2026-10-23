@@ -266,7 +266,7 @@ Hits also carry `role` (when stored) and `expanded` (true for a memory brought i
 
 Questions that need several pieces of evidence lose them when the top k fills with near-copies: with claims, three sentences of one message can take three of ten slots, and one session can take all ten. So recall chooses the k hits from a deeper pool:
 
-1. The pool is the `pool` best by score (default max(3k, k + 10); the index legs fetch at least pool / 2 deep).
+1. The pool is the `pool` best by score (default max(3k, k + 10)), taken from the same index fetch as before. Deeper index legs were tried. They let short fragments that match only a name into the fusion, and cut LoCoMo hybrid R@5.
 2. Greedy selection: the next hit is the candidate with the highest `score − mmr_weight · max similarity to the hits already chosen`, among the candidates within the caps. Similarity is the cosine of the two vectors when both have one, else the word overlap (Jaccard of words of three or more characters). Ties keep the higher-ranked candidate.
 3. Caps: at most `max_per_statement` hits per statement (the claims of one text; a claim `m_….n` belongs to `m_…`), and at most `max_per_source` per source group. The source group is the part of `source` before the first `#`, so `chat-12#4` and `chat-12#9` are one conversation; a source without `#` is its own group. 0 means no cap.
 4. The caps are soft: when they leave fewer than k candidates, the capped ones fill the rest in score order.
@@ -281,10 +281,10 @@ Questions that need several pieces of evidence lose them when the top k fills wi
 - the seeds are the 3 most relevant hits;
 - their mentions (`kleos_mem_mention`) give canonical entities, merges followed (`kleos_entity_merge`); every row of each cluster counts;
 - an entity that more than 25 memories mention is not followed (the user, a speaker: a hub says nothing about this question);
-- the other memories mentioning those entities, valid at the read time and not archived or expired, join the pool (up to 30) with relevance `expand_weight` × the best seed's relevance, flagged `expanded`;
+- the other memories mentioning those entities, valid at the read time and not archived or expired, join the pool (up to 30) with relevance `expand_weight` × the best seed's relevance, flagged `expanded`. A related memory already in the pool (a seed included) is raised to that relevance when it is higher than its own;
 - they then go through the blend and the diverse selection like any other candidate.
 
-It is skipped when recall already filters by `entity`. It only does something when `remember` was given `entities`; there is no NER.
+It is skipped when recall already filters by `entity`. It only does something when `remember` was given `entities`; there is no NER. On LoCoMo with crude capitalised-word entities it did not help: at weight 0.5 nothing changed, and from 0.9 it displaced better hits. That is why it is off by default (docs/benchmarks/memory.md).
 
 #### Speaker roles
 
@@ -516,6 +516,7 @@ A read-only principal may only use `recall` and `reflect`.
 - ranking: recency decay and half-life, importance from `remember` and `set`, blend off = relevance with unchanged scores (`recency_and_importance_rank_and_blend_off_is_relevance`);
 - access counts: buffered, flushed, not counted by read-only scripts, flushes never touch the namespace version, ranked only with `access_weight`, dropped on erase (`access_counts_are_buffered_flushed_and_ranked`);
 - TTL and the archive tier: exclusion, `as_of` before expiry, no duplicate into an expired memory, archiving expired memories, archive and restore by id, TTL set and removed later (`ttl_expiry_and_archive_tier`);
+- recall diversity, the statement and source caps, MMR and `diversity: false` (`recall_diversity_caps_and_mmr`); entity expansion with merges and the hub limit (`recall_entity_expansion`); the context block: groups, dates, `previously`, `said in`, the budget, `as_of`, determinism, and the JSON and CozoScript surfaces (`recall_context_current_previously_and_budget`); roles never decided, `assistant_weight`, the role filter, `from` / `to`, and erase (`remember_roles_and_time_filters`); the selection and window helpers are unit tests in `memory_recall.rs`;
 - claims: ids, provenance, `context`, `split: 'none'` and the CozoScript/JSON surfaces (`claims_split_store_and_recall_with_context`); a supersede that ends only the old claim, and the similarity floor (`claims_supersede_only_the_old_claim`); questions and requests never decided on either side (`claims_questions_are_not_decided`); `forget` / `set` of a statement id (`claims_forget_a_statement`); entities per claim and the per-claim gate (`claims_link_entities_per_claim`); two concurrent split statements (`concurrent_claim_remembers_never_leave_two_current`); `question_weight` (`claims_questions_rank_below_statements`); one Engram job per claim with consecutive qids (`claims_enqueue_one_job_each` in `tests/memory_engram.rs`). The splitter's hard cases are unit tests in `memory_claims.rs`.
 
 ### Real scenario
