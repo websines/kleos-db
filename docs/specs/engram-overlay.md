@@ -266,8 +266,8 @@ Setup:
 The open question from the spike was recall on rephrasings that do not end in the trigger. Moving the edit from the trigger's last token to the **subject's** last token, with targets shared across phrasings, takes it from 1/40 to 19/40 top-1 (33/40 top-5). The baseline stays at the base model's level: its rows are only read when the prompt ends in the trigger N-grams. Locality also improves (+0.010% vs +0.046% NLL). The cost is the exact trigger, 17/20 vs 20/20, because three facts land at rank 2–3.
 
 Recall per fact:
-- For the 8 single-fact subjects, EngramEdit-style recalls 15 of 16 unseen rephrasings top-1.
-- For the 6 two-fact subjects, it recalls 4 of 24. Both facts write their deltas into the same subject rows, and the summed perturbation has to serve two relations.
+- For the 8 single-fact subjects, EngramEdit-style recalls 13 of 16 unseen rephrasings top-1.
+- For the 6 two-fact subjects, it recalls 6 of 24. Both facts write their deltas into the same subject rows, and the summed perturbation has to serve two relations.
 
 This is the "gradient interference / density" limit User-as-Engram reports, showing up per subject.
 
@@ -297,7 +297,7 @@ Retrieval remains the source of truth, and the kleos fact records keep that link
 
 ## Risks
 
-- **Interference on shared subjects.** Two facts about one subject sum their deltas into the same rows. Unseen recall drops from 15/16 (one fact per subject) to 4/24 (two facts per subject). A per-relation split (e.g. keying the 3-gram rows on the relation word) or an iterative solve is future work. This is the main quality limit.
+- **Interference on shared subjects.** Two facts about one subject sum their deltas into the same rows. Unseen recall drops from 13/16 (one fact per subject) to 6/24 (two facts per subject). A per-relation split (e.g. keying the 3-gram rows on the relation word) or an iterative solve is future work. This is the main quality limit.
 - **Erasing a fact that shares rows is exact with respect to kleos's data, not with respect to the model's behaviour.**
   - The replayed rows equal a fresh solve without the fact, so nothing derived from it remains.
   - But the remaining fact's delta in the same rows can still lift the erased target. `teague_job` fell from rank 1 to 7, not back to its base rank of 81.

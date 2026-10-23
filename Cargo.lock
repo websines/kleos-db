@@ -3017,6 +3017,7 @@ dependencies = [
  "itertools 0.12.1",
  "jieba-rs",
  "js-sys",
+ "kleos-engram",
  "kleos-infer",
  "kleos-rocks",
  "lazy_static",
@@ -3100,6 +3101,17 @@ name = "kleos-core-examples"
 version = "0.1.0"
 dependencies = [
  "kleos",
+]
+
+[[package]]
+name = "kleos-engram"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokenizers",
 ]
 
 [[package]]
