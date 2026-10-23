@@ -6,74 +6,126 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Latency of tasksource-decider-nano on short memory-note decisions.
+//! Latency and memory of tasksource-decider-nano on short memory-note
+//! decisions, rendered with the kleos `supersedes` template (NLI, 3 options).
 //!
-//! `cargo +1.99.0 run --release -p kleos-infer [--features metal] --example decider_bench -- <cpu|metal> <f32|f16|bf16|q8|q4> [batch sizes, e.g. 1,4,16]`
+//! ```text
+//! cargo +1.99.0 run --release -p kleos-infer [--features metal|accelerate] --example decider_bench -- \
+//!     <cpu|metal> <f32|f16|bf16|q8|q4> [--model DIR_OR_REPO] [--json]
+//! ```
+//!
+//! Memory is the process **physical footprint** (what Activity Monitor and
+//! `footprint` report, including Metal buffers and the allocator's cached
+//! free blocks) and RSS, at: start, after load, after a batch of 16, and the
+//! lifetime peak (= load peak, since load is the largest transient).
+//! Run with `MallocLargeCache=0` to see what the code holds rather than what
+//! libmalloc keeps cached (docs/specs/embedder-toggle.md).
 
 use std::time::Instant;
 
 use kleos_infer::*;
 
+/// `(phys_footprint, lifetime_max_phys_footprint, resident_size)` in MB.
+#[cfg(target_os = "macos")]
+fn mem() -> (f64, f64, f64) {
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
+    }
+    // rusage_info_v4 as u64 words: [0..2) uuid, 8 resident_size,
+    // 9 phys_footprint, 30 lifetime_max_phys_footprint
+    let mut b = [0u64; 64];
+    let r = unsafe { proc_pid_rusage(std::process::id() as i32, 4, b.as_mut_ptr()) };
+    if r != 0 {
+        return (f64::NAN, f64::NAN, f64::NAN);
+    }
+    let mb = |x: u64| (x as f64 / 1048576.0).round();
+    (mb(b[9]), mb(b[30]), mb(b[8]))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mem() -> (f64, f64, f64) {
+    (f64::NAN, f64::NAN, f64::NAN)
+}
+
+const PAIRS: [(&str, &str); 8] = [
+    ("Tom lives in Berlin.", "Tom moved to Lisbon in March."),
+    ("Maya works as a nurse at St. Mary's Hospital.", "Maya started a new job as a data analyst at Stripe."),
+    ("Lena is a vegetarian.", "Lena started eating meat again this year."),
+    ("The project deadline is June 30.", "The project deadline was pushed to August 15."),
+    ("The user's landlord is called Mr. Petrov and the flat is on the fourth floor.", "The user is learning to bake sourdough bread at weekends."),
+    ("Ravi drives a Honda Civic.", "Ravi's car is a Honda Civic."),
+    ("The staging cluster has 32 GB of RAM and runs Debian 12 on three nodes.", "The staging cluster was upgraded to 64 GB of RAM last night."),
+    ("Ana's rent is €1,250 per month.", "From next month Ana pays €1,320 a month in rent."),
+];
+
+fn req(i: usize) -> DecideRequest {
+    let (a, b) = PAIRS[i % PAIRS.len()];
+    DecideRequest {
+        state: format!("Premise: {a}\nHypothesis: {b}"),
+        question: "What is the relationship between the premise and the hypothesis?".into(),
+        options: vec![
+            "entailment: The hypothesis follows from the premise".into(),
+            "neutral: The hypothesis might be true or false given the premise".into(),
+            "contradiction: The hypothesis contradicts the premise".into(),
+        ],
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let device = DevicePref::parse(args.get(1).map(String::as_str).unwrap_or("cpu"))?;
     let precision = Precision::parse(args.get(2).map(String::as_str).unwrap_or("f32"))?;
-    let m = DeciderNano::new(EngineConfig {
-        device,
-        precision,
-        ..Default::default()
-    })?;
-    let pairs = [
-        ("Tom lives in Berlin.", "Tom moved to Lisbon in March."),
-        ("Maya works as a nurse at St. Mary's Hospital.", "Maya started a new job as a data analyst at Stripe."),
-        ("Lena is a vegetarian.", "Lena started eating meat again this year."),
-        ("The project deadline is June 30.", "The project deadline was pushed to August 15."),
-    ];
-    let req = |i: usize| {
-        let (old, new) = pairs[i % pairs.len()];
-        DecideRequest {
-            state: old.to_string(),
-            question: format!(
-                "Classify the relationship between the old note and this new statement:\n{new}"
-            ),
-            options: vec!["Entailment".into(), "Contradiction".into(), "NotMentioned".into()],
-        }
-    };
+    let model = args
+        .iter()
+        .position(|a| a == "--model")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| DECIDER_NANO_REPO.to_string());
+    let m0 = mem();
+    let m = DeciderNano::with_repo(
+        &model,
+        EngineConfig {
+            device,
+            precision,
+            ..Default::default()
+        },
+    )?;
     let t = Instant::now();
     m.decide(&[req(0)], false)?;
+    let load_ms = t.elapsed().as_secs_f64() * 1e3;
+    let m_load = mem();
     let (dev, bytes) = m.loaded_info().unwrap();
-    println!(
-        "load+first: {:.0} ms on {dev}, {:.0} MB weights",
-        t.elapsed().as_secs_f64() * 1e3,
-        bytes as f64 / 1e6
-    );
-    let time = |n: usize, reps: usize| -> Result<f64> {
+    let reqs16: Vec<_> = (0..16).map(req).collect();
+    m.decide(&reqs16, false)?;
+    let m16 = mem();
+    let lat = |n: usize, reps: usize| -> Result<Vec<f64>> {
         let reqs: Vec<_> = (0..n).map(req).collect();
         m.decide(&reqs, false)?;
         let mut v = vec![];
-        for _ in 0..reps {
+        for r in 0..reps {
+            let reqs: Vec<_> = (r..r + n).map(req).collect();
             let t = Instant::now();
             m.decide(&reqs, false)?;
             v.push(t.elapsed().as_secs_f64() * 1e3);
         }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        Ok(v[v.len() / 2])
+        Ok(v)
     };
-    if let Some(sizes) = args.get(3) {
-        for n in sizes.split(',') {
-            let n: usize = n.parse().unwrap();
-            let t = time(n, 10)?;
-            println!("batch {n}: {t:.1} ms ({:.1} ms/decision)", t / n as f64);
-        }
-        return Ok(());
-    }
-    let one = time(1, 30)?;
-    let b16 = time(16, 10)?;
-    println!(
-        "{} {}: single request (3 options) median {one:.1} ms; batch of 16 median {b16:.1} ms ({:.1} ms/decision)",
-        dev,
-        precision.name(),
-        b16 / 16.0
-    );
+    let b1 = lat(1, 40)?;
+    let b16 = lat(16, 10)?;
+    let b64 = lat(64, 5)?;
+    let m_end = mem();
+    let p = |v: &[f64], q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+    let out = serde_json::json!({
+        "device": dev, "precision": precision.name(), "model": model,
+        "weights_mb": (bytes as f64 / 1048576.0).round(),
+        "load_ms": load_ms.round(),
+        "footprint_mb": {"start": m0.0, "loaded": m_load.0, "load_peak": m_load.1, "after_b16": m16.0, "end": m_end.0, "peak": m_end.1},
+        "rss_mb": {"start": m0.2, "loaded": m_load.2, "after_b16": m16.2, "end": m_end.2},
+        "b1_p50_ms": (p(&b1, 0.5) * 10.0).round() / 10.0, "b1_p90_ms": (p(&b1, 0.9) * 10.0).round() / 10.0,
+        "b16_ms_per_decision": (p(&b16, 0.5) / 16.0 * 10.0).round() / 10.0,
+        "b64_ms_per_decision": (p(&b64, 0.5) / 64.0 * 10.0).round() / 10.0,
+    });
+    println!("{out}");
     Ok(())
 }

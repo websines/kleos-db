@@ -24,6 +24,13 @@ fn cal(bias: &[f64], threshold: f64, tau_auto: f64, source: &str) -> Calibration
     }
 }
 
+/// Defaults per weights version; `None` or an unknown version falls back to
+/// the published checkpoint's.
+pub(super) fn calibration_for_weights(t: Template, f: Family, weights: Option<&str>) -> Calibration {
+    let _ = weights;
+    calibration(t, f)
+}
+
 pub(super) fn calibration(t: Template, f: Family) -> Calibration {
     const ADAPT: &str = "adapt-60 v1";
     const NONE: &str = "default (no adapt data)";

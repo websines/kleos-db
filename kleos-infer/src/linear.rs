@@ -99,6 +99,8 @@ impl TensorFile {
 
 /// Rows per chunk when converting a token table.
 const TABLE_CHUNK_ROWS: usize = 16384;
+/// Rows per chunk of a dense (float) token table: 1024 × 768 × 4 B = 3 MB.
+const DENSE_TABLE_CHUNK_ROWS: usize = 1024;
 
 pub(crate) struct Loader<'a> {
     pub(crate) st: &'a TensorFile,
@@ -186,16 +188,45 @@ impl Loader<'_> {
             }
             _ => {
                 let dt = self.weight_dtype();
-                let mut parts = Vec::new();
-                for (r0, r1) in chunks {
-                    parts.push(self.st.read_rows(name, r0, r1)?.to_dtype(dt)?);
-                }
-                let w = Tensor::cat(&parts, 0)?;
-                drop(parts);
+                let w = match dt {
+                    DType::F16 => self.staged_table::<half::f16>(name, rows, hidden, dt)?,
+                    DType::BF16 => self.staged_table::<half::bf16>(name, rows, hidden, dt)?,
+                    _ => self.staged_table::<f32>(name, rows, hidden, dt)?,
+                };
                 self.bytes += w.elem_count() * dt.size_in_bytes();
-                Ok(Embedding::Dense(w.to_device(self.device)?))
+                Ok(Embedding::Dense(w))
             }
         }
+    }
+}
+
+impl Loader<'_> {
+    /// A dense `[rows, hidden]` table converted in small row chunks into an
+    /// anonymous-mmap staging area, then copied once into its final storage
+    /// (an exact-size Metal buffer, or the CPU tensor). The staging pages go
+    /// straight back to the OS on unmap, so no full-size transient lands in
+    /// libmalloc's large-block cache (which macOS keeps in the process
+    /// footprint), and no power-of-two pooled buffer is used on Metal
+    /// (`Tensor::cat` on the device rounded 77 MB up to 128 MB).
+    fn staged_table<T: candle_core::WithDType>(
+        &mut self,
+        name: &str,
+        rows: usize,
+        hidden: usize,
+        dt: DType,
+    ) -> Result<Tensor> {
+        let n = rows * hidden;
+        let mut stage = memmap2::MmapMut::map_anon((n * std::mem::size_of::<T>()).max(1))?;
+        // SAFETY: an anonymous map is page aligned and `n * size_of::<T>()` long.
+        let buf: &mut [T] = unsafe { std::slice::from_raw_parts_mut(stage.as_mut_ptr() as *mut T, n) };
+        for r0 in (0..rows).step_by(DENSE_TABLE_CHUNK_ROWS) {
+            let r1 = (r0 + DENSE_TABLE_CHUNK_ROWS).min(rows);
+            let c = self.st.read_rows(name, r0, r1)?.to_dtype(dt)?.flatten_all()?.to_vec1::<T>()?;
+            buf[r0 * hidden..r1 * hidden].copy_from_slice(&c);
+        }
+        let t = Tensor::from_slice(buf, (rows, hidden), self.device)?;
+        drop(stage);
+        Ok(t)
     }
 }
 

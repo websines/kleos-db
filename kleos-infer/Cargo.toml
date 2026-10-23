@@ -21,6 +21,9 @@ candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 safetensors = "0.6"
+# anonymous-mmap staging for the token table at load (freed straight back to the OS)
+memmap2 = "0.9"
+half = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

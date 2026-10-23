@@ -159,6 +159,48 @@ fn gold(t: Template, label: &str) -> usize {
     }
 }
 
+static RULES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RULE_FIRED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// With `--rules`, the value pre-check (kleos::decide::rules) overrides the
+/// model's label probabilities where it fires.
+fn apply_rules(t: Template, items: &[Item], scored: &mut [decide::Scored]) {
+    if !RULES.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    for (s, (a, b, _)) in scored.iter_mut().zip(items) {
+        if let Some((p, _)) = decide::rules::apply_value_rule(t, a, b, &s.probs) {
+            s.probs = p;
+            RULE_FIRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    /// (template, a, b, label probs) of every scored item, for `--dump`.
+    static ref DUMP: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(vec![]);
+}
+
+fn score(d: &dyn Decider, f: Family, t: Template, items: &[Item], with_features: bool) -> Vec<decide::Scored> {
+    let mut s = score_items(d, f, t, &pairs(items), &Calibration::default(), with_features).unwrap();
+    apply_rules(t, items, &mut s);
+    let mut dump = DUMP.lock().unwrap();
+    for (x, (a, b, g)) in s.iter().zip(items) {
+        dump.push(json!([t.name(), a, b, g, x.probs]));
+    }
+    s
+}
+
+/// Plain bootstrap 95% CI of a mean of 0/1 outcomes.
+fn boot_mean(x: &[f64]) -> [f64; 2] {
+    let mut rng = Rng(0x2545F4914F6CDD1D);
+    let mut v: Vec<f64> = (0..2000)
+        .map(|_| (0..x.len()).map(|_| x[rng.below(x.len())]).sum::<f64>() / x.len() as f64)
+        .collect();
+    v.sort_by(|a, b| a.total_cmp(b));
+    [r3(v[50]), r3(v[1950])]
+}
+
 fn pairs(items: &[Item]) -> Vec<(&str, &str)> {
     items.iter().map(|(a, b, _)| (a.as_str(), b.as_str())).collect()
 }
@@ -167,7 +209,7 @@ fn pairs(items: &[Item]) -> Vec<(&str, &str)> {
 fn eval_binary(d: &dyn Decider, f: Family, t: Template, adapt: &[Item], eval: &[Item], with_probe: bool) -> (Value, Option<Calibration>) {
     let raw = Calibration::default();
     let ye: Vec<bool> = eval.iter().map(|x| gold(t, &x.2) == 1).collect();
-    let se = score_items(d, f, t, &pairs(eval), &raw, with_probe).unwrap();
+    let se = score(d, f, t, eval, with_probe);
     let pe: Vec<f64> = se.iter().map(|s| s.probs[1]).collect();
     let mut rep = json!({
         "auroc": r3(auroc(&pe, &ye)),
@@ -189,7 +231,7 @@ fn eval_binary(d: &dyn Decider, f: Family, t: Template, adapt: &[Item], eval: &[
     let mut cal_out = None;
     if !adapt.is_empty() {
         let ya: Vec<usize> = adapt.iter().map(|x| gold(t, &x.2)).collect();
-        let sa = score_items(d, f, t, &pairs(adapt), &raw, with_probe).unwrap();
+        let sa = score(d, f, t, adapt, with_probe);
         let probs: Vec<Vec<f64>> = sa.iter().map(|s| s.probs.clone()).collect();
         let cal = fit_calibration(t, f, &probs, None, &ya, 0.02, false);
         let ybool: Vec<bool> = ya.iter().map(|y| *y == 1).collect();
@@ -240,11 +282,10 @@ fn argmax(p: &[f64]) -> usize {
 
 fn eval_relation(d: &dyn Decider, f: Family, adapt: &[Item], eval: &[Item], with_probe: bool) -> (Value, Calibration) {
     let t = Template::Relation;
-    let raw = Calibration::default();
     let ya: Vec<usize> = adapt.iter().map(|x| gold(t, &x.2)).collect();
     let ye: Vec<usize> = eval.iter().map(|x| gold(t, &x.2)).collect();
-    let sa = score_items(d, f, t, &pairs(adapt), &raw, with_probe).unwrap();
-    let se = score_items(d, f, t, &pairs(eval), &raw, with_probe).unwrap();
+    let sa = score(d, f, t, adapt, with_probe);
+    let se = score(d, f, t, eval, with_probe);
     // 3-way: update and contradiction merged (the zero-shot readout has no contradiction)
     let m3 = |l: usize| if l == 1 { 0 } else { l };
     let acc3 = |pred: &[usize], g: &[usize]| pred.iter().zip(g).filter(|(p, g)| m3(**p) == m3(**g)).count() as f64 / g.len() as f64;
@@ -262,7 +303,14 @@ fn eval_relation(d: &dyn Decider, f: Family, adapt: &[Item], eval: &[Item], with
         out
     };
     let pred0: Vec<usize> = se.iter().map(|s| argmax(&s.probs)).collect();
-    let pred1: Vec<usize> = se.iter().map(|s| argmax(&corrected(&s.option_probs))).collect();
+    let mut pred1: Vec<usize> = se.iter().map(|s| argmax(&corrected(&s.option_probs))).collect();
+    if RULES.load(std::sync::atomic::Ordering::Relaxed) {
+        for (p, (a, b, _)) in pred1.iter_mut().zip(eval) {
+            if matches!(decide::rules::value_rule(a, b), decide::rules::ValueRule::Update(_)) {
+                *p = 0;
+            }
+        }
+    }
     let mut rep = json!({
         "acc3": r3(acc3(&pred0, &ye)),
         "bias_from_adapt": cal.bias,
@@ -297,7 +345,19 @@ fn latency(d: &dyn Decider, f: Family, eval: &[Item]) -> Value {
     let t = Instant::now();
     score_items(d, f, Template::Supersedes, &ps, &cal, false).unwrap();
     let batched = t.elapsed().as_secs_f64() * 1000.0 / ps.len() as f64;
-    json!({"b1_p50_ms": r3(lat[lat.len() / 2]), "b1_p90_ms": r3(lat[lat.len() * 9 / 10]), "batched_ms_per_decision": r3(batched)})
+    let mut per = serde_json::Map::new();
+    for n in [16usize, 64] {
+        let reqs: Vec<(&str, &str)> = (0..n).map(|i| ps[i % ps.len()]).collect();
+        let mut v = vec![];
+        for _ in 0..3 {
+            let t = Instant::now();
+            score_items(d, f, Template::Supersedes, &reqs, &cal, false).unwrap();
+            v.push(t.elapsed().as_secs_f64() * 1000.0 / n as f64);
+        }
+        v.sort_by(|a, b| a.total_cmp(b));
+        per.insert(format!("b{n}_ms_per_decision"), json!(r3(v[1])));
+    }
+    json!({"b1_p50_ms": r3(lat[lat.len() / 2]), "b1_p90_ms": r3(lat[lat.len() * 9 / 10]), "batched_ms_per_decision": r3(batched), "batch": per})
 }
 
 fn rss_mb() -> f64 {
@@ -312,7 +372,8 @@ fn rss_mb() -> f64 {
         .unwrap_or(f64::NAN)
 }
 
-fn eval_backend(name: &str, d: &dyn Decider, f: Family, items: &(Vec<Item>, Vec<Item>, Vec<Item>), vit: Option<&Value>, real: bool) -> (Value, Vec<(Template, Calibration)>) {
+#[allow(clippy::too_many_arguments)]
+fn eval_backend(name: &str, d: &dyn Decider, f: Family, items: &(Vec<Item>, Vec<Item>, Vec<Item>), vit: Option<&Value>, extra: &[(String, Value)], probe_train: Option<&Value>, real: bool) -> (Value, Vec<(Template, Calibration)>) {
     let (adapt, eval, entity) = items;
     let mut rep = json!({"backend": name, "model": d.model_id(), "family": f.name()});
     let mut cals = vec![];
@@ -333,14 +394,87 @@ fn eval_backend(name: &str, d: &dyn Decider, f: Family, items: &(Vec<Item>, Vec<
     eprintln!("[{name}] relation: {r}");
     rep["relation"] = r;
     cals.push((Template::Relation, c));
+    let sup_cal = cals[0].1.clone();
+    let auto_stats = |p: &[f64], y: &[bool]| -> Value {
+        let auto: Vec<bool> = p.iter().map(|x| *x >= sup_cal.tau_auto).collect();
+        json!({
+            "tau_auto_from_adapt": r3(sup_cal.tau_auto),
+            "acc_at_adapt_threshold": r3(accuracy_at(p, y, sup_cal.threshold)),
+            "auto_coverage": r3(auto.iter().filter(|a| **a).count() as f64 / p.len() as f64),
+            "auto_false": auto.iter().zip(y).filter(|(a, y)| **a && !**y).count(),
+        })
+    };
+    for (key, set) in extra {
+        match key.as_str() {
+            "lme_ku_heldout" => {
+                let te: Vec<Item> = set["pairs"].as_array().unwrap().iter().map(|r| (r[0].as_str().unwrap().into(), r[1].as_str().unwrap().into(), r[2].as_str().unwrap().into())).collect();
+                let se = score(d, f, Template::Supersedes, &te, false);
+                let ye: Vec<bool> = te.iter().map(|x| x.2 == "update").collect();
+                let pe: Vec<f64> = se.iter().map(|s| s.probs[1]).collect();
+                let r = json!({
+                    "n": te.len(), "n_pos": ye.iter().filter(|y| **y).count(),
+                    "auroc": r3(auroc(&pe, &ye)), "auroc_ci95": boot(&pe, &ye, &|s, l| auroc(s, l)).map(r3),
+                    "bands": auto_stats(&pe, &ye),
+                });
+                eprintln!("[{name}] lme_ku_heldout: {r}");
+                rep["lme_ku_heldout_supersedes"] = r;
+            }
+            "mnli_dev" => {
+                let te: Vec<Item> = set["items"].as_array().unwrap().iter().map(|r| (r[0].as_str().unwrap().into(), r[1].as_str().unwrap().into(), r[2].as_str().unwrap().into())).collect();
+                // raw NLI readout of the supersedes/duplicate template (no rules: not memory pairs)
+                let se = score_items(d, f, Template::Supersedes, &pairs(&te), &Calibration::default(), false).unwrap();
+                let gold = |l: &str| ["entailment", "neutral", "contradiction"].iter().position(|x| *x == l).unwrap();
+                let ok: Vec<f64> = se.iter().zip(&te).map(|(s, x)| (argmax(&s.option_probs) == gold(&x.2)) as u8 as f64).collect();
+                let r = json!({"n": te.len(), "acc3": r3(ok.iter().sum::<f64>() / ok.len() as f64), "acc3_ci95": boot_mean(&ok)});
+                eprintln!("[{name}] mnli_dev: {r}");
+                rep["mnli_dev"] = r;
+            }
+            _ => {}
+        }
+    }
+    if let Some(pt) = probe_train {
+        // a supersedes probe fitted on training-set pairs (not adapt), scored on every held-out set
+        let tr: Vec<Item> = pt["pairs"].as_array().unwrap().iter().map(|r| (r[0].as_str().unwrap().into(), r[1].as_str().unwrap().into(), r[2].as_str().unwrap().into())).collect();
+        let st = score_items(d, f, Template::Supersedes, &pairs(&tr), &Calibration::default(), true).unwrap();
+        let ys: Vec<usize> = tr.iter().map(|x| (x.2 == "yes") as usize).collect();
+        let xs: Vec<Vec<f32>> = st.iter().map(|s| s.features[0].clone()).collect();
+        let probe = fit_probe(Template::Supersedes, f, &d.model_id(), &xs, &ys, &ProbeOptions::default()).unwrap();
+        let mut out = json!({"n_train": tr.len(), "C": probe.c, "cv_auroc": r3(probe.cv_score), "tau_auto": r3(probe.tau_auto), "threshold": r3(probe.threshold)});
+        let mut sets: Vec<(&str, Vec<Item>, Box<dyn Fn(&str) -> bool>)> = vec![
+            ("eval42", items.1.clone(), Box::new(|l: &str| l == "update" || l == "contradiction")),
+        ];
+        for (k, set) in extra {
+            if k == "lme_ku_heldout" {
+                let te: Vec<Item> = set["pairs"].as_array().unwrap().iter().map(|r| (r[0].as_str().unwrap().into(), r[1].as_str().unwrap().into(), r[2].as_str().unwrap().into())).collect();
+                sets.push(("lme_ku_heldout", te, Box::new(|l: &str| l == "update")));
+            }
+        }
+        if let Some(v) = vit {
+            let te: Vec<Item> = v["test300"].as_array().unwrap().iter().map(|r| (r[0].as_str().unwrap().into(), r[1].as_str().unwrap().into(), r[2].as_str().unwrap().into())).collect();
+            sets.push(("vitaminc300", te, Box::new(|l: &str| l == "REFUTES")));
+        }
+        for (k, te, pos) in sets {
+            let se = score_items(d, f, Template::Supersedes, &pairs(&te), &Calibration::default(), true).unwrap();
+            let ye: Vec<bool> = te.iter().map(|x| pos(&x.2)).collect();
+            let pp: Vec<f64> = se.iter().map(|s| probe.predict(&s.features[0]).unwrap()[1]).collect();
+            let auto: Vec<bool> = pp.iter().map(|p| *p >= probe.tau_auto).collect();
+            out[k] = json!({
+                "auroc": r3(auroc(&pp, &ye)), "auroc_ci95": boot(&pp, &ye, &|s, l| auroc(s, l)).map(r3),
+                "acc_at_threshold": r3(accuracy_at(&pp, &ye, probe.threshold)),
+                "auto_coverage": r3(auto.iter().filter(|a| **a).count() as f64 / pp.len() as f64),
+                "auto_false": auto.iter().zip(&ye).filter(|(a, y)| **a && !**y).count(),
+            });
+        }
+        eprintln!("[{name}] train-set probe: {out}");
+        rep["supersedes_probe_trainset"] = out;
+    }
     if let Some(v) = vit {
         let te: Vec<Item> = v["test300"].as_array().unwrap().iter().map(|r| (r[0].as_str().unwrap().into(), r[1].as_str().unwrap().into(), r[2].as_str().unwrap().into())).collect();
         let tr: Vec<Item> = v["train100"].as_array().unwrap().iter().map(|r| (r[0].as_str().unwrap().into(), r[1].as_str().unwrap().into(), r[2].as_str().unwrap().into())).collect();
-        let raw = Calibration::default();
-        let se = score_items(d, f, Template::Supersedes, &pairs(&te), &raw, true).unwrap();
+        let se = score(d, f, Template::Supersedes, &te, true);
         let ye: Vec<bool> = te.iter().map(|x| x.2 == "REFUTES").collect();
         let pe: Vec<f64> = se.iter().map(|s| s.probs[1]).collect();
-        let sa = score_items(d, f, Template::Supersedes, &pairs(&tr), &raw, true).unwrap();
+        let sa = score(d, f, Template::Supersedes, &tr, true);
         let ya: Vec<usize> = tr.iter().map(|x| (x.2 == "REFUTES") as usize).collect();
         let xs: Vec<Vec<f32>> = sa.iter().map(|s| s.features[0].clone()).collect();
         let probe = fit_probe(Template::Supersedes, f, &d.model_id(), &xs, &ya, &ProbeOptions::default()).unwrap();
@@ -348,6 +482,7 @@ fn eval_backend(name: &str, d: &dyn Decider, f: Family, items: &(Vec<Item>, Vec<
         let r = json!({
             "zero_shot_auroc": r3(auroc(&pe, &ye)), "zero_shot_ci95": boot(&pe, &ye, &|s, l| auroc(s, l)).map(r3),
             "probe_train100_auroc": r3(auroc(&pp, &ye)), "probe_ci95": boot(&pp, &ye, &|s, l| auroc(s, l)).map(r3),
+            "bands": auto_stats(&pe, &ye),
         });
         eprintln!("[{name}] vitaminc300: {r}");
         rep["vitaminc300_supersedes"] = r;
@@ -367,13 +502,32 @@ fn main() {
     let flag = |k: &str| args.iter().any(|a| a == k);
     let items_path = arg("--items").unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/examples/data/decide_items.json").to_string());
     let items = load_items(&items_path);
+    // measure the model, not the pair-decision cache (latency re-scores items)
+    if !flag("--cache") {
+        decide::set_decision_cache_capacity(0);
+    }
+    if flag("--rules") {
+        RULES.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // --extra key=path (repeatable): lme_ku_heldout / mnli_dev sets from build_data.py
+    let extra: Vec<(String, Value)> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| *a == "--extra")
+        .filter_map(|(i, _)| args.get(i + 1))
+        .map(|kv| {
+            let (k, p) = kv.split_once('=').expect("--extra key=path");
+            (k.to_string(), serde_json::from_str(&std::fs::read_to_string(p).expect(p)).unwrap())
+        })
+        .collect();
+    let probe_train: Option<Value> = arg("--probe-train").map(|p| serde_json::from_str(&std::fs::read_to_string(&p).expect(&p)).unwrap());
     let vit: Option<Value> = arg("--vitaminc").map(|p| serde_json::from_str(&std::fs::read_to_string(&p).expect(&p)).unwrap());
     let mut reports = vec![];
     let mut fitted = vec![];
     if let Some(p) = arg("--d1-fixture") {
         let (rec, vsum) = load_recorded(&p);
         let rec: Arc<dyn Decider> = Arc::new(rec);
-        let (mut r, c) = eval_backend("d1 (recorded, MPS f16)", &*rec, Family::D1, &items, None, false);
+        let (mut r, c) = eval_backend("d1 (recorded, MPS f16)", &*rec, Family::D1, &items, None, &[], None, false);
         r["vitaminc300_supersedes_python"] = vsum;
         reports.push(r);
         fitted.push((Family::D1, c));
@@ -388,8 +542,17 @@ fn main() {
         if let Some(dv) = arg("--device") {
             eng.device = DevicePref::parse(&dv).unwrap();
         }
-        let label = format!("decider-nano ({}, {})", arg("--device").unwrap_or("auto".into()), eng.precision.name());
-        let nano = kleos_infer::DeciderNano::new(eng).unwrap();
+        let model_path = arg("--model-path");
+        let label = format!(
+            "decider-nano{} ({}, {})",
+            model_path.as_ref().map(|p| format!(" [{p}]")).unwrap_or_default(),
+            arg("--device").unwrap_or("auto".into()),
+            eng.precision.name()
+        );
+        let nano = match &model_path {
+            Some(p) => kleos_infer::DeciderNano::with_repo(p, eng).unwrap(),
+            None => kleos_infer::DeciderNano::new(eng).unwrap(),
+        };
         let rss0 = rss_mb();
         struct W(kleos_infer::DeciderNano);
         impl Decider for W {
@@ -409,7 +572,9 @@ fn main() {
             }
         }
         let w = W(nano);
-        let (mut r, c) = eval_backend(&label, &w, Family::Nano, &items, vit.as_ref(), true);
+        let (mut r, c) = eval_backend(&label, &w, Family::Nano, &items, vit.as_ref(), &extra, probe_train.as_ref(), true);
+        r["rules"] = json!(RULES.load(std::sync::atomic::Ordering::Relaxed));
+        r["rule_fired"] = json!(RULE_FIRED.load(std::sync::atomic::Ordering::Relaxed));
         r["rss_before_load_mb"] = json!(rss0);
         reports.push(r);
         fitted.push((Family::Nano, c));
@@ -428,6 +593,9 @@ fn main() {
                 );
             }
         }
+    }
+    if let Some(p) = arg("--dump") {
+        std::fs::write(&p, serde_json::to_string(&*DUMP.lock().unwrap()).unwrap()).unwrap();
     }
     let out = json!(reports);
     match arg("--out") {

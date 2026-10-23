@@ -109,3 +109,24 @@ evaluate on a sample of [VitaminC](https://huggingface.co/datasets/tals/vitaminc
 written to `.bench-data/` at run time and is not committed. The memory items
 in `kleos-core/examples/data/decide_items.json` are hand-written by the kleos
 authors.
+
+### Fine-tuning data for decider-nano (not shipped; built at run time)
+
+`scripts/infer-bench/decide/train/build_data.py` builds the fine-tuning set
+into `.bench-data/nano-tune/data/` (never committed). Fine-tuned weights are
+written to `.bench-data/nano-tune/models/` and are not shipped or uploaded.
+
+| Source | Licence | Use |
+|---|---|---|
+| [VitaminC](https://huggingface.co/datasets/tals/vitaminc) train split (Schuster et al., 2021) | CC BY-SA 3.0 (Wikipedia-derived) | claim/evidence pairs and old→new revision pairs; the test split is used for evaluation only |
+| [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned) oracle file (Wu et al., 2024) | MIT | knowledge-update pairs (has_answer turns ordered by session date) and multi-session negatives; 25 KU + 40 multi-session questions held out for evaluation |
+| [PAWS](https://huggingface.co/datasets/google-research-datasets/paws) labeled_final (Zhang et al., 2019) | PAWS licence: free for any purpose, attribution to Google LLC appreciated | duplicate positives and hard negatives |
+| [MultiNLI](https://huggingface.co/datasets/nyu-mll/multi_nli) (Williams et al., 2018) | per genre: OANC (free), CC BY-SA 3.0, CC BY 3.0 | 900 training pairs; a 600-item validation_matched subset for the forgetting check |
+| Programmatic memory pairs (`memgen.py`) | kleos authors (MPL-2.0) | update / contradiction / compatible / duplicate, entity mentions, entity typing, relation mapping |
+
+**Share-alike note (decision for the maintainers, not made here):** VitaminC
+and part of MultiNLI are CC BY-SA. Whether weights fine-tuned on them are an
+adaptation that must carry CC BY-SA terms is an open legal question. Until it
+is settled, treat fine-tuned decider-nano weights as possibly share-alike and
+do not redistribute them under Apache-2.0 alone; a weights build without the
+CC BY-SA sources is possible by dropping them in `build_data.py`.

@@ -45,7 +45,7 @@ mod linear;
 mod static_embed;
 
 pub use decide::{softmax, DecideAnswer, DecideRequest, Decider};
-pub use decider_nano::{DeciderNano, DECIDER_NANO_REPO};
+pub use decider_nano::{DeciderNano, DECIDER_BATCH_TOKENS, DECIDER_NANO_REPO};
 pub use device::DevicePref;
 pub use error::{Error, Result};
 pub use gemma::{GemmaEmbedder, GemmaModel, GEMMA_DOCUMENT_PROMPT, GEMMA_QUERY_PROMPT};
