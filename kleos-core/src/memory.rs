@@ -32,6 +32,7 @@ use crate::bail;
 use crate::data::value::DataValue;
 use crate::decide::{self, rules, Band, Decision, Template};
 use crate::embed;
+use crate::memory_engram::{self as engram_hook, Job};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
 
@@ -242,6 +243,10 @@ pub struct InitOpts {
     pub embedder: Option<String>,
     /// Decider used by `remember` when none is passed per call.
     pub decider: Option<String>,
+    /// Registered Engram model whose overlay follows the memories
+    /// (`remember` / `forget` enqueue Engram jobs); `''` detaches.
+    #[cfg(feature = "engram")]
+    pub engram: Option<String>,
 }
 
 /// Options of [`Db::remember`].
@@ -513,6 +518,10 @@ pub struct MemConfig {
     pub dim: Option<usize>,
     /// Default decider.
     pub decider: Option<String>,
+    /// Attached Engram model (feature `engram`).
+    #[cfg(feature = "engram")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engram: Option<String>,
     /// Schema version.
     pub version: i64,
 }
@@ -718,6 +727,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 Some("embedder") => cfg.embedder = v,
                 Some("decider") => cfg.decider = v,
                 Some("dim") => cfg.dim = v.and_then(|x| x.parse().ok()),
+                #[cfg(feature = "engram")]
+                Some("engram") => cfg.engram = v,
                 Some("version") => cfg.version = v.and_then(|x| x.parse().ok()).unwrap_or(1),
                 _ => {}
             }
@@ -780,6 +791,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         if let Some(e) = opts.embedder {
             self.attach_embedder(&mut cfg, &e)?;
+        }
+        #[cfg(feature = "engram")]
+        if let Some(m) = opts.engram {
+            crate::memory_engram::attach(self, &mut cfg, &m)?;
         }
         Ok(cfg)
     }
@@ -879,7 +894,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 });
                 self.memory_init(InitOpts {
                     embedder,
-                    decider: None,
+                    ..Default::default()
                 })
             }
         }
@@ -1327,6 +1342,21 @@ impl<'s, S: Storage<'s>> Db<S> {
                 ));
                 p.push(("audit", DataValue::List(rows)));
             }
+            if duplicate.is_none() {
+                let old: Vec<String> = supersede.iter().map(|&i| cands[i].id.clone()).collect();
+                let job = Job {
+                    op: if old.is_empty() { "write" } else { "supersede" },
+                    mem_ids: std::slice::from_ref(&mem_id),
+                    old: &old,
+                    text: Some(text),
+                    at,
+                    entities: &opts.entities,
+                };
+                if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
+                    script.push_str(&frag);
+                    p.extend(ps);
+                }
+            }
             // the version this plan was made against must still hold
             script.insert_str(
                 0,
@@ -1527,11 +1557,14 @@ impl<'s, S: Storage<'s>> Db<S> {
                       :update {MEM_VEC} {{ns, id => current}}}}"
                 ));
             }
+            let mut p = vec![("ns", s(&ns)), ("ids", str_list(&cur)), ("at", DataValue::from(at))];
+            let job = Job { op: "retract", mem_ids: &cur, old: &[], text: None, at, entities: &[] };
+            if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
+                script.push_str(&frag);
+                p.extend(ps);
+            }
             script.push_str(&bump_ns_head());
-            self.mem_q(
-                &script,
-                vec![("ns", s(&ns)), ("ids", str_list(&cur)), ("at", DataValue::from(at))],
-            )?;
+            self.mem_q(&script, p)?;
             return Ok(ForgetResult { mode, ids: cur });
         }
 
@@ -1584,11 +1617,14 @@ impl<'s, S: Storage<'s>> Db<S> {
                ?[ns, src, rel, dst] := *{MEM_LINK}{{ns, src, rel, dst}}, ns = $ns, gone[dst] \
                :rm {MEM_LINK} {{ns, src, rel, dst}}}}"
         ));
+        let mut p = vec![("ns", s(&ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))];
+        let job = Job { op: "erase", mem_ids: &exist, old: &[], text: None, at: now_micros(), entities: &[] };
+        if let Some((frag, ps)) = engram_hook::enqueue(&cfg, job) {
+            script.push_str(&frag);
+            p.extend(ps);
+        }
         script.push_str(&bump_ns_head());
-        self.mem_q(
-            &script,
-            vec![("ns", s(&ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))],
-        )?;
+        self.mem_q(&script, p)?;
         Ok(ForgetResult { mode, ids: exist })
     }
 

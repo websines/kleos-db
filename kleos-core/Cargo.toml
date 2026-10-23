@@ -243,6 +243,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "engram"
 required-features = ["engram"]
 
+[[test]]
+name = "memory_engram"
+required-features = ["engram"]
+
 [[example]]
 name = "engram_cli"
 required-features = ["engram"]

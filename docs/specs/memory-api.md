@@ -39,7 +39,8 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 | `kleos_mem_link` | `{ns, src, rel, dst => created, p?, decided_by?}` | Typed links between memories and entities. `remember` writes `new -[supersedes]-> old` with the decision's p and `decided_by`. |
 | `kleos_mem_source` | `{ns, id, at, stmt => source?, text}` | Provenance: one row per statement behind a memory, so a duplicate adds a row here instead of a memory. |
 | `kleos_mem_decision` | `{ns, new, cand, template => label, p, band, decided_by, reason?, status, at}` | The audit table: every decision that was applied (`status: applied`) or left for review (`pending`). |
-| `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`. It is created last, so its presence marks a complete schema. |
+| `kleos_mem_config` | `{key => value}` | `embedder`, `dim`, `decider`, `version`, and `engram` when an Engram model is attached. It is created last, so its presence marks a complete schema. |
+| `kleos_engram_queue` | `{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}` | Only with an Engram model attached (feature `engram`): one job per memory change for the overlay worker. See "Engram attachment". |
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
 
@@ -174,7 +175,20 @@ There is no op yet to accept or reject a pending decision. To act on one, `forge
 
 Adds `kleos_mem_link {ns, from, rel, to}` with optional `p`. Both ends must be memories or entities of the namespace.
 
-### Entity hook
+### Engram attachment (feature `engram`)
+
+`::memory init {engram: 'nano'}` attaches the store to a registered Engram model ([engram-overlay.md](engram-overlay.md), "Memory attachment"); `engram: ''` detaches. While attached, each memory change also writes a job to `kleos_engram_queue`, **inside the change's own write script**, so one transaction:
+- `remember` that adds a memory: `write`, or `supersede` with the superseded ids; a duplicate writes none;
+- `forget` retract: `retract` with the ids that were current, at the retraction time;
+- `forget` erase: `erase` with the ids that existed. It also clears the text of earlier jobs of those memories.
+
+The job's `qid` is the `kleos_mem_ns` version its commit produces, computed in the transaction before the version bump. So the concurrency rules above cover the queue too: a plan that lost the race writes neither its memory nor its job, and jobs are numbered in commit order per namespace. The edits themselves are computed outside kleos by `scripts/engram/engram_worker.py`; `::engram queue {ns}` shows pending and failed jobs and the last error.
+
+The hook is one function, `memory_engram::enqueue`, called from the write-script assembly of `remember` and of both `forget` modes. It returns nothing when no model is attached or the feature is off, so the memory API's behaviour and cost are unchanged then.
+
+`forget` erase still runs `::erase kleos_mem` as its own statement before the script that cleans up and enqueues. A failure between the two leaves the memory erased without an erase job (as it already left the vectors and sources); the job is written with the clean-up, not with `::erase`.
+
+
 
 `memory::link_entities(db, ns, memory_id, text, names)` is the only place entities are resolved. For now it matches the exact normalised name (lower case, collapsed whitespace, outer punctuation trimmed) of the names passed in `entities`, and creates an entity when there is none. It does no NER. Entity resolution (E3, `entity.rs`, a parallel branch) is meant to replace this function's body; `text` is passed in so it can extract mentions itself.
 
@@ -186,7 +200,7 @@ The same options everywhere: one JSON object per op, handled by `Db::memory_call
 
 ```rust
 use kleos::memory::{RememberOpts, RecallOpts, ForgetOpts, ReflectOpts, LinkOpts, InitOpts};
-db.memory_init(InitOpts { embedder: Some("gemma".into()), decider: Some("nano".into()) })?;
+db.memory_init(InitOpts { embedder: Some("gemma".into()), decider: Some("nano".into()), ..Default::default() })?;  // engram: Some("nano".into()) attaches an Engram model
 let r = db.remember("I moved to Lisbon.", RememberOpts { ns: Some("alice".into()), ..Default::default() })?;
 let hits = db.recall("where do I live?", RecallOpts { ns: Some("alice".into()), ..Default::default() })?;
 db.forget(ForgetOpts { ns: Some("alice".into()), id: r.id, mode: Some("erase".into()), ..Default::default() })?;
@@ -199,6 +213,7 @@ db.memory_call("recall", serde_json::json!({"query": "where do I live?", "ns": "
 
 ```
 ::memory init {embedder: 'gemma', decider: 'nano'}
+::memory init {engram: 'nano'}             # feature engram: remember/forget enqueue Engram jobs
 ::memory remember 'I moved to Lisbon.' {ns: 'alice', entities: ['Lisbon'], source: 'chat-12'}
 ::memory recall 'where do I live?' {ns: 'alice', k: 5, as_of: 1767225600000000}
 ::memory forget $id {ns: 'alice', mode: 'erase'}

@@ -12,6 +12,7 @@ Code:
 Tests:
 - `kleos-engram` unit tests and `kleos-engram/tests/parity.rs` (bit-exact vs DeepSeek-V4.1-Flash `engram.py`, `engram_demo_v1.py` and the nanogpt `NgramHash`; skipped when the refs are absent);
 - `kleos-core/tests/engram.rs`: the overlay store, synthetic spec and vectors, no model.
+- `kleos-core/tests/memory_engram.rs`: the memory attachment and its job queue, no model; `scripts/engram/remember_e2e.py` runs it end to end on the 132M model.
 
 ## Goal
 
@@ -212,6 +213,69 @@ Every model layer gets a file, empty when it has no rows. The files are read wit
 
 `ns: ['org', 'user', 'agent']` materialises the stack most-general-first. The value of a row comes from the last namespace that has it, which is the org → user overlay order of User-as-Engram, extended to agents. Rows are replaced, not summed. A user value trained on top of the org overlay is the composition the write path intended.
 
+## Memory attachment: `remember` writes Engram edits
+
+Status: implemented on `wave2/engram-remember` (2026-10-23). Code: `kleos-core/src/memory_engram.rs` (the hook and the queue), three calls to it in `memory.rs`, `scripts/engram/engram_worker.py` (the worker), `scripts/engram/remember_e2e.py` (end to end on the 132M model). Tests: `kleos-core/tests/memory_engram.rs`.
+
+An edit cannot be computed inside `remember`: the target needs the model's forward and backward passes (seconds per fact on a CPU, a GPU elsewhere for real models), and supersede and erase re-solve rows that facts share. So the memory change only **queues** the edit, in its own transaction, and a worker applies it.
+
+**Attach.** `::memory init {engram: 'nano'}` (Rust `InitOpts { engram: Some("nano".into()), .. }`, Python `db.memory_init(engram="nano")`) checks that the model is registered, creates the queue and stores `engram` in `kleos_mem_config`. `engram: ''` detaches. Without an attachment, or in a build without the `engram` feature, the memory API runs exactly as before: the hook returns nothing, and no relation is created.
+
+**Queue.**
+
+```
+kleos_engram_queue {ns: String, qid: Int => op: String, model: String, mem_ids: [String], old: [String],
+                    text: String?, at: Int, meta: Json?, status: String, attempts: Int, error: String?,
+                    created: Int, updated: Int}
+```
+
+| Memory change | Job | `at` |
+|---|---|---|
+| `remember` adds memory m | `write`, `mem_ids [m]`, the text, the entity names in `meta` | m's valid-from |
+| `remember` adds m and supersedes old memories | `supersede`, `mem_ids [m]`, `old` = the superseded ids | m's valid-from (= the old memories' end) |
+| `remember` finds a duplicate | nothing (the statement is a source row of the existing memory) | |
+| `forget` retract | `retract`, the ids that were current | the retraction time |
+| `forget` erase | `erase`, the ids that existed; earlier jobs of those ids lose their `text` and `meta` | now |
+
+- The job is written by the memory change's own script, so **in the same transaction**: a job cannot exist without its memory change, nor the change without its job (tested by making either write fail with a trigger).
+- `qid` is the namespace version (`kleos_mem_ns.seq`) that the commit produces, so jobs are numbered in commit order per namespace, and the concurrency guarantees of `remember` (version row asserted in the write transaction, re-planning) carry over: two concurrent `remember`s leave one current memory and exactly one job per committed memory.
+- `::engram queue {ns?}` reports `ns, pending, running, done, failed, last_qid, last_error`; `::engram queue {ns, jobs: true}` lists the jobs.
+
+**Worker** (`scripts/engram/engram_worker.py`, Python bindings built with `-F engram`):
+
+```sh
+python -I scripts/engram/engram_worker.py --db kleos.db --lab $B/src/zenmai-lab/experiments/2026-10-21-engram-nanogpt \
+  --ckpt $B/models/engram-nanogpt/engram-seed1337/model.safetensors --rowfreq $B/rowfreq [--once | --poll 2] [--lease 120]
+```
+
+- At start it checks that kleos's addressing of the registered model (`::engram rows`) equals the checkpoint's own hash, and refuses otherwise.
+- It applies, per namespace, the first unfinished job in qid order. A claim is a compare-and-set (pending → running, attempts + 1); a job left running longer than the lease (a crashed worker) is claimed again. After `--max-attempts` failures a job is marked `failed` with its error and the namespace moves on.
+- Overlay facts are keyed by memory id and asserted at the job's `at`, so `::engram export {as_of: T}` follows `::memory recall {as_of: T}`. Each apply writes the same keys at the same valid time, so a job applied twice (crash after the write, before `done`) leaves one version.
+- **The fact frame** comes from the memory text: the last word is the target, the rest the prompt, and the subject is the longest entity name given to `remember` that occurs in the prompt, else the longest run of capitalised words. The phrasings are the prompt in the three context prefixes of `engramedit.py`. A text without a subject is skipped (`done`, with the reason in `error`). The subject is stored in the fact's `source` (`{"memory": id, "subject": ...}`) so replay can re-hash the phrasings.
+- `write` / `supersede`: compute m's delta, then re-solve every row m (and the superseded facts) read from the facts current at `at` plus m, and `::engram write` (with `retract` = the superseded facts; their rows nobody else reads revert).
+- `retract`: re-solve the facts' rows without them, `::engram write` with `retract`.
+- `erase`: per memory, `::engram erase_plan`, replay the shared rows from the remaining facts' stored phrasings and payloads, `::engram erase_fact`.
+- One worker per database. Two would only race on claims, but a job that outlives its lease could run twice at once.
+
+**Results** (`scripts/engram/remember_e2e.py`, 132M model on CPU, SQLite store, worker as a separate process; raw numbers in `.bench-data/engram-remember/e2e/results.json`). Ten facts remembered as plain sentences ("Marisol Teague was a famous painter."), one phrasing each (the sentence minus its last word) in three contexts:
+
+| Step | Result |
+|---|---|
+| Recall, top-1 on the memory's own prompt | base 0/10 → **9/10** after the worker (`teague_instrument` at rank 2: it shares its subject rows with `teague_job`) |
+| Recall, unseen rephrasings with other endings (milestone set) | base 1/18 → **9/18** top-1, 13/18 top-5 |
+| Supersede through `remember` (value rule: "signed in 1921" → "1934") | one `supersede` job; " 1934" rank 28 → **1**, " 1921" 1 → 54; the other facts keep 8/9 top-1 |
+| `as_of` just before the supersede | " 1921" back at **rank 1**; the exported overlay is **bit-identical** to the export before the supersede; `::memory recall {as_of}` returns the 1921 memory |
+| `forget` one memory with erase (`teague_job`, 16 rows shared with `teague_instrument`) | 16 rows replayed; rank 1 → 24 (base 81); the other facts 8/9 → 9/9 top-1; **128 untouched rows bit-identical**; its fact history and its queued text are gone |
+| `forget {all: true, mode: 'erase'}` | 9 memories erased; empty overlay; **logits bit-identical** to the base model (`torch.equal`, 28 prompts). The superseded 1921 rows would have come back without the `erase_fact` fix below |
+| Crash after the overlay write, before `done` (`ENGRAM_WORKER_CRASH_AFTER_WRITE=1`) | job left `running`; re-claimed after the 3 s lease |
+| `kill -9` during a job's delta computation | job left `running`; re-claimed after the lease. Final: 3/3 jobs done (attempts 2, 2, 1), 0 failed, facts = memories, **one version per fact**, recall 3/3 top-1 (base 0/3) |
+
+Timings (shared machine, two other agents and a cargo build running):
+- `remember` on SQLite, attached vs not: p50 7.7 ms vs 6.8 ms (30 statements each). The enqueue is one more block in the same script.
+- Worker: 7.5 s model load; 5–7 s per `write` / `supersede` job (15 s for the first, cold), 0.3–0.9 s per `erase` job (replay from stored payloads, no backprop).
+
+**`erase_fact` fix.** Erasing fact B could bring back a row value of a fact A that had ended while B still shared the row: when A was superseded, the row was re-solved from B alone, so the version that ended A's value named B and was erased with it. `erase_fact` now ends such a row at the time A's validity ended (reported `reverted`). The end-to-end "erase the namespace" check depends on it: the superseded charter fact's rows came back without it.
+
 ## Write path: EngramEdit-style (`scripts/engram/engramedit.py`)
 
 Method from EngramEdit (arXiv 2610.10533; github.com/ModalityDance/EngramEdit, MIT). It is re-implemented for this model; no LongCat code is copied.
@@ -311,10 +375,10 @@ Retrieval remains the source of truth, and the kleos fact records keep that link
 
 ## Not done yet
 
-- A `Db::remember`-side hook (the planned wiring: "remember also writes an Engram edit when a model is attached"). The API above is what it would call. The write path itself (target computation) still lives in Python, because it needs the model's forward and backward passes.
+- The write path (target computation) still lives in Python, because it needs the model's forward and backward passes; `remember` queues, the Python worker applies (see "Memory attachment").
 - A kleos-infer port of the write path and of the overlay application (a gather-time override in a Rust Engram forward).
 - GGUF metadata loading (`engram.token_map`, multipliers, primes): the precomputed-token-map constructor is there, the GGUF reader is not.
 - Exact-key gating of overlay rows (research option (d)): store the compressed N-gram with each row, so colliding N-grams do not read it.
 - An interference fix for several facts per subject.
-- Python bindings (`kleos-lib-python`). The script uses the `engram_cli` example instead.
+- Python bindings: `kleos-lib-python` now has an `engram` feature (the worker uses it); `engramedit.py` still uses the `engram_cli` example.
 - A materialise latency benchmark at 1k facts (the research exit criterion is under 1 ms). Here 224 rows materialise and export in tens of ms through the CLI, including process start.

@@ -134,6 +134,7 @@ impl Models {
         db.memory_init(InitOpts {
             embedder: Some(self.embedder.clone()),
             decider: Some(self.decider.clone()),
+            ..Default::default()
         })
         .unwrap();
         db
@@ -532,7 +533,7 @@ fn real_models_remember_and_recall() {
     embed::enable_embedder("mem_real_gemma", embed::EmbedderSpec::embeddinggemma()).unwrap();
     decide::enable_decider("mem_real_nano", decide::DeciderSpec::model("decider-nano")).unwrap();
     let db = DbInstance::new("mem", "", "").unwrap();
-    db.memory_init(InitOpts { embedder: Some("mem_real_gemma".into()), decider: Some("mem_real_nano".into()) })
+    db.memory_init(InitOpts { embedder: Some("mem_real_gemma".into()), decider: Some("mem_real_nano".into()), ..Default::default() })
         .unwrap();
     let a = db.remember("I live in Berlin.", at("u", d(1))).unwrap();
     db.remember("My favourite food is ramen.", at("u", d(2))).unwrap();
@@ -629,6 +630,7 @@ fn concurrent_remembers_never_leave_two_current() {
     db.memory_init(InitOpts {
         embedder: Some(emb.into()),
         decider: Some(dec.into()),
+        ..Default::default()
     })
     .unwrap();
     // seeded without the decider being asked (no candidates yet)
@@ -721,6 +723,7 @@ fn concurrent_remembers_across_processes() {
         db.memory_init(InitOpts {
             embedder: Some("mem_emb_race_parent".into()),
             decider: None,
+            ..Default::default()
         })
         .unwrap();
         db.remember(BERLIN, RememberOpts { ns: ns("race"), at: Some(d(1)), ..Default::default() })
@@ -729,6 +732,7 @@ fn concurrent_remembers_across_processes() {
         db.memory_init(InitOpts {
             embedder: None,
             decider: Some("mem_dec_race".into()),
+            ..Default::default()
         })
         .unwrap();
         db.run_script(

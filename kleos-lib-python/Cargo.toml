@@ -53,6 +53,10 @@ columnar-io = ["kleos/columnar-io"]
 infer = ["kleos/infer"]
 ## `infer` plus Apple-GPU (Metal) kernels; macOS only.
 infer-metal = ["infer", "kleos/infer-metal"]
+## Engram overlay store (kleos fork; docs/specs/engram-overlay.md): `::engram`
+## ops, and `memory_init(engram=...)` to make `remember` / `forget` enqueue
+## Engram jobs (applied by scripts/engram/engram_worker.py).
+engram = ["kleos/engram"]
 ## Uses jemalloc as the global allocator, can make a difference in performance
 jemalloc = ["kleos/jemalloc"]
 ## Enables io-uring option for the RocksDB storage
