@@ -160,6 +160,7 @@ pub mod cypher;
 pub mod data;
 pub mod decide;
 pub mod embed;
+pub mod engram;
 pub(crate) mod fixed_rule;
 pub(crate) mod fts;
 /// Test-support metric, not a public API: process-wide FTS posting-scan
