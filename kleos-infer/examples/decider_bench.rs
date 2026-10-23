@@ -20,6 +20,13 @@
 //! lifetime peak (= load peak, since load is the largest transient).
 //! Run with `MallocLargeCache=0` to see what the code holds rather than what
 //! libmalloc keeps cached (docs/specs/embedder-toggle.md).
+//!
+//! `weights_cached_pct` is how much of `model.safetensors` was in the OS page
+//! cache before loading. `load_ms` only measures the loader when it is near
+//! 100: a cold load is a plain disk read of the whole checkpoint (300 MB, at
+//! whatever the disk delivers), the same for every precision. Under memory
+//! pressure macOS drops the file from the cache within a minute or two, so
+//! back-to-back runs can still be cold.
 
 use std::time::Instant;
 
@@ -45,6 +52,29 @@ fn mem() -> (f64, f64, f64) {
 #[cfg(not(target_os = "macos"))]
 fn mem() -> (f64, f64, f64) {
     (f64::NAN, f64::NAN, f64::NAN)
+}
+
+/// Percent of `path`'s pages resident in the OS page cache (`mincore`).
+#[cfg(unix)]
+fn cached_pct(path: &std::path::Path) -> f64 {
+    extern "C" {
+        fn getpagesize() -> i32;
+        fn mincore(addr: *const std::ffi::c_void, len: usize, vec: *mut std::ffi::c_char) -> i32;
+    }
+    let Ok(f) = std::fs::File::open(path) else { return f64::NAN };
+    // SAFETY: a read-only map whose pages are never touched, only queried.
+    let Ok(m) = (unsafe { memmap2::Mmap::map(&f) }) else { return f64::NAN };
+    let pages = m.len().div_ceil(unsafe { getpagesize() } as usize);
+    let mut v = vec![0 as std::ffi::c_char; pages];
+    if pages == 0 || unsafe { mincore(m.as_ptr().cast(), m.len(), v.as_mut_ptr()) } != 0 {
+        return f64::NAN;
+    }
+    (v.iter().filter(|b| **b & 1 != 0).count() as f64 / pages as f64 * 100.0).round()
+}
+
+#[cfg(not(unix))]
+fn cached_pct(_: &std::path::Path) -> f64 {
+    f64::NAN
 }
 
 const PAIRS: [(&str, &str); 8] = [
@@ -82,6 +112,9 @@ fn main() -> Result<()> {
         .cloned()
         .unwrap_or_else(|| DECIDER_NANO_REPO.to_string());
     let m0 = mem();
+    let cached = resolve_hf_file(&model, "model.safetensors")
+        .map(|p| cached_pct(&p))
+        .unwrap_or(f64::NAN);
     let m = DeciderNano::with_repo(
         &model,
         EngineConfig {
@@ -119,7 +152,7 @@ fn main() -> Result<()> {
     let out = serde_json::json!({
         "device": dev, "precision": precision.name(), "model": model,
         "weights_mb": (bytes as f64 / 1048576.0).round(),
-        "load_ms": load_ms.round(),
+        "load_ms": load_ms.round(), "weights_cached_pct": cached,
         "footprint_mb": {"start": m0.0, "loaded": m_load.0, "load_peak": m_load.1, "after_b16": m16.0, "end": m_end.0, "peak": m_end.1},
         "rss_mb": {"start": m0.2, "loaded": m_load.2, "after_b16": m16.2, "end": m_end.2},
         "b1_p50_ms": (p(&b1, 0.5) * 10.0).round() / 10.0, "b1_p90_ms": (p(&b1, 0.9) * 10.0).round() / 10.0,
