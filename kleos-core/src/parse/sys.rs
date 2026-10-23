@@ -115,6 +115,25 @@ pub enum SysOp {
     Entity(EntityOp),
     /// kleos fork: `::engram <verb> [model] {opts}` (docs/specs/engram-overlay.md).
     Engram(EngramOp),
+    /// kleos fork: `::flow <op> {opts}` (docs/specs/durable-workflows.md):
+    /// the op and its options as JSON.
+    Flow(String, serde_json::Value),
+}
+
+/// `::flow <op> [{opts}]`.
+fn parse_flow_op(inner: crate::parse::Pair<'_>, param_pool: &BTreeMap<String, DataValue>) -> Result<SysOp> {
+    let mut parts = inner.into_inner();
+    let verb = parts.next().unwrap().as_str().to_string();
+    let mut args = serde_json::Map::new();
+    for p in parts {
+        for opt in p.into_inner() {
+            let mut o = opt.into_inner();
+            let key = o.next().unwrap().as_str().to_string();
+            let val = build_expr(o.next().unwrap(), param_pool)?.eval_to_const()?;
+            args.insert(key, serde_json::Value::from(val));
+        }
+    }
+    Ok(SysOp::Flow(verb, serde_json::Value::Object(args)))
 }
 
 /// `::memory <verb> [arg] [{opts}]`: the positional argument is the text
@@ -580,6 +599,7 @@ pub(crate) fn parse_sys(
         Rule::mem_api_op => parse_mem_api_op(inner, param_pool)?,
         Rule::entity_op => SysOp::Entity(parse_entity_op(inner, param_pool)?),
         Rule::engram_op => SysOp::Engram(parse_engram_op(inner, param_pool)?),
+        Rule::flow_op => parse_flow_op(inner, param_pool)?,
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,

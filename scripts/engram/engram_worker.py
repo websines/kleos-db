@@ -23,13 +23,22 @@ the model, and writes them through the `::engram` ops:
 Overlay facts are keyed by memory id and valid from the memory's valid-from (the job's `at`), so
 `::engram export {as_of: T}` follows `::memory recall {as_of: T}`.
 
-Jobs run in qid (commit) order per namespace. A job is claimed (pending -> running, attempts + 1)
-by a compare-and-set on its status and `updated` time; a running job whose `updated` is older
-than the lease is claimed again, so a crashed worker's job is retried. Every apply is idempotent
-(the same keys at the same valid time), so a job applied twice leaves one version. A job that
-fails `--max-attempts` times is marked failed with its error, and the namespace moves on.
-One worker per database: two workers would only race on claims, but nothing stops a slow job from
-outliving its lease and being run twice at once.
+Each job is a durable workflow (docs/specs/durable-workflows.md, "Engram"): `remember` / `forget`
+start `engram.apply` (id `engram:<ns>:<qid>`, queue `engram`, lane `engram:<ns>` ordered by qid) in
+the same transaction as the job row, and this worker is a code-mode worker of the workflow engine
+(`kleos_flow`). The workflow is two steps: `apply` (compute and write the edit; every apply is
+idempotent, the same keys at the same valid time, so a re-run after a crash leaves one version) and
+`mark` (the job row's status, exactly once). What the engine gives the worker:
+  - claims by compare-and-set with a fencing token, leases kept alive by heartbeats; a dead
+    worker's job is claimed again when its lease runs out;
+  - lanes: jobs of a namespace run one at a time in qid order; namespaces run in parallel, and
+    several worker processes may share a database;
+  - retries with back-off that survive restarts (`--max-attempts`); a job that fails them all is
+    marked failed with its error, and the namespace moves on;
+  - a history per job (`::flow history {id: 'engram:<ns>:<qid>'}`) and status (`::flow list`).
+The job row in `kleos_engram_queue` stays the job's record (`::engram queue`): `running` with the
+claim count as `attempts` when claimed, then `done` or `failed`. Jobs queued before jobs became
+workflows are adopted at start (`::flow adopt_engram`).
 
 The fact frame comes from the memory text: the last word is the target, the rest the prompt, and
 the subject is the longest entity name given to `remember` that occurs in the prompt, else the
@@ -46,6 +55,10 @@ import os
 import re
 import sys
 import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "kleos-lib-python",
+                                "integrations", "kleos-flow"))
+from kleos_flow import RetryPolicy, StepFailed, Worker, workflow  # noqa: E402
 
 CONTEXTS = ["{}", "The river rises in the northern hills . {}", "He was born in 1901 . {}"]
 HP = dict(steps=40, lr=0.05, kl_factor=0.0625, lambda_norm=1e-3, clamp=4.0,
@@ -245,10 +258,12 @@ class Editor:
             self.set_overlay({})
 
 
-class Worker:
+class EngramWorker:
+    """Applies Engram jobs as the `engram.apply` workflow (see the module doc)."""
+
     def __init__(self, db, editor, model="nano", lease_s=120.0, max_attempts=3, ns=None, log=print):
         self.db, self.ed, self.model = db, editor, model
-        self.lease_us, self.max_attempts, self.only_ns, self.log = int(lease_s * 1e6), max_attempts, ns, log
+        self.max_attempts, self.only_ns, self.log = max_attempts, ns, log
         rows = self.q("?[fp, layers] := *kleos_engram_models{name: $m, fp, layers}", m=model)
         if not rows:
             raise SystemExit(f"no Engram model '{model}' registered in this database")
@@ -258,6 +273,23 @@ class Worker:
         self._prow = {}
         self.writes = 0
         self.crash_after = int(os.environ.get("ENGRAM_WORKER_CRASH_AFTER_WRITE", "0"))
+        self.adopted = db.flow_call("adopt_engram", {})["adopted"]
+
+        @workflow("engram.apply", 1)
+        def engram_apply(ctx, inp):
+            ns, qid = inp["ns"], inp["qid"]
+            try:
+                out = ctx.step(self.apply_job, ns, qid, name="apply",
+                               retry=RetryPolicy(max_attempts=self.max_attempts, initial=1.0, backoff=2.0))
+            except StepFailed as e:
+                self.mark(ctx, ns, qid, "failed", str(e)[:500])
+                raise
+            self.mark(ctx, ns, qid, "done", out.get("note"))
+            return out
+
+        self.flow = Worker(db, [engram_apply], queue="engram", name=f"engram-{os.getpid()}",
+                           lease_ms=int(lease_s * 1000), poll=2.0, log=self._log_run,
+                           lanes=[f"engram:{ns}"] if ns else None, on_claim=self._on_claim)
 
     def q(self, script, immutable=False, **params):
         return self.db.run_script(script, params, immutable)["rows"]
@@ -268,72 +300,34 @@ class Worker:
         if theirs != self.ed.hash_rows(text):
             raise SystemExit(f"addressing mismatch between kleos model '{self.model}' and the checkpoint; refusing")
 
-    # ---- queue -------------------------------------------------------------------------------
-    def heads(self):
-        """The first unfinished job of each namespace."""
-        rows = self.q(f"?[ns, qid, op, model, mem_ids, old, text, at, meta, status, attempts, updated] := "
-                      f"*{QUEUE}{{ns, qid, op, model, mem_ids, old, text, at, meta, status, attempts, updated}}, "
-                      f"status == 'pending' || status == 'running'", True)
-        cols = ["ns", "qid", "op", "model", "mem_ids", "old", "text", "at", "meta", "status", "attempts", "updated"]
-        best = {}
-        for r in rows:
-            j = dict(zip(cols, r))
-            if self.only_ns and j["ns"] != self.only_ns:
-                continue
-            if j["ns"] not in best or j["qid"] < best[j["ns"]]["qid"]:
-                best[j["ns"]] = j
-        return [best[k] for k in sorted(best)]
+    # ---- the job record (kleos_engram_queue) ---------------------------------------------------
+    def _on_claim(self, c):
+        """Mirror the claim on the job row: running, attempts = claims so far."""
+        inp = c.get("input") or {}
+        self.q(f"?[ns, qid, status, attempts, updated] <- [[$ns, $qid, 'running', $a, $t]] "
+               f":update {QUEUE} {{ns, qid => status, attempts, updated}}",
+               ns=inp.get("ns"), qid=inp.get("qid"), a=c["token"], t=now_us())
 
-    def claim(self, j):
-        """pending (or running past its lease) -> running, by compare-and-set; the claim time, or None."""
-        t = now_us()
-        if j["status"] == "running" and j["updated"] + self.lease_us > t:
-            return None
-        try:
-            self.q(f"{{?[x] := *{QUEUE}{{ns: $ns, qid: $qid, status: $st, updated: $up}}, x = 1 :assert some}}"
-                   f"{{?[ns, qid, status, attempts, updated] <- [[$ns, $qid, 'running', $att, $t]] "
-                   f":update {QUEUE} {{ns, qid => status, attempts, updated}}}}",
-                   ns=j["ns"], qid=j["qid"], st=j["status"], up=j["updated"], att=j["attempts"] + 1, t=t)
-        except Exception:
-            return None  # someone else moved it
-        j["attempts"] += 1
-        return t
+    def mark(self, ctx, ns, qid, status, error):
+        ctx.query(f"?[ns, qid, status, error, updated] <- [[$ns, $qid, $st, $err, $t]] "
+                  f":update {QUEUE} {{ns, qid => status, error, updated}}",
+                  {"ns": ns, "qid": qid, "st": status, "err": error, "t": now_us()}, name="mark")
 
-    def finish(self, j, claimed, status, error=None):
-        try:
-            self.q(f"{{?[x] := *{QUEUE}{{ns: $ns, qid: $qid, status: 'running', updated: $c}}, x = 1 :assert some}}"
-                   f"{{?[ns, qid, status, error, updated] <- [[$ns, $qid, $st, $err, $t]] "
-                   f":update {QUEUE} {{ns, qid => status, error, updated}}}}",
-                   ns=j["ns"], qid=j["qid"], c=claimed, st=status, err=error, t=now_us())
-        except Exception:
-            self.log(json.dumps(dict(event="lost_claim", ns=j["ns"], qid=j["qid"])))
+    def _log_run(self, rec):
+        inp = rec.get("input") or {}
+        out = rec.get("output") or {}
+        ev = {"completed": "done", "failed": "failed", "waiting": "pending"}.get(rec.get("outcome"), rec.get("outcome"))
+        self.log(json.dumps(dict(event=ev, id=rec["id"], op=out.get("op"), attempts=rec.get("token"),
+                                 seconds=rec.get("seconds"), note=out.get("note"), error=rec.get("error"), **inp)),
+                 flush=True)
 
     def run_once(self):
-        """Apply every claimable job, in qid order per namespace. Returns the number applied."""
-        n = 0
-        while True:
-            progressed = False
-            for j in self.heads():
-                claimed = self.claim(j)
-                if claimed is None:
-                    continue
-                progressed = True
-                t0 = time.time()
-                if j["attempts"] > self.max_attempts:
-                    self.finish(j, claimed, "failed", j.get("error") or "too many attempts (worker crashed?)")
-                    continue
-                try:
-                    note = self.apply(j)
-                    self.finish(j, claimed, "done", note)
-                    n += 1
-                    self.log(json.dumps(dict(event="done", ns=j["ns"], qid=j["qid"], op=j["op"], attempts=j["attempts"],
-                                             seconds=round(time.time() - t0, 2), note=note)), flush=True)
-                except Exception as e:  # noqa: BLE001
-                    st = "failed" if j["attempts"] >= self.max_attempts else "pending"
-                    self.finish(j, claimed, st, f"{type(e).__name__}: {e}"[:500])
-                    self.log(json.dumps(dict(event=st, ns=j["ns"], qid=j["qid"], op=j["op"], error=str(e)[:300])), flush=True)
-            if not progressed:
-                return n
+        """Apply every job runnable now. Returns the number of jobs finished."""
+        return sum(r.get("outcome") == "completed" for r in self.flow.drain())
+
+    def run(self, poll):
+        self.flow.poll = poll
+        self.flow.run()
 
     # ---- overlay state -----------------------------------------------------------------------
     def facts_at(self, ns, t):
@@ -379,10 +373,18 @@ class Worker:
         return self.ed.solve(order, {f: facts[f][0] for f in order}, {f: facts[f][1] for f in order}, only)
 
     # ---- jobs --------------------------------------------------------------------------------
-    def apply(self, j):
+    def apply_job(self, ns, qid):
+        """The `apply` step: read the job row (not the workflow history: an erase must be able to
+        drop the job's text) and apply it. Returns {op, note}."""
+        cols = ["op", "model", "mem_ids", "old", "text", "at", "meta"]
+        rows = self.q(f"?[{', '.join(cols)}] := *{QUEUE}{{ns: $ns, qid: $qid, {', '.join(cols)}}}", True,
+                      ns=ns, qid=qid)
+        if not rows:
+            return {"op": None, "note": "skipped: the job row is gone"}
+        j = dict(zip(cols, rows[0]), ns=ns, qid=qid)
         if j["model"] != self.model:
             raise RuntimeError(f"job is for model '{j['model']}', this worker serves '{self.model}'")
-        return getattr(self, "apply_" + j["op"])(j)
+        return {"op": j["op"], "note": getattr(self, "apply_" + j["op"])(j)}
 
     def apply_write(self, j):
         ns, mid, at = j["ns"], j["mem_ids"][0], j["at"]
@@ -446,7 +448,7 @@ def main():
     ap.add_argument("--ns", help="only this namespace")
     ap.add_argument("--once", action="store_true", help="apply what is queued, then exit")
     ap.add_argument("--poll", type=float, default=2.0, help="seconds between queue polls")
-    ap.add_argument("--lease", type=float, default=120.0, help="seconds before a running job is claimed again")
+    ap.add_argument("--lease", type=float, default=120.0, help="lease of a claim in seconds (kept alive by heartbeats)")
     ap.add_argument("--max-attempts", type=int, default=3)
     ap.add_argument("--threads", type=int, default=4)
     args = ap.parse_args()
@@ -455,16 +457,15 @@ def main():
     db = CozoDbPy("sqlite", args.db, "{}")
     t0 = time.time()
     ed = Editor(args.lab, args.ckpt, args.rowfreq, args.threads)
-    w = Worker(db, ed, args.model, args.lease, args.max_attempts, args.ns)
+    w = EngramWorker(db, ed, args.model, args.lease, args.max_attempts, args.ns)
     w.check_addressing()
-    print(json.dumps(dict(event="ready", model=args.model, fingerprint=w.fp, load_seconds=round(time.time() - t0, 2))),
-          flush=True)
-    while True:
+    print(json.dumps(dict(event="ready", model=args.model, fingerprint=w.fp, adopted=w.adopted,
+                          load_seconds=round(time.time() - t0, 2))), flush=True)
+    if args.once:
         n = w.run_once()
-        if args.once:
-            print(json.dumps(dict(event="idle", applied=n)), flush=True)
-            return
-        time.sleep(args.poll)
+        print(json.dumps(dict(event="idle", applied=n)), flush=True)
+        return
+    w.run(args.poll)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,15 @@
 # Durable workflows (`::flow`)
 
-*Status: spec, 2026-10-24, branch `wave4/flow`. Code: `kleos-core/src/flow.rs`
-(store, ops, actions), `flow_builtin.rs` (step graphs), `flow_cron.rs`
-(schedules); Python SDK `kleos-lib-python/integrations/kleos-flow/`.*
+*Status: implemented, 2026-10-24, branch `wave4/flow`. Code:
+`kleos-core/src/flow.rs` (store, ops, actions), `flow_builtin.rs` (step
+graphs), `flow_cron.rs` (schedules), `DbInstance::flow_worker` (in-process
+worker thread, `kleos-core/src/lib.rs`), the `remember_with` hook in
+`memory.rs`, the Engram hook in `memory_engram.rs`; Python binding
+`CozoDbPy.flow_call` / `flow_worker`; Python SDK
+`kleos-lib-python/integrations/kleos-flow/` (`kleos_flow`); HTTP `POST
+/flow/:op` and `kleos server --flow-worker <queue>`. Tests:
+`kleos-core/tests/flow.rs`, `integrations/kleos-flow/tests/test_flow.py`;
+end to end `scripts/flow/demo.py`, `scripts/engram/remember_e2e.py`.*
 
 ## Goal
 
@@ -125,6 +132,9 @@ kleos_flow_schedule {name: String =>                  # cron schedules
     workflow: String, version: Int?, cron: String, input: Json?, queue: String,
     overlap: String, next_at: Int, last_id: String?, enabled: Bool,
     created: Int, updated: Int}
+
+kleos_flow_lane {serial: String, serial_seq: Int =>    # unfinished workflows of each lane
+    wf: String}
 ```
 
 **Event types.** Commands: `step` (data: result), `step_failed` (data:
@@ -155,8 +165,11 @@ never both record a step, and a step's data effects happen once.
 
 **Lanes (`serial`).** Workflows started with the same `serial` key run one at
 a time in `serial_seq` order: a task is claimable only when no unfinished
-workflow of its lane has a smaller `serial_seq`. The Engram queue uses one
-lane per memory namespace, ordered by namespace version.
+workflow of its lane has a smaller `serial_seq`. `kleos_flow_lane` holds a row
+per *unfinished* workflow of a lane (written by `start`, removed when it
+finishes), so the check reads only the lane's open work, not its whole past.
+The Engram queue uses one lane per memory namespace, ordered by namespace
+version. `claim {lanes: [...]}` restricts a worker to some lanes.
 
 **Waking.** Starting, signalling, or a child finishing writes the task row
 with `due = now`. Timers set `due` to the earliest pending timer. In one
@@ -184,9 +197,9 @@ together (or the namespace-version retry loop re-plans them together).
 
 ```json
 {"steps": [
-  {"name": "batch", "query": {"script": "?[id, text] := *docs{id, text}, is_null(emb) :limit 10"}},
-  {"if": {"cond": "length($batch) == 0", "then": [{"return": "null"}]}},
-  {"name": "vecs", "embed": {"texts": "=[row->1 for row in $batch]"}},
+  {"name": "batch", "query": {"script": "?[text] := *docs{text, emb}, is_null(emb) :limit 10"}},
+  {"if": {"cond": "$batch.rows", "then": [], "else": [{"return": "null"}]}},
+  {"name": "vecs", "embed": {"texts": "$batch"}},
   {"name": "parts", "fan_out": {"branches": [
       [{"query": {"script": "?[n] := *a{n}"}}],
       [{"query": {"script": "?[n] := *b{n}"}}]]}},
@@ -201,8 +214,11 @@ together (or the namespace-version retry loop re-plans them together).
 - **Values.** Arguments are JSON. A string `"$name"` (or `"$name.field"`) is
   replaced by a named result, `$input`, or `$i` (the loop counter); a string
   starting with `=` is a CozoScript expression evaluated with every named
-  result bound as a parameter (`?[v] := v = <expr>`). Query results are a list
-  of rows. Everything else is a literal.
+  result bound as a parameter (`?[v] := v = <expr>`). A query's result is
+  `{headers, rows}` (`$q.rows.0.1` is a path into it; `embed` and `for_each`
+  also take it directly: one-column rows are texts, rows are items).
+  Everything else is a literal. Expression fields (`cond`, `while`, `set`,
+  `return`) are CozoScript expressions; a `$name.path` there is a lookup.
 - **Steps.** `query {script, params}` (rows), `remember {text, …options}`,
   `recall {query, …options}`, `embed {texts, embedder?}` (vectors),
   `decide {template, pairs, decider?}`, `http {url, method?, headers?, body?}`
@@ -283,12 +299,14 @@ Client ops:
 | `schedule` | `name, cron, workflow, input?, queue?, overlap? ('skip'), enabled?` | the schedule with `next_at` |
 | `unschedule` | `name` | `{name, removed}` |
 | `schedules` | — | rows |
+| `stats` | — | counts per queue and status, due work, workflows running past their lease |
+| `adopt_engram` | — | `{adopted}` (see Engram) |
 
 Worker ops (SDKs and the built-in executor):
 
 | Op | Args | Result |
 |---|---|---|
-| `claim` | `worker, queues?, modes?, workflows?, lease_ms? (30000)` | `null`, or `{id, name, version, mode, input, token, history, signals, cancel}` |
+| `claim` | `worker, queues?, modes?, workflows?, lanes?, lease_ms? (30000)` | `null`, or `{id, name, version, mode, input, token, history, signals, cancel}` |
 | `step` | `id, token, key, name, action?, result?` | the result: runs the engine `action` atomically with the event, or records the caller's `result`; an existing key returns its recorded result |
 | `step_failed` | `id, token, key, name, error, attempt, retry_in_ms?` | records the failure; with `retry_in_ms`, sets a retry timer |
 | `timer` | `id, token, key, due` | records the timer (idempotent) |
@@ -299,7 +317,8 @@ Worker ops (SDKs and the built-in executor):
 | `complete` | `id, token, output?` | finishes; wakes the parent |
 | `fail` | `id, token, error, final? (true), retry_in_ms?` | finishes as failed, or (non-final) parks with back-off |
 | `heartbeat` | `id, token, lease_ms?` | extends the lease |
-| `tick` | `worker?, queues?, max?` | runs due built-in workflows and fires due schedules; `{ran, fired}` |
+| `tick` | `worker?, queues?, max?, lease_ms?, schedules?` | runs due built-in workflows and fires due schedules; `{ran, fired}` (`max: 0` only fires schedules) |
+| `next_due` | `queues?` | `{due, now}`: the earliest due task or schedule, for a worker's sleep |
 
 Errors are ordinary op errors; `lease lost` and `canceled` are recognisable
 by message prefix.

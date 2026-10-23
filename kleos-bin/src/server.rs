@@ -104,6 +104,11 @@ pub(crate) struct ServerArgs {
     /// embedders at runtime too, also over HTTP.
     #[clap(long = "embedder")]
     embedders: Vec<String>,
+    /// Run built-in durable workflows and schedules in this process
+    /// (docs/specs/durable-workflows.md): the queues to serve, e.g.
+    /// `--flow-worker default`. Repeat for several queues.
+    #[clap(long = "flow-worker")]
+    flow_queues: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -448,6 +453,14 @@ pub(crate) async fn server_main(args: ServerArgs) {
             .unwrap_or_else(|e| panic!("--embedder {arg}: {e:?}"));
         eprintln!("embedder '{name}' enabled ({spec:?})");
     }
+    // kept alive for the server's lifetime
+    let _flow_worker = (!args.flow_queues.is_empty()).then(|| {
+        eprintln!("flow worker serving queues {:?}", args.flow_queues);
+        db.flow_worker(kleos::FlowWorkerOpts {
+            queues: args.flow_queues.clone(),
+            ..Default::default()
+        })
+    });
     if args.default_query_mem_limit > 0 {
         db.set_default_query_mem_limit(Some(args.default_query_mem_limit as usize));
     }
@@ -559,6 +572,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
     let app = Router::new()
         .route("/text-query", post(text_query))
         .route("/memory/:op", post(memory_op))
+        .route("/flow/:op", post(flow_op))
         .route("/export/:relations", get(export_relations))
         .route("/import", put(import_relations))
         .route("/backup", post(backup))
@@ -833,6 +847,35 @@ async fn memory_op(
         }
     }
     let result = spawn_blocking(move || st.db.memory_call(&op, args)).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "message": err.to_string()}).into(),
+        ),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Durable workflows (kleos fork; docs/specs/durable-workflows.md): `POST
+/// /flow/{start|signal|cancel|status|list|history|claim|step|...}` with the
+/// op's options as a JSON object. Answers `{"ok": true, "result": ...}`. A
+/// read-only principal may only read (`status`, `list`, `history`, `stats`,
+/// `schedules`, `next_due`).
+async fn flow_op(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let reads = ["status", "list", "history", "stats", "schedules", "next_due"];
+    if matches!(mutability, ScriptMutability::Immutable) && !reads.contains(&op.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            json!({"ok": false, "message": format!("flow {op} needs write access")}).into(),
+        );
+    }
+    let result = spawn_blocking(move || st.db.flow_call(&op, args)).await;
     match result {
         Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
         Ok(Err(err)) => (

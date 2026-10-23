@@ -25,6 +25,12 @@
 //! (`scripts/engram/engram_worker.py`). Without an attachment, or in a build
 //! without the feature, [`enqueue`] returns nothing and the memory API runs
 //! exactly as before.
+//!
+//! Each job is also a durable workflow (docs/specs/durable-workflows.md,
+//! "Engram"): the same transaction starts `engram.apply` with id
+//! `engram:<ns>:<qid>` on queue `engram`, in lane `engram:<ns>` ordered by
+//! qid, so the worker gets claims, leases, retries with back-off, history
+//! and status from the workflow engine. The job row stays the job's record.
 
 use crate::data::value::DataValue;
 use crate::memory::MemConfig;
@@ -55,6 +61,53 @@ pub(crate) struct Job<'a> {
 /// **before** the block that bumps `kleos_mem_ns`: it numbers the job with
 /// the version the bump produces. `None` when no Engram model is attached.
 /// The script must bind `$ns`.
+/// Make sure what an attached store's commits write exists: the workflow
+/// relations, for stores attached before jobs became workflows.
+#[cfg(not(feature = "engram"))]
+pub(crate) fn ready<'s, S: crate::storage::Storage<'s>>(_db: &'s crate::runtime::db::Db<S>, _cfg: &MemConfig) -> miette::Result<()> {
+    Ok(())
+}
+
+#[cfg(feature = "engram")]
+pub(crate) fn ready<'s, S: crate::storage::Storage<'s>>(db: &'s crate::runtime::db::Db<S>, cfg: &MemConfig) -> miette::Result<()> {
+    if cfg.engram.is_some() {
+        db.flow_ensure()?;
+    }
+    Ok(())
+}
+
+/// Blocks that start one `engram.apply` workflow per job, given rules that
+/// define `q[qid]` (the qids the jobs take; they must be computed from the
+/// namespace version before this commit's bump, like the job rows).
+#[cfg(feature = "engram")]
+fn flow_blocks(qrule: &str) -> String {
+    use crate::flow::{FLOW_EVENT, FLOW_LANE, FLOW_TASK, FLOW_WF};
+    let fw = format!("{qrule} fw[id, qid] := q[qid], id = concat('engram:', $ns, ':', to_string(qid))");
+    format!(
+        "{{{fw} \
+           ?[id, name, version, mode, queue, status, input, output, error, parent, serial, serial_seq, token, seq, \
+             owner, lease_until, wait, cancel, attempts, created, updated, finished, meta] := fw[id, qid], \
+             name = 'engram.apply', version = 1, mode = 'code', queue = 'engram', status = 'pending', \
+             input = json_object('ns', $ns, 'qid', qid), output = null, error = null, parent = null, \
+             serial = concat('engram:', $ns), serial_seq = qid, token = 0, seq = 1, owner = null, \
+             lease_until = null, wait = null, cancel = to_bool(0), attempts = 0, created = $eq_now, updated = $eq_now, \
+             finished = null, meta = null \
+          :put {FLOW_WF} {{id => name, version, mode, queue, status, input, output, error, parent, serial, serial_seq, \
+             token, seq, owner, lease_until, wait, cancel, attempts, created, updated, finished, meta}}}} \
+         {{{fw} \
+           ?[wf, seq, type, key, name, data, at, token] := fw[wf, qid], seq = 1, type = 'started', key = null, \
+             name = 'engram.apply', data = json_object('ns', $ns, 'qid', qid), at = $eq_now, token = 0 \
+          :put {FLOW_EVENT} {{wf, seq => type, key, name, data, at, token}}}} \
+         {{{fw} \
+           ?[wf, queue, due, serial, serial_seq] := fw[wf, qid], queue = 'engram', due = $eq_now, \
+             serial = concat('engram:', $ns), serial_seq = qid \
+          :put {FLOW_TASK} {{wf => queue, due, serial, serial_seq}}}} \
+         {{{fw} \
+           ?[serial, serial_seq, wf] := fw[wf, qid], serial = concat('engram:', $ns), serial_seq = qid \
+          :put {FLOW_LANE} {{serial, serial_seq => wf}}}}"
+    )
+}
+
 #[cfg(not(feature = "engram"))]
 pub(crate) fn enqueue(_cfg: &MemConfig, _job: Job<'_>) -> Option<(String, Vec<(&'static str, DataValue)>)> {
     None
@@ -84,6 +137,10 @@ pub(crate) fn enqueue(cfg: &MemConfig, job: Job<'_>) -> Option<(String, Vec<(&'s
           :put {ENGRAM_QUEUE} {{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}}}}",
         crate::memory::MEM_NS
     ));
+    script.push_str(&flow_blocks(&format!(
+        "cur[max(s)] := *{}{{ns: $ns, seq: s}} cur[max(s)] := s = 0 q[qid] := cur[s0], qid = s0 + 1",
+        crate::memory::MEM_NS
+    )));
     let meta = if job.entities.is_empty() {
         DataValue::Null
     } else {
@@ -165,10 +222,16 @@ pub(crate) fn enqueue_jobs(
              status = 'pending', attempts = 0, error = null, created = $eq_now, updated = $eq_now \
           :put {ENGRAM_QUEUE} {{ns, qid => op, model, mem_ids, old, text, at, meta, status, attempts, error, created, updated}}}}",
         crate::memory::MEM_NS
-    );
+    ) + flow_blocks(&format!(
+        "cur[max(s)] := *{}{{ns: $ns, seq: s}} cur[max(s)] := s = 0 jn[i] <- $eq_idx q[qid] := cur[s0], jn[i], qid = s0 + i",
+        crate::memory::MEM_NS
+    ))
+    .as_str();
+    let idx = DataValue::List((1..=jobs.len()).map(|i| DataValue::List(vec![DataValue::from(i as i64)])).collect());
     Some((
         script,
         vec![
+            ("eq_idx", idx),
             ("eq_jobs", DataValue::List(rows)),
             ("eq_model", DataValue::from(model.as_str())),
             ("eq_now", DataValue::from(now)),
@@ -204,6 +267,7 @@ mod imp {
         let name = name.trim();
         if !name.is_empty() {
             crate::engram::model(db, name)?;
+            db.flow_ensure()?;
             if !rel_exists(db, ENGRAM_QUEUE)? {
                 db.run_script(
                     &format!(

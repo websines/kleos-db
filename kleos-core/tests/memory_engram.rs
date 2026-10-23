@@ -347,3 +347,58 @@ fn claims_enqueue_one_job_each() {
     assert_eq!((j[5].1.as_str(), &j[5].2), ("erase", &ids));
     assert_eq!(j[0].4, None, "erased claim texts are dropped from earlier jobs");
 }
+
+/// Every job is also an `engram.apply` workflow, started in the job's own
+/// commit, in its namespace's lane ordered by qid; the lane hands out one
+/// job at a time; jobs queued without a workflow are adopted
+/// (docs/specs/durable-workflows.md, "Engram").
+#[test]
+fn jobs_are_workflows_in_namespace_lanes() {
+    let db = attached();
+    for (k, t) in ["Ada lives in Lisbon.", "Ada works at the observatory.", "Ada plays the cello."].iter().enumerate() {
+        db.remember(t, RememberOpts { ns: ns("u"), at: Some(d(k as i64 + 1)), ..Default::default() }).unwrap();
+    }
+    db.remember("Bo lives in Porto.", RememberOpts { ns: ns("v"), at: Some(d(1)), ..Default::default() }).unwrap();
+    let j = jobs(&db, "u");
+    assert_eq!(j.len(), 3);
+    let wfs = q(&db, "?[id, name, mode, queue, serial, serial_seq, status] := \
+                      *kleos_flow_wf{id, name, mode, queue, serial, serial_seq, status}, starts_with(id, 'engram:u:')");
+    assert_eq!(wfs.len(), 3);
+    for (row, job) in wfs.iter().zip(&j) {
+        assert_eq!(row[0], DataValue::from(format!("engram:u:{}", job.0).as_str()));
+        assert_eq!(&row[1..5], &[DataValue::from("engram.apply"), DataValue::from("code"), DataValue::from("engram"), DataValue::from("engram:u")]);
+        assert_eq!(row[5], DataValue::from(job.0));
+        assert_eq!(row[6], DataValue::from("pending"));
+    }
+    // the started event carries only {ns, qid}, not the memory text
+    let ev = q(&db, &format!("?[d] := *kleos_flow_event{{wf: 'engram:u:{}', seq: 1, data: d}}", j[0].0));
+    match &ev[0][0] {
+        DataValue::Json(x) => assert_eq!(x.0, serde_json::json!({"ns": "u", "qid": j[0].0})),
+        other => panic!("{other:?}"),
+    }
+    // one job per lane at a time: u's first, v's first, then nothing
+    let claim = |w: &str| db.flow_call("claim", serde_json::json!({"worker": w, "queues": ["engram"], "workflows": ["engram.apply"]})).unwrap();
+    let a = claim("w1");
+    let b = claim("w2");
+    assert_eq!(claim("w3"), serde_json::Value::Null);
+    let mut got = vec![a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string()];
+    got.sort();
+    assert_eq!(got[0], format!("engram:u:{}", j[0].0));
+    assert!(got[1].starts_with("engram:v:"));
+    let u = if a["id"] == got[0].as_str() { &a } else { &b };
+    db.flow_call("complete", serde_json::json!({"id": u["id"], "token": u["token"], "output": {}})).unwrap();
+    assert_eq!(claim("w3")["id"], format!("engram:u:{}", j[1].0));
+    // a lane filter restricts a worker to its namespaces
+    assert_eq!(db.flow_call("claim", serde_json::json!({"worker": "w4", "queues": ["engram"], "lanes": ["engram:u"]})).unwrap(), serde_json::Value::Null);
+    // adopt: a job queued without a workflow (an older store) gets one, once
+    q(&db, &format!("?[id] <- [['engram:u:{}']] :rm kleos_flow_wf {{id}}", j[2].0));
+    q(&db, &format!("?[serial, serial_seq] <- [['engram:u', {}]] :rm kleos_flow_lane {{serial, serial_seq}}", j[2].0));
+    assert_eq!(db.flow_call("adopt_engram", serde_json::json!({})).unwrap()["adopted"], 1);
+    assert_eq!(db.flow_call("adopt_engram", serde_json::json!({})).unwrap()["adopted"], 0);
+    // a failed memory write starts no workflow either
+    q(&db, "::set_triggers kleos_engram_queue on put { ?[x] <- [[1]] :assert none }");
+    let before = q(&db, "?[count(id)] := *kleos_flow_wf{id}");
+    assert!(db.remember("Ada moved to Porto.", RememberOpts { ns: ns("u"), at: Some(d(9)), ..Default::default() }).is_err());
+    q(&db, "::set_triggers kleos_engram_queue");
+    assert_eq!(q(&db, "?[count(id)] := *kleos_flow_wf{id}"), before);
+}

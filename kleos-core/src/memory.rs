@@ -1287,6 +1287,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("5".to_string()))?;
             cfg.version = 5;
         }
+        crate::memory_engram::ready(self, &cfg)?;
         Ok(Some(cfg))
     }
 
@@ -2241,6 +2242,19 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// deletes. Without a decider it uses the exact-text and value rules
     /// only; without an embedder, FTS candidates only.
     pub fn remember(&'s self, text: &str, opts: RememberOpts) -> Result<RememberResult> {
+        self.remember_with(text, opts, None)
+    }
+
+    /// [`Db::remember`] whose commit also runs the script blocks `extra`
+    /// builds from the result it is about to commit (parameter names must
+    /// not clash with `remember`'s own): a durable workflow step records its
+    /// checkpoint in the memory's own transaction (docs/specs/durable-workflows.md).
+    pub(crate) fn remember_with(
+        &'s self,
+        text: &str,
+        opts: RememberOpts,
+        extra: Option<&dyn Fn(&RememberResult) -> (String, Vec<(&'static str, DataValue)>)>,
+    ) -> Result<RememberResult> {
         let text = text.trim();
         if text.is_empty() {
             bail!("`remember` needs a non-empty text");
@@ -2554,18 +2568,23 @@ impl<'s, S: Storage<'s>> Db<S> {
             );
             script.push_str(&bump_ns_head_by(bump));
             p.push(("seen", DataValue::from(seen)));
+            res.superseded = old_all;
+            let added = out.iter().any(|c| c.action == "added");
+            res.action = if added { "added" } else { "duplicate" }.to_string();
+            res.id = added.then(|| stmt.clone());
+            res.duplicate_of = if added { None } else { out[0].duplicate_of.clone() };
+            if multi {
+                res.claims = out;
+            }
+            if let Some(f) = extra {
+                let mut done = res.clone();
+                done.ns = ns.clone();
+                let (blocks, ps) = f(&done);
+                script.push_str(&blocks);
+                p.extend(ps);
+            }
             match self.mem_q(&script, p) {
-                Ok(_) => {
-                    res.superseded = old_all;
-                    let added = out.iter().any(|c| c.action == "added");
-                    res.action = if added { "added" } else { "duplicate" }.to_string();
-                    res.id = added.then(|| stmt.clone());
-                    res.duplicate_of = if added { None } else { out[0].duplicate_of.clone() };
-                    if multi {
-                        res.claims = out;
-                    }
-                    break res;
-                }
+                Ok(_) => break res,
                 Err(e) => {
                     drop(commit);
                     let moved = self.ns_head(&ns).map_or(false, |h| h != seen);
