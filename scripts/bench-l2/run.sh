@@ -49,7 +49,7 @@ if [[ -z $SKIP_BUILD ]]; then
 fi
 $PY -I -c "import sys; sys.path.insert(0, '$HERE'); import common; common.fetch_data()"
 
-R="$PY $HERE/retrieval.py"
+R=($PY $HERE/retrieval.py)
 cd $B/tmp
 # 1. model-free: everything (minutes)
 $R --bench lme --variant fts | tail -1
@@ -60,13 +60,13 @@ $R --bench lme-oracle --variant hybrid --ids-from ku | tail -1          # oracle
 $R --bench lme-oracle --variant sup --ids-from ku_heldout | tail -1     # supersession on the 25 KU held out from decider training
 $R --bench lme --variant hybrid --ids-from ku_heldout | tail -1
 $R --bench locomo --variant hybrid | tail -1
-$R --bench lme --variant hybrid --n ${LME_N:-60} | tail -1             # stratified sample (seeded; n=60 is a prefix of n=100)
+$R --bench lme --variant hybrid --n ${LME_N:-100} | tail -1            # stratified sample, seeded (n=100 rounds to 99)
 [[ -n $SUP_S ]] && $R --bench lme --variant sup --ids-from ku_heldout | tail -1   # supersession in the full haystack
 
 # 3. QA (secondary): reader + judge through the LLM endpoint (KLEOS_BENCH_LLM, default synthetic);
 #    every request is cached by prompt hash, so re-runs only pay for prompts that changed
 if [[ -n $QA ]]; then
-  Q="$PY $HERE/qa.py --workers ${QA_WORKERS:-6}"
+  Q=($PY $HERE/qa.py --workers ${QA_WORKERS:-6})
   $Q --bench lme --conditions none,oracle,kleos:fts | tail -2
   $Q --bench lme --conditions full,none,oracle,kleos:fts --n 100 | tail -2
   $Q --bench lme --conditions none,oracle,full,kleos:fts,kleos:hybrid --ids-variant hybrid | tail -2
