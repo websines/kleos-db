@@ -71,13 +71,13 @@ def test_duplicate_forget_reflect_link(db):
     dup = db.remember("alice works at ACME", ns="u", source="chat-2")
     assert dup["action"] == "duplicate" and dup["duplicate_of"] == a["id"]
     b = db.remember("Alice's salary is $90,000.", ns="u", entities=["alice"])
-    db.remember("Alice's salary is $95,000 now, a raise.", ns="u", entities=["Alice"])
-    l = db.link(a["id"], b["id"], "context_for", ns="u")
+    c = db.remember("Alice's salary is $95,000.", ns="u", entities=["Alice"])
+    assert c["superseded"] == [b["id"]]  # the value rule, no model
+    l = db.link(a["id"], c["id"], "context_for", ns="u")
     assert l["rel"] == "context_for"
 
     r = db.reflect("u", since=0)
-    assert any(c["change"] == "added" for c in r["changes"])
-    assert any("90,000" in c["a_text"] for c in r["contradictions"]), r["contradictions"]
+    assert {(x["id"], x["change"]) for x in r["changes"]} >= {(b["id"], "ended"), (c["id"], "added")}
 
     hits = db.recall("works", ns="u", entity="ACME")
     assert [h["text"] for h in hits] == ["Alice works at Acme."]
@@ -85,10 +85,10 @@ def test_duplicate_forget_reflect_link(db):
     f = db.forget(a["id"], ns="u")
     assert f == {"mode": "retract", "ids": [a["id"]]}
     assert all(h["id"] != a["id"] for h in db.recall("Acme", ns="u"))
-    e = db.forget(ns="u", entity="alice", mode="erase")
-    assert len(e["ids"]) == 2
+    e = db.forget(ns="u", entity="alice", mode="erase")  # current ones only
+    assert e["ids"] == [c["id"]]
     rows = db.run_script("?[id] := *kleos_mem{ns: 'u', id}", {}, False)["rows"]
-    assert {r[0] for r in rows} == {a["id"]}  # retracted stays, erased are gone
+    assert {r[0] for r in rows} == {a["id"], b["id"]}  # history stays, erased is gone
 
 
 def test_errors_and_cozoscript(db):
@@ -97,6 +97,6 @@ def test_errors_and_cozoscript(db):
     with pytest.raises(Exception):
         db.forget(ns="u")  # a filter or ids is required
     res = db.run_script("::memory remember 'I live in Berlin.' {ns: 'u'}", {}, False)
-    assert res["ok"], res
+    assert res["rows"][0][res["headers"].index("action")] == "added"
     res = db.run_script("::memory recall 'Berlin' {ns: 'u'}", {}, True)
     assert res["rows"][0][1] == "I live in Berlin."

@@ -98,7 +98,8 @@ pub fn norm_name(s: &str) -> String {
 /// user's text are not FTS syntax here).
 fn fts_query(s: &str) -> String {
     let mut seen = BTreeSet::new();
-    s.split(|c: char| !c.is_alphanumeric())
+    // letters and ASCII digits only: the FTS grammar's words are XID_CONTINUE
+    s.split(|c: char| !(c.is_alphabetic() || c.is_ascii_digit()))
         .filter(|w| !w.is_empty())
         .map(|w| w.to_lowercase())
         .filter(|w| seen.insert(w.clone()))
