@@ -1678,14 +1678,17 @@ fn event_times_stored_shown_filtered_and_erased() {
         "{}",
         c.text
     );
-    // a claim without a date of its own: its statement's date with `said in`
+    // a claim without a date of its own: `said in` shows its statement
+    // without date notes (they made the reader pick older values)
     let p = db.recall_context("inspiring stories families", RecallOpts { k: Some(1), ..ropts("u", 1) }).unwrap();
     assert!(p.ids == vec![c2.clone()], "{p:?}");
     assert!(
-        p.text.contains("said in: \"I went to the support group yesterday. Several members told inspiring stories about their families.\" (≈ 2026-01-07 (Wed), \"yesterday\")"),
+        p.text.contains("said in: \"I went to the support group yesterday. Several members told inspiring stories about their families.\"\n")
+            || p.text.ends_with("said in: \"I went to the support group yesterday. Several members told inspiring stories about their families.\""),
         "{}",
         p.text
     );
+    assert!(!p.text.contains('≈'), "{}", p.text);
 
     // event filters: overlap with the event time; no event -> valid-from;
     // a claim without one of its own -> its statement's

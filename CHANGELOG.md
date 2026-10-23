@@ -31,12 +31,12 @@ to kleos.
   - **Storage.** A new relation `kleos_mem_event {ns, id, n => start, end, granularity, kind, expr}` (schema version 5) holds one row per expression of each added claim, written in `remember`'s transaction. A v4 store gains it on first use, filled from the stored texts. Erase removes the rows.
   - **Use.**
     - List hits carry `events`.
-    - The context block shows dates inline: `(≈ 2023-05-07 (Sun), "yesterday")`, and a statement's other dates on its `said in` line.
+    - The context block shows dates inline: `(≈ 2023-05-07 (Sun), "yesterday")`, on each memory's own line only. (Notes on `said in` lines were dropped in wave3/ku-dip: they made the reader pick the older of two shown values.)
     - `recall {event_from, event_to}` filters on event time, falling back to the statement's events and then to valid-from.
     - `recall {event_weight}` (default 0.03, blend only) boosts memories whose event time overlaps a date in the question, resolved at `query_at` (default `as_of` or now).
   - **Results** (same reader and judge):
     - LoCoMo temporal context QA went from 0.769 to 0.822 on the full category (321 questions), and from 0.698 to 0.762 on the Mem0 head-to-head's 63. Mem0 top-10 scores 0.524 there and the whole conversation 0.603. All 301: 0.807 → 0.814.
-    - LongMemEval (119 questions): temporal-reasoning rose 0.52 → 0.56, but overall fell 0.681 → 0.655, from four knowledge-update answers (listed as open).
+    - LongMemEval (119 questions): temporal-reasoning rose 0.52 → 0.56, but overall fell 0.681 → 0.655, from knowledge-update answers. Fixed in wave3/ku-dip by dropping notes on `said in` lines: 0.672 and 0.681 in two samples (0.681 / 0.661 before dates), knowledge-update 0.844; LoCoMo 301 0.821, temporal 63 still 0.762. Re-asking with several seeds showed most of the original dip was reader noise (knowledge-update 0.821 before, 0.771 with dates, 0.821 with the fix, means of four samples).
     - Retrieval with the question-date boost: LoCoMo hybrid R@5 0.687 → 0.695, LongMemEval R@10 0.992 → 1.000.
     - Unchanged: the life stream, and the held-out knowledge-update set (83% latest first).
 - **Memory API (changed default): a list hit of a claim shows its statement.** With claims and one hit per statement, a reader that showed only each hit's `text` saw one sentence of each message, and lost the speaker, the referents and the date words. That scored 0.671 against 0.708 for main's top-k list on 301 LoCoMo questions.

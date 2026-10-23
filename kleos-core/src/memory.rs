@@ -2686,7 +2686,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             Some(x) => bail!("`recall` option hit_text must be 'statement' or 'claim', got '{x}'"),
         };
         let chars = opts.text_chars.unwrap_or(DEFAULT_TEXT_CHARS).max(1);
-        let (mut hits, _) = self.recall_hits(query, opts)?;
+        let mut hits = self.recall_hits(query, opts)?;
         if statement_text {
             for h in hits.iter_mut() {
                 // a claim of a longer statement: the reader sees the
@@ -2755,12 +2755,8 @@ impl<'s, S: Storage<'s>> Db<S> {
     }
 
     /// `recall` before the list text is chosen: hits with the claim as
-    /// `text`, and the events of the hits' statements by memory id.
-    fn recall_hits(
-        &'s self,
-        query: &str,
-        opts: RecallOpts,
-    ) -> Result<(Vec<RecallHit>, BTreeMap<String, Vec<MemEvent>>)> {
+    /// `text`.
+    fn recall_hits(&'s self, query: &str, opts: RecallOpts) -> Result<Vec<RecallHit>> {
         let cfg = match self.mem_config()? {
             Some(c) => c,
             None => return Ok(Default::default()),
@@ -3089,7 +3085,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let _ = self.memory_flush();
             }
         }
-        Ok((hits, sev))
+        Ok(hits)
     }
 
     /// Entity-graph expansion for `recall`: the canonical entities (merges
@@ -3226,11 +3222,11 @@ impl<'s, S: Storage<'s>> Db<S> {
         let ns = ns_of(&opts.ns);
         let sc = self.mem_scope(&ns)?;
         let read_at = opts.as_of.unwrap_or_else(now_micros);
-        let (hits, sev) = self.recall_hits(query, opts)?;
+        let hits = self.recall_hits(query, opts)?;
         if hits.is_empty() {
             return Ok(memory_recall::render_context(&[], budget, show_source));
         }
-        // resolved dates: each hit's own, and its statement's other claims'
+        // resolved dates: each hit's own
         let notes = |v: &[MemEvent]| -> Vec<(String, String)> {
             let mut out: Vec<(String, String)> = vec![];
             for e in v {
@@ -3241,15 +3237,6 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
             }
             out
-        };
-        let stmt_notes = |id: &str| -> Vec<(String, String)> {
-            let st = memory_recall::statement_of(id);
-            let all: Vec<MemEvent> = sev
-                .iter()
-                .filter(|(i, _)| i.as_str() != id && memory_recall::statement_of(i) == st)
-                .flat_map(|(_, v)| v.iter().cloned())
-                .collect();
-            notes(&all)
         };
         let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
         // entities: canonical names
@@ -3318,7 +3305,6 @@ impl<'s, S: Storage<'s>> Db<S> {
             .into_iter()
             .map(|h| memory_recall::CtxItem {
                 events: notes(&h.events),
-                statement_events: stmt_notes(&h.id),
                 entities: ents.remove(&h.id).unwrap_or_default(),
                 previously: prev.remove(&h.id).unwrap_or_default(),
                 maybe_replaced_by: h
