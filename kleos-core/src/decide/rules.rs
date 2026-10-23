@@ -47,6 +47,8 @@ enum Kind {
     Money,
     Percent,
     Date,
+    /// A year, or a month of a year (coarser than a [`Kind::Date`]).
+    Year,
     Time,
 }
 
@@ -60,6 +62,12 @@ const NUMBER_WORDS: [&str; 21] = [
     "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
 ];
 const NEGATIONS: [&str; 8] = ["not", "never", "no", "isn't", "doesn't", "wasn't", "didn't", "nobody"];
+/// Bounds and approximations: "more than $147 million" is not a value that
+/// $148.5 million replaces.
+const COMPARATIVES: [&str; 16] = [
+    "more", "less", "over", "under", "least", "most", "fewer", "above", "below", "nearly", "approximately",
+    "around", "roughly", "between", "almost", "than",
+];
 const STOP: [&str; 44] = [
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "of", "to", "in", "on", "at", "for", "and", "or",
     "now", "has", "have", "had", "per", "its", "it", "this", "that", "as", "by", "with", "from", "after", "since",
@@ -122,7 +130,9 @@ fn analyse(text: &str) -> (Vec<Val>, Vec<String>) {
             // "March 1", "1 March", "March 2024", bare month
             let day = next.and_then(number);
             if let Some(d) = day {
-                vals.push((Kind::Date, format!("{m}-{d}")));
+                // "March 2024" is a month of a year, "March 1" a day
+                let kind = if d.len() == 4 { Kind::Year } else { Kind::Date };
+                vals.push((kind, format!("{m}-{d}")));
                 i += 2;
                 continue;
             }
@@ -160,7 +170,7 @@ fn analyse(text: &str) -> (Vec<Val>, Vec<String>) {
             } else if t.contains('-') && t.len() >= 8 {
                 Kind::Date
             } else if t.len() == 4 && (n.starts_with("19") || n.starts_with("20")) && !t.contains('.') {
-                Kind::Date // a year
+                Kind::Year
             } else {
                 Kind::Number
             };
@@ -222,7 +232,16 @@ pub fn value_rule(old: &str, new: &str) -> ValueRule {
     );
     let one_kind = changed.len() == 1;
     let same_shape = va.len() == vb.len();
-    if one_kind && neg_a == neg_b && inter >= 2 && (jac >= 0.6 || (cover >= 0.75 && same_shape && jac >= 0.4)) {
+    // a value of the old note must be gone (not just new values added: an elaboration)
+    let replaced = !sa.is_subset(&sb) && !sb.is_subset(&sa);
+    let bounded = ca.iter().chain(&cb).any(|w| COMPARATIVES.contains(&w.as_str()));
+    if one_kind
+        && replaced
+        && !bounded
+        && neg_a == neg_b
+        && inter >= 2
+        && (jac >= 0.6 || (cover >= 0.75 && same_shape && jac >= 0.4))
+    {
         return ValueRule::Update(reason);
     }
     if inter >= 1 {
@@ -290,5 +309,9 @@ mod tests {
         assert!(!is_update("Rent is $1,800 a month.", "Monthly rent is $1800."));
         // negation asymmetry
         assert!(!is_update("The meeting is on March 3.", "The meeting is not on March 4."));
+        // bounds, added detail, day vs year granularity
+        assert!(!is_update("The film grossed more than $147 million abroad.", "The film grossed $148.5 million abroad."));
+        assert!(!is_update("The club played its first game in 1920.", "The club was formed in 1919 and played its first game in 1920."));
+        assert!(!is_update("On September 29, Marrone named Orton the starter.", "In September 2014, Marrone named Orton the starter."));
     }
 }

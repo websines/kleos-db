@@ -647,6 +647,20 @@ fn always_entail(_: &DecideRequest) -> (Vec<f32>, Vec<Vec<f32>>) {
 }
 
 #[test]
+fn defaults_follow_the_weights_version() {
+    let base = Calibration::default_for_weights(Template::Supersedes, Family::Nano, Some("base"));
+    assert_eq!(base, Calibration::default_for(Template::Supersedes, Family::Nano));
+    let tuned = Calibration::default_for_weights(Template::Supersedes, Family::Nano, Some("nano-tune-v1"));
+    assert!(tuned.source.contains("nano-tune-v1") && tuned.tau_auto <= 1.0, "{tuned:?}");
+    // fine-tuned duplicates never auto-apply (see defaults.rs)
+    let dup = Calibration::default_for_weights(Template::Duplicate, Family::Nano, Some("nano-tune-v1"));
+    assert!(dup.tau_auto > 1.0);
+    // unknown versions fall back to the published checkpoint's
+    let other = Calibration::default_for_weights(Template::Supersedes, Family::Nano, Some("custom"));
+    assert_eq!(other, base);
+}
+
+#[test]
 fn pair_decision_cache() {
     let m = Mock::new("cache-mock-v1", 8, always_entail);
     decide::register_decider("cachemock", m.clone(), Family::Nano).unwrap();
@@ -728,7 +742,7 @@ fn real_decider_nano_end_to_end() {
     assert!((local.p - up.p).abs() < 1e-6, "{local:?} {up:?}");
     assert_eq!(local.model, dir);
     let e = err(&db, "::decider enable badpath {path: '/nonexistent/nano'}");
-    assert!(e.contains("not a decider-nano weights directory"), "{e}");
+    assert!(e.contains("weights directory"), "{e}");
     assert_eq!(run(&db, "::decider disable localnano").unwrap().rows[0][0], DataValue::from("OK"));
     assert_eq!(run(&db, "::decider disable realnano").unwrap().rows[0][0], DataValue::from("OK"));
 }

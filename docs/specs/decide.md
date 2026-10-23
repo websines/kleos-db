@@ -1,6 +1,6 @@
 # decide(): small decision models in the database
 
-Status: implemented (wave2/decide).
+Status: implemented (wave2/decide); fine-tune, value rules, pair cache and memory work in wave2/nano-tune.
 
 Code:
 - `kleos-core/src/decide.rs`: templates, calibration, probes and the registry;
@@ -152,6 +152,7 @@ The decider-nano supersedes probe also gives an auto band covering 38% of items 
 ```
 ::decider list
 ::decider enable nano {model: 'decider-nano', precision: 'f32', device: 'auto'}
+::decider enable tuned {path: '/path/to/nano-tune-v1'}   # local weights (decider-nano layout)
 ::decider enable nano                       # re-enable as before
 ::decider disable nano
 ::decider fit nano supersedes labelled_pairs {alpha: 0.02}
@@ -263,6 +264,124 @@ The d1 probes were fitted on the forward order only, because the fixture records
 | Probe on 100 VitaminC train items | 0.745 [0.686, 0.799] | n/a |
 
 Latency and memory: see the table in the commit report (decider-nano, kleos-infer, M3, while other jobs were running). Metal is about 17–25 ms per single decision. CPU needs `infer-accelerate`: plain candle CPU is 60–330 ms per decision.
+
+## Fine-tuned weights: nano-tune-v1
+
+A fine-tune of decider-nano on memory-shaped pairs, trained in exactly the
+request format the templates render, so the Rust path needs no prompt change.
+
+- Data: `scripts/infer-bench/decide/train/build_data.py` (seeded and reproducible) writes
+  `.bench-data/nano-tune/data/`. It produces 19.5k template requests from about 10k pairs.
+
+  | Source | Licence | Requests |
+  |---|---|---|
+  | VitaminC train: 2.7k claim/evidence pairs and 700 old→new revision pairs | CC BY-SA 3.0 | 3.2k |
+  | LongMemEval oracle: knowledge-update pairs and multi-session negatives (training questions only) | MIT | 0.3k |
+  | PAWS labeled_final | PAWS (free use, attribution) | 1.3k |
+  | MultiNLI train | OANC / CC BY-SA 3.0 / CC BY 3.0 | 0.9k |
+  | Programmatic (`memgen.py`) | kleos | 13.9k (half used per run) |
+
+  The programmatic share covers 20 person attributes and 15 org/system/project attributes (update, contradiction, compatible, duplicate), entity mentions, entity typing and relation mapping.
+
+  Never in training: the 60 adapt items, the 66 eval items, the VitaminC-300 sample (test300 and train100), and the LongMemEval held-out set (25 knowledge-update and 40 multi-session questions). Pairs that are near duplicates of any of them (token Jaccard) are dropped: 238 were.
+- Training: `train.py`.
+  - Forward: the shared-layout forward with gradients (tree mask, sliding window, option pooling).
+  - Loss: cross-entropy over the template's options, `-log Σ_allowed p`.
+  - Optimiser: AdamW (β 0.9/0.98, wd 0.01), 6% warm-up and linear decay, 1 epoch over 12.9k requests (809 steps of ≤ 2048 tokens), dropout 0.1 on pooled options.
+  - Token embeddings frozen; gradient checkpointing; MPS at memory fraction 0.5. One run takes 30 minutes on an M3.
+- Selection: lr ∈ {1e-5, 2e-5, 4e-5}. The rule, fixed before looking at eval, was the lowest NLL on a 6% group split of the training data, with adapt as a tiebreak (adapt saturates at ≈ 1.0 AUROC after 100 steps). It picked lr 4e-5 (val NLL 0.197 against 0.202 and 0.218).
+- Weights: bf16 safetensors with the original key layout, plus `kleos_decider.json`, `{"weights_version": "nano-tune-v1"}`.
+  - Load with `::decider enable nano {path: '<dir>'}` (Python `path=`, Rust `DeciderSpec { path, .. }`).
+  - The weights are not published. Licence note: VitaminC and part of MultiNLI are share-alike (NOTICE.md); whether the weights inherit that is an open question for the maintainers.
+
+Results through the Rust path (`decide_eval`, f32 on Metal). Calibration is fitted on adapt; figures are AUROC with 95% stratified-bootstrap CIs.
+
+| | base | nano-tune-v1 |
+|---|---|---|
+| supersedes | 0.938 [0.833, 1.0] | **0.991** [0.965, 1.0] |
+| … vs compatible / acc at adapt thr | 0.875 / 0.857 | 0.986 / 0.929 |
+| … zero-shot auto coverage / false (τ from adapt) | 0% / 0 | 36% / 0 |
+| contradicts | 0.944 [0.866, 0.998] | 0.991 [0.965, 1.0] |
+| duplicate (acc) | 0.997 (0.976) | 0.994 (0.929) |
+| same_entity (acc at 0.5) | 0.993 (0.792) | 1.0 (1.0) |
+| relation acc3, zero-shot / with bias / 4-way probe | 0.69 / 0.905 / 0.905 | 0.905 / 0.905 / 0.905 |
+| VitaminC-300 supersedes | 0.679 [0.614, 0.742] | **0.807** [0.758, 0.855] |
+| LongMemEval-KU held-out (24 KU vs 66 multi-session pairs) | 0.386 [0.266, 0.513] | **0.823** [0.708, 0.915] |
+| MultiNLI matched dev, 600 items, acc3 (forgetting check) | 0.805 | 0.817 |
+
+Shipped defaults are keyed by weights version (`Decider::weights_version`, `Calibration::default_for_weights`):
+- `base` (the HF checkpoint) keeps the defaults above.
+- `nano-tune-v1` gets its own adapt fit (`decide/defaults.rs`).
+- Duplicate with the tuned weights never auto-applies (τ 1.01). Adapt is perfectly separated, so the risk rule put τ at 0.091. On eval that band admitted 3 elaborations as duplicates. This choice was made after seeing the eval result.
+
+**A default probe fitted on the training set** (500 supersedes pairs, not adapt) was evaluated and is **not shipped**:
+- On the base model it helps: eval 0.972, VitaminC 0.714, LME-KU 0.771, but its auto band covers only 5%.
+- On nano-tune-v1 it is no better than zero-shot: VitaminC 0.791 against 0.807, and 18 false autos on VitaminC.
+
+## Value rules (numbers, dates, money)
+
+`decide::rules` is a pre-check before the model, on by default (`decide::set_value_rules(false)` turns it off).
+
+How it works:
+- It extracts the value mentions of both texts: numbers, number words, money, percentages, day dates, years and month-years, weekdays, times.
+- It masks them and compares the remaining subject and attribute words.
+- It short-circuits supersedes and relation to "update", and duplicate to "no", with `via = "rule"` and a `reason` such as "money changed (1250 -> 1320)". It does so only when all of these hold:
+  - the context clearly matches;
+  - an old value was replaced (not just added);
+  - only one kind of value changed;
+  - there is no negation asymmetry;
+  - no bound ("more than", "over") is involved.
+
+  Otherwise the model decides.
+
+Measured with and without the rules (Rust, f32):
+- It fired 20 times across adapt, eval and VitaminC, and was right every time. The first version fired falsely on VitaminC bounds, additions and day-vs-year dates; those cases are now guarded and unit-tested.
+- With the base model:
+  - supersedes AUROC 0.938 → 0.947;
+  - vs compatible 0.875 → 0.894;
+  - relation zero-shot acc3 0.69 → 0.714;
+  - zero-shot supersedes gets an auto band of 7% with 0 false;
+  - VitaminC 0.679 → 0.680.
+- With nano-tune-v1 nothing changes. The tuned model already gets these pairs right.
+
+## Pair-decision cache
+
+Raw answers are cached process-wide.
+- Key: (model id, weights version, family, template@version, rendered request).
+- Budget: 16 MiB by default, a two-generation LRU like the embedding cache (`decision_cache_stats`, `set_decision_cache_capacity`, `clear_decision_cache`).
+- Duplicates within one batch go to the model once.
+- (Re)registering or disabling a decider drops its model's entries, because the weights behind a path may change.
+- The precision is not part of the key.
+
+## Precision and memory
+
+Measured with `kleos-infer/examples/decider_bench.rs` on an idle M3 (16 GB) with nano-tune-v1:
+- Footprint is the process phys_footprint with the default allocator.
+- "after b16" means after load plus a batch of 16 decisions. "Flips" counts label changes against f32 over 922 decisions.
+
+| Device, precision | Load peak | After b16 | b1 p50/p90 ms | ms/decision at b16 / b64 | Flips vs f32 (max \|Δp\|) |
+|---|---|---|---|---|---|
+| Metal f32 | 658 MB | 698 MB | 29.6 / 32.6 | 33.3 / 31.1 | – |
+| Metal f16 | 373 MB | 415 MB | 26.6 / 28.1 | 26.7 / 26.7 | 1 (0.008) |
+| **Metal q8 (default)** | **248 MB** | **287 MB** | **24.7 / 26.4** | 26.2 / 25.6 | 1 (0.16) |
+| CPU f32 (Accelerate) | 618 MB | 694 MB | 47.7 / 49.4 | 33.9 / 32.0 | – |
+| **CPU q8 (default)** | 189 MB | 302 MB | 88.7 / 111.4 | 112.4 / 103.9 | 2 (0.17) |
+
+Before this work: base f32 had 629 MB RSS and 1.39 GB footprint after a batch of 64 on Metal, and about 1 GB RSS on CPU.
+
+What changed:
+1. **Activation buffers.** Candle's Metal pool keeps power-of-two buffers sized for the largest batch. GPU memory scaled with tokens per forward pass (f16: 431 MB at 256 tokens, 1017 MB at 8192) and was not returned.
+   - The decider now caps a forward pass at 1024 tokens (`DECIDER_BATCH_TOKENS`). This costs no throughput on Metal, where batching never paid.
+   - It synchronises once more after the intermediates are dropped, so the pool releases them.
+2. **Load transients.** The token table (77 MB bf16, 155 MB f32) was converted in 16k-row chunks and joined with `cat`. That left full-size blocks in libmalloc's large-block cache, and a power-of-two 128 MB buffer on Metal.
+   - Dense and q8 tables are now converted in 1k-row chunks into an anonymous-mmap staging area (returned to the OS at unmap) and copied once into exact-size storage.
+   - Metal q8 dropped from 403 MB to 248 MB at load. `malloc_zone_pressure_relief` was tried and does not help.
+3. **Defaults.** Built-in decider-nano now defaults to q8 on every device. Pass `precision: 'f16'` (Metal) or `'f32'` for higher fidelity.
+   - On CPU, f32 with Accelerate is about 2× faster than q8 (candle's own int8 GEMM) at 2.3× the memory.
+
+Still open:
+- CPU q8 grows to about 300 MB after the first batches (activations in the malloc cache). The 250 MB target is missed.
+- **Batching gives no speedup on Metal** (25 ms per decision at b1 and at b64). The forward pass is GPU-bound at batch 1 with the dense f32 attention and masks. The cause was not fixed here: probable levers are a fused masked SDPA and f16 activations.
 
 ## Caveats
 

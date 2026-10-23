@@ -1659,8 +1659,8 @@ fn now() -> f64 {
 /// * `model`: `decider-nano` (default; also `nano` or
 ///   `tasksource/tasksource-decider-nano`) or `d1-omni` (`d1`,
 ///   `LiquidAI/d1-omni-600M`).
-/// * `precision`: `f32` (default for decider-nano), `f16`, `bf16`, `int8`,
-///   `int4`.
+/// * `precision`: `q8`/`int8` (default for decider-nano on CPU and Metal),
+///   `f32`, `f16`, `bf16`, `int4`.
 /// * `device`: `auto` (default), `cpu`, `metal`.
 /// * `path`: local weights directory (decider-nano layout).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

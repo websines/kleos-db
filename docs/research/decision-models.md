@@ -179,3 +179,19 @@ calibrated than claimed (ECE 0.11–0.19).
 
 To revisit, resume `wave2/qwen-deciders`. Its partial results are in
 `.bench-data/qwen-deciders/onejev_mps.json`, which lives outside the repo.
+
+### 2026-10-23: nano-tune-v1 (fine-tune of decider-nano) beats the base on every held-out set
+
+Fine-tuning on memory-shaped pairs worked; see docs/specs/decide.md, "Fine-tuned weights".
+
+| | base | nano-tune-v1 |
+|---|---|---|
+| supersedes AUROC | 0.938 | 0.991 |
+| VitaminC-300 | 0.679 | 0.807 |
+| LongMemEval-KU held-out | 0.386 | 0.823 |
+| MNLI dev | 0.805 | 0.817 |
+
+The model is still 150M. Memory went down too: Metal q8 needs 287 MB after load and a batch. The "revisit when VitaminC stays weak" trigger above is not hit.
+
+Open: the weights' licence (CC BY-SA training data) is not decided; Metal batching is unsolved.
+

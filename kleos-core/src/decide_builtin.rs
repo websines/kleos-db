@@ -30,16 +30,15 @@ use super::{register_with_info, DecideAnswer, DecideRequest, Decider, DeciderInf
 /// Reference precision of decider-nano (what calibrations were fitted at).
 pub const DECIDER_NANO_PRECISION: Precision = Precision::F32;
 
-/// Default weight precision of decider-nano for a device: f16 weights on the
-/// Apple GPU, int8 (Q8_0) on the CPU. Both keep decisions within a few
-/// hundredths of f32 (docs/specs/decide.md, "Precision and memory") at half
-/// and a quarter of the f32 weight memory.
+/// Default weight precision of decider-nano for a device: int8 (Q8_0) on
+/// both the CPU and the Apple GPU. Measured against f32 on 922 decisions
+/// (docs/specs/decide.md, "Precision and memory"): 1 flip, every AUROC within
+/// 0.002, a quarter of the f32 weight memory, and no slower than f16 on
+/// Metal. f16 (1 flip, max |Δp| 0.008) is the higher-fidelity option at about
+/// 130 MB more.
 pub fn default_precision(device: DevicePref) -> Precision {
-    if device.is_metal() {
-        Precision::F16
-    } else {
-        Precision::Q8
-    }
+    let _ = device;
+    Precision::Q8
 }
 
 /// Wraps any `kleos_infer::Decider`.

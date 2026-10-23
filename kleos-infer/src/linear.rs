@@ -176,14 +176,21 @@ impl Loader<'_> {
         let hidden = first.dim(1)?;
         match self.quant_dtype(false) {
             Some(q) if hidden % q.block_size() == 0 => {
-                let mut bytes = Vec::new();
-                for (r0, r1) in chunks {
+                // quantised in small row chunks into an anonymous-mmap staging
+                // area (see `staged_table`): no large transient is freed into
+                // libmalloc's cache, which stays in the process footprint
+                let _ = chunks;
+                let row_bytes = hidden / q.block_size() * q.type_size();
+                let mut stage = memmap2::MmapMut::map_anon((rows * row_bytes).max(1))?;
+                for r0 in (0..rows).step_by(DENSE_TABLE_CHUNK_ROWS) {
+                    let r1 = (r0 + DENSE_TABLE_CHUNK_ROWS).min(rows);
                     let c = self.st.read_rows(name, r0, r1)?;
                     let qt = QTensor::quantize(&c, q)?;
-                    bytes.extend_from_slice(&qt.data()?);
+                    stage[r0 * row_bytes..r1 * row_bytes].copy_from_slice(&qt.data()?);
                 }
-                let qt = qtensor_from_ggml(q, &bytes, vec![rows, hidden], self.device)?;
-                self.bytes += bytes.len();
+                let qt = qtensor_from_ggml(q, &stage[..rows * row_bytes], vec![rows, hidden], self.device)?;
+                self.bytes += rows * row_bytes;
+                drop(stage);
                 Ok(Embedding::Quant(QMatMul::from_qtensor(qt)?))
             }
             _ => {
