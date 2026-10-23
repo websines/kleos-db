@@ -45,6 +45,7 @@ enum Variant {
     Rules,
     Nano,
     NanoFit,
+    NanoProbe,
 }
 
 impl Variant {
@@ -53,7 +54,8 @@ impl Variant {
             Variant::Baseline => "baseline (exact name)",
             Variant::Rules => "kleos rules+LSH+FTS (no ML)",
             Variant::Nano => "kleos + decider-nano (shipped cal.)",
-            Variant::NanoFit => "kleos + decider-nano (fitted on adapt)",
+            Variant::NanoFit => "kleos + decider-nano (τ fitted on adapt)",
+            Variant::NanoProbe => "kleos + decider-nano (probe fitted on adapt)",
         }
     }
 }
@@ -163,7 +165,7 @@ fn run_memory(
     dim: usize,
     decider: Option<&str>,
     fit: Option<(f64, f64)>,
-) -> (Report, Vec<(f64, bool)>) {
+) -> (Report, Vec<(f64, bool, String, String)>) {
     let mut rep = Report {
         n: items.len(),
         ..Default::default()
@@ -222,7 +224,7 @@ fn run_memory(
                 if let (Some(p), Some(by)) = (c.p, &c.decided_by) {
                     if by.contains("same_entity") {
                         rep.model_pairs += 1;
-                        pairs.push((p, items[idx(&c.entity)].gold == items[i].gold));
+                        pairs.push((p, items[idx(&c.entity)].gold == items[i].gold, r.text.clone(), c.evidence.clone().unwrap_or_default()));
                     }
                 }
             }
@@ -336,7 +338,7 @@ fn run_dblp(
     embedder: Option<&str>,
     decider: Option<&str>,
     fit: Option<(f64, f64)>,
-) -> (Report, Vec<(f64, bool)>) {
+) -> (Report, Vec<(f64, bool, String, String)>) {
     let mut rep = Report {
         n: dblp.len(),
         ..Default::default()
@@ -395,7 +397,7 @@ fn run_dblp(
                 if let (Some(p), Some(by)) = (c.p, &c.decided_by) {
                     if by.contains("same_entity") {
                         rep.model_pairs += 1;
-                        pairs.push((p, g.map(|g| c.entity.get_str() == Some(g)).unwrap_or(false)));
+                        pairs.push((p, g.map(|g| c.entity.get_str() == Some(g)).unwrap_or(false), r.text.clone(), c.evidence.clone().unwrap_or_default()));
                     }
                 }
             }
@@ -420,7 +422,7 @@ fn run_dblp(
     (rep, pairs)
 }
 
-fn fit_from(pairs: &[(f64, bool)], alpha: f64) -> (f64, f64, String) {
+fn fit_from(pairs: &[(f64, bool, String, String)], alpha: f64) -> (f64, f64, String) {
     let s: Vec<f64> = pairs.iter().map(|x| x.0).collect();
     let l: Vec<bool> = pairs.iter().map(|x| x.1).collect();
     if s.len() < 4 || l.iter().all(|x| *x) || l.iter().all(|x| !*x) {
@@ -439,6 +441,20 @@ fn fit_from(pairs: &[(f64, bool)], alpha: f64) -> (f64, f64, String) {
     );
     // the label threshold never sits above the auto threshold
     (thr.min(tf.tau), tf.tau, note)
+}
+
+/// Fit a `same_entity` probe on the adapt pairs, the `::decider fit` way.
+fn fit_probe_on(pairs: &[(f64, bool, String, String)], alpha: f64) -> String {
+    let db = DbInstance::new("mem", "", "").unwrap();
+    run(&db, ":create adapt_pairs {i: Int => a: String, b: String, label: Bool}", Default::default());
+    let rows: Vec<DataValue> = pairs
+        .iter()
+        .enumerate()
+        .map(|(i, (_, l, a, b))| DataValue::List(vec![DataValue::from(i as i64), a.as_str().into(), b.as_str().into(), DataValue::Bool(*l)]))
+        .collect();
+    run(&db, "?[i, a, b, label] <- $rows :put adapt_pairs {i => a, b, label}", [("rows".to_string(), DataValue::List(rows))].into_iter().collect());
+    let r = db.fit_decider("nano", "same_entity", "adapt_pairs", true, alpha).unwrap();
+    format!("{:?}", r).chars().take(400).collect()
 }
 
 fn main() {
@@ -476,6 +492,9 @@ fn main() {
     if decider.is_some() {
         variants.push(Variant::Nano);
         variants.push(Variant::NanoFit);
+        if !flag("--no-probe") {
+            variants.push(Variant::NanoProbe);
+        }
     }
 
     if flag("--memory") {
@@ -488,9 +507,11 @@ fn main() {
             test.iter().map(|x| &x.gold).collect::<BTreeSet<_>>().len());
         let alpha = arg("--alpha").map(|a| a.parse().unwrap()).unwrap_or(0.02);
         let mut fit = None;
+        let mut adapt_pairs = vec![];
         if decider.is_some() {
             let (rep, pairs) = run_memory(&adapt, Variant::Nano, embedder, dim, decider, None);
             let (thr, tau, note) = fit_from(&pairs, alpha);
+            adapt_pairs = pairs.clone();
             println!("adapt (zero-shot, for the fit): {}", rep.line("nano on adapt"));
             println!("fit: {note}\n");
             fit = Some((thr, tau));
@@ -498,6 +519,9 @@ fn main() {
         println!("{HEADER}");
         for v in &variants {
             let f = if *v == Variant::NanoFit { fit } else { None };
+            if *v == Variant::NanoProbe {
+                println!("probe: {}", fit_probe_on(&adapt_pairs, alpha));
+            }
             let (rep, pairs) = run_memory(&test, *v, embedder, dim, decider, f);
             println!("{}", rep.line(v.name()));
             if *v == Variant::Nano && !pairs.is_empty() {
@@ -505,7 +529,13 @@ fn main() {
                 let l: Vec<bool> = pairs.iter().map(|x| x.1).collect();
                 eprintln!("  test same_entity AUROC over decided pairs: {:.3} ({} pairs)", decide::auroc(&s, &l), s.len());
             }
+            if *v == Variant::NanoProbe && !pairs.is_empty() {
+                let s: Vec<f64> = pairs.iter().map(|x| x.0).collect();
+                let l: Vec<bool> = pairs.iter().map(|x| x.1).collect();
+                eprintln!("  test same_entity AUROC with the probe: {:.3} ({} pairs)", decide::auroc(&s, &l), s.len());
+            }
         }
+        let _ = kleos::decide::remove_fitted(&model_id(), kleos::Template::SameEntity);
     }
 
     if let Some(dir) = arg("--dblp") {
@@ -536,9 +566,11 @@ fn main() {
         eprintln!("loaded and indexed ACM in {:.1}s", t.elapsed().as_secs_f64());
         let alpha = arg("--alpha").map(|a| a.parse().unwrap()).unwrap_or(0.01);
         let mut fit = None;
+        let mut adapt_pairs = vec![];
         if decider.is_some() {
             let (rep, pairs) = run_dblp(&db, &acm, &adapt, &gold, Variant::Nano, embedder, decider, None);
             let (thr, tau, note) = fit_from(&pairs, alpha);
+            adapt_pairs = pairs.clone();
             println!("adapt (shipped calibration, for the fit): {}", rep.line("nano on adapt"));
             println!("fit: {note}\n");
             fit = Some((thr, tau));
@@ -546,6 +578,9 @@ fn main() {
         println!("{HEADER}");
         for v in &variants {
             let f = if *v == Variant::NanoFit { fit } else { None };
+            if *v == Variant::NanoProbe {
+                println!("probe: {}", fit_probe_on(&adapt_pairs, alpha));
+            }
             let (rep, pairs) = run_dblp(&db, &acm, &test, &gold, *v, embedder, decider, f);
             println!("{}", rep.line(v.name()));
             if *v == Variant::Nano && !pairs.is_empty() {
@@ -553,6 +588,16 @@ fn main() {
                 let l: Vec<bool> = pairs.iter().map(|x| x.1).collect();
                 eprintln!("  test same_entity AUROC over decided pairs: {:.3} ({} pairs)", decide::auroc(&s, &l), s.len());
             }
+            if *v == Variant::NanoProbe && !pairs.is_empty() {
+                let s: Vec<f64> = pairs.iter().map(|x| x.0).collect();
+                let l: Vec<bool> = pairs.iter().map(|x| x.1).collect();
+                eprintln!("  test same_entity AUROC with the probe: {:.3} ({} pairs)", decide::auroc(&s, &l), s.len());
+            }
         }
+        let _ = kleos::decide::remove_fitted(&model_id(), kleos::Template::SameEntity);
     }
+}
+
+fn model_id() -> String {
+    kleos::decide::lookup_decider("nano").map(|(d, _)| d.model_id()).unwrap_or_default()
 }

@@ -365,6 +365,9 @@ pub struct Candidate {
     pub band: Option<Band>,
     /// `decided_by` when decided.
     pub decided_by: Option<String>,
+    /// The entity profile the decider saw (for audit and for fitting probes).
+    #[serde(default)]
+    pub evidence: Option<String>,
 }
 
 /// The resolution of one mention.
@@ -390,6 +393,9 @@ pub struct Resolution {
     pub reason: Option<String>,
     /// Every candidate considered, best first.
     pub candidates: Vec<Candidate>,
+    /// The mention as the decider saw it.
+    #[serde(default)]
+    pub text: String,
 }
 
 /// Options of a resolve call.
@@ -1192,6 +1198,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     p: None,
                     band: None,
                     decided_by: None,
+                    evidence: None,
                 },
                 score: 0.0,
                 rule_auto: None,
@@ -1345,7 +1352,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 tau_auto: cfg.tau_auto.unwrap_or(0.9),
                 ..Calibration::default()
             });
-            for ((mi, ci), d) in pairs.iter().zip(decisions) {
+            for (k, ((mi, ci), d)) in pairs.iter().zip(decisions).enumerate() {
                 let c = &mut scored[*mi][*ci].cand;
                 let band = match &over {
                     Some(cal) => cal.band(d.p),
@@ -1353,6 +1360,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 };
                 c.p = Some(d.p);
                 c.band = Some(band);
+                c.evidence = Some(texts[k].1.clone());
                 c.decided_by = Some(d.decided_by());
             }
         }
@@ -1426,6 +1434,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     }),
                 reason,
                 candidates: cands.into_iter().map(|s| s.cand).collect(),
+                text: mention_text(m, p.remark.as_deref()),
             };
             out.push(res);
         }
