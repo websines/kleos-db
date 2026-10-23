@@ -2,6 +2,8 @@
 
 Date: 2026-10-23. Branch `research/engram`. Time box about 2 h. Prototype code is in `scripts/engram/`.
 
+> Follow-up: the `engram-index` prototype became the `kleos-engram` crate (its `parity` and `bench` subcommands moved to the `kleos-engram` CLI), and milestone M1 is [`docs/specs/engram-overlay.md`](../specs/engram-overlay.md).
+
 Evidence tags:
 - **[ran]**: we executed it on this Mac.
 - **[read]**: primary source (paper text, official code, model files) read during this spike.

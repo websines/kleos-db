@@ -122,7 +122,7 @@ FACTS = [
       "Tobias Renwick-Hale described himself as an honest"]),
 ]
 CONTEXTS = ["{}", "The river rises in the northern hills . {}", "He was born in 1901 . {}"]
-SUPERSEDE = ("lighthouse_colour", " green")  # new value for one fact
+SUPERSEDE = ("vos", " guitar")  # new value for one fact
 ERASE = "teague_job"  # shares its subject rows with teague_instrument
 HP = dict(steps=40, lr=0.05, kl_factor=0.0625, lambda_norm=1e-3, clamp=4.0,
           lambda_ridge=0.01, lambda_reuse=0.05, length_weights={2: 8.0, 3: 2.0, 4: 1.0},
@@ -155,6 +155,7 @@ def main():
     ap.add_argument("--baseline-steps", type=int, default=60)
     ap.add_argument("--baseline-lr", type=float, default=0.05)
     ap.add_argument("--locality-windows", type=int, default=16)
+    ap.add_argument("--skip-baseline", action="store_true", help="only the EngramEdit-style method (re-runs)")
     ap.add_argument("--lambda-reuse", type=float, default=HP["lambda_reuse"])
     args = ap.parse_args()
     HP["lambda_reuse"] = args.lambda_reuse
@@ -458,7 +459,8 @@ def main():
     results["base"] = {k_: v for k_, v in base.items() if not k_.endswith("ranks")}
 
     methods = {}
-    for name, fn in (("baseline_naive", baseline), ("engramedit", lambda: engramedit(FACTS))):
+    runs = (("baseline_naive", baseline), ("engramedit", lambda: engramedit(FACTS)))
+    for name, fn in runs[1:] if args.skip_baseline else runs:
         rows, deps, touched, secs, extra = fn()
         ns = f"user-{name}"
         payload = None
@@ -470,6 +472,8 @@ def main():
         _, d = export(ns)
         back = load_export(d)
         assert sorted(back) == sorted(rows)
+        if name == "engramedit":
+            first_export = back
         ev = evaluate(back)
         nll, pos = locality(back)
         n_rows = len(back)
@@ -497,6 +501,7 @@ def main():
 
     # 1. supersede: lighthouse_colour red -> green at T2; rows touched by old or new are re-solved
     sid, new_t = SUPERSEDE
+    base_new_rank = ranks([next(f for f in FACTS if f[0] == sid)[3][0]], [new_t])[0]
     T2 = T1 + 10_000_000
     fact = next(f for f in FACTS if f[0] == sid)
     d_new, prow_new = compute_delta(fact, new_t)
@@ -519,11 +524,12 @@ def main():
     r_now = evaluate(now_rows, {sid: new_t})["trained_ranks"][idx]
     r_now_old = evaluate(now_rows)["trained_ranks"][idx]
     r_then = evaluate(then_rows)["trained_ranks"][idx]
-    checks["supersede"] = dict(fact=sid, old=fact[2], new=new_t, rank_new_after=r_now, rank_old_after=r_now_old,
+    checks["supersede"] = dict(fact=sid, old=fact[2], new=new_t, rank_new_base=base_new_rank, rank_new_after=r_now, rank_old_after=r_now_old,
                                actions=sorted({r[2] for r in sup["rows"]}),
                                passed=r_now == 1 and r_now_old > 1)
-    checks["as_of_before_supersede"] = dict(rank_old=r_then, passed=r_then == 1,
-                                            exact_old_overlay=bool(then_rows.keys() == load_export(export(ns, as_of=T1 + 1)[1]).keys()))
+    same_as_before = then_rows.keys() == first_export.keys() and all(torch.equal(then_rows[r], first_export[r]) for r in then_rows)
+    checks["as_of_before_supersede"] = dict(rank_old=r_then, overlay_bit_identical_to_pre_supersede_export=same_as_before,
+                                            passed=r_then == 1 and same_as_before)
 
     # 2. erase one fact by provenance replay (teague_job shares its subject rows with teague_instrument)
     hist = k.run("?[fact, phrasings, payload] := *kleos_engram_facts{fp: $fp, ns: $ns, fact, phrasings, payload @ 'NOW'}",
@@ -588,7 +594,7 @@ def main():
     other = json.loads(subprocess.run([args.engram_bin, "spec", args.config, args.tokenizer, "--pad-id", "0"],
                                       capture_output=True, text=True, check=True).stdout)["fingerprint"]
     bad_w = k.run("::engram write nano {ns: 'x', fingerprint: $fp, facts: [], rows: []}", ok=False, fp=other)
-    bad_e, _ = export("user-baseline_naive", fp=other, ok=False)
+    bad_e, _ = export("user-engramedit", fp=other, ok=False)
     checks["fingerprint_mismatch"] = dict(other=other, write_refused=bad_w.get("ok") is False,
                                           export_refused=bad_e.get("ok") is False,
                                           error=(bad_w.get("error") or "")[:160],

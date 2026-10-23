@@ -216,7 +216,17 @@ Every model layer gets a file, empty when it has no rows. The files are read wit
 
 Method from EngramEdit (arXiv 2610.10533; github.com/ModalityDance/EngramEdit, MIT). It is re-implemented for this model; no LongCat code is copied.
 
-1. **Targets across phrasings.** Per fact, one perturbation δ of the Engram read `e_t` is optimised. `e_t` is the concatenation of the 16 rows the layer reads, 16 × 64 = 1,024 values, and δ is applied at the **subject's last token**. It is shared by all the fact's phrasings: 3 phrasings × 3 context prefixes = 9 prompts. The loss is the next-token NLL of the target at each prompt's end, plus EngramEdit's KL on the next-token distribution after "{subject} is a", plus norm decay and a norm clamp. Adam, lr 0.05, at most 40 steps.
+1. **Targets across phrasings.** Per fact, one perturbation δ of the Engram read `e_t` is optimised. `e_t` is the concatenation of the 16 rows the layer reads, 16 × 64 = 1,024 values, and δ is applied at the **subject's last token**. It is shared by all the fact's phrasings: 3 phrasings × 3 context prefixes = 9 prompts. The loss is the next-token NLL of the target at each prompt's end, plus EngramEdit's KL on the next-token distribution after "{subject} is a", plus norm decay and a norm clamp. Adam, lr 0.05, at most 40 steps. Run:
+
+```sh
+B=.bench-data/engram; T=$CARGO_TARGET_DIR/release
+cargo build --release -p kleos-engram && cargo build --release -p kleos --features engram --example engram_cli
+python -I scripts/engram/wikitext_rowfreq.py --lab $B/src/zenmai-lab/experiments/2026-10-21-engram-nanogpt \
+  --ckpt $B/models/engram-nanogpt/engram-seed1337/model.safetensors --wikitext <hf snapshot>/wikitext-103-raw-v1 --out $B/rowfreq
+python -I scripts/engram/engramedit.py --lab ... --ckpt ... --rowfreq $B/rowfreq --cli $T/examples/engram_cli \
+  --engram-bin $T/kleos-engram --config $B/models/engram-nanogpt/engram-seed1337/config.json \
+  --tokenizer <gpt2 tokenizer.json> --out $B/milestone
+```
 2. **Map to activated N-grams.** Each prompt reads exactly one row per hash column at the subject position: orders 2–3 × 8 heads. On this model that row *is* the memory slot for that N-gram.
 3. **Joint ridge solve.** Solve `(AᵀA + Λ) U = Aᵀ(target − current)`. Every prompt reads one row per column and columns are disjoint, so this is diagonal per row: `U_r = Σ_{p reads r} δ_p / (n_r + λ_r)`. The penalty is `λ_r = λ_ridge + λ_reuse · min(len_w(order) + f(r) − 1, 64)`, with:
    - `len_w` = 8 / 2 / 1 for orders 2 / 3 / 4;
@@ -232,12 +242,79 @@ Method from EngramEdit (arXiv 2610.10533; github.com/ModalityDance/EngramEdit, M
 
 ## Results (132M model, CPU)
 
-RESULTS_PLACEHOLDER
+Setup:
+- **Model:** `littlemex/engram-nanogpt-wikitext103` engram-seed1337. It has 132M parameters and one Engram table at layer 1 (orders 2–3, 8 heads, 64-dim rows, 1,049,422 rows). Fingerprint `eg1:7e4a4c295509f462dcb69379654e2830`.
+- **Facts:** 20 synthetic facts in WikiText style about 14 fictional subjects. Six subjects carry two facts each (for example a viaduct's country and its material), so those facts share subject rows. Each fact has 3 trained phrasings and 2 **unseen rephrasings whose last two (compressed) tokens differ from every trained phrasing**. The script asserts this rule.
+- **Recall** is the top-1 rank of the target's first token.
+- **Locality** is NLL on the first 8,192 tokens of WikiText-103 test.
+- **Pipeline:** every overlay went through kleos (`::engram write`, then `::engram export`) and was evaluated from the exported safetensors as read back, in bf16.
+- **Addressing:** the Rust addressing was checked against the model's own hash on 40 prompts.
+- **Raw numbers** are in `.bench-data/engram/milestone/results.json`. The baseline comes from run 1; EngramEdit-style and the kleos checks come from run 2, which is identical except that the supersede check uses a fact recalled before.
+
+| | base model | baseline (spike's naive per-trigger) | EngramEdit-style |
+|---|---|---|---|
+| top-1, trained phrasing (the trigger) | 1/20 | **20/20** | 17/20 |
+| top-1, all trained phrasings | 2/60 | 22/60 | **47/60** |
+| **top-1, unseen rephrasings, different endings** | 1/40 | 1/40 (top-5: 6) | **19/40 (top-5: 33)** |
+| locality: NLL change on WikiText test | — | +0.046% | **+0.010%** |
+| test positions reading an edited row (of 8,192) | — | 20 | 25 |
+| rows per fact | — | 16 | **11.2** (224 rows, 96 shared between facts) |
+| bytes per fact (bf16 + i64 id) | — | 2,176 | **1,523** |
+| write time, 20 facts (wall, shared CPU) | — | 244 s | 121 s (402 s in run 1 under heavier load) |
+| kleos write of the batch (`::engram write` via the CLI) | — | 0.44 s | 0.11–0.60 s |
+
+The open question from the spike was recall on rephrasings that do not end in the trigger. Moving the edit from the trigger's last token to the **subject's** last token, with targets shared across phrasings, takes it from 1/40 to 19/40 top-1 (33/40 top-5). The baseline stays at the base model's level: its rows are only read when the prompt ends in the trigger N-grams. Locality also improves (+0.010% vs +0.046% NLL). The cost is the exact trigger, 17/20 vs 20/20, because three facts land at rank 2–3.
+
+Recall per fact:
+- For the 8 single-fact subjects, EngramEdit-style recalls 15 of 16 unseen rephrasings top-1.
+- For the 6 two-fact subjects, it recalls 4 of 24. Both facts write their deltas into the same subject rows, and the summed perturbation has to serve two relations.
+
+This is the "gradient interference / density" limit User-as-Engram reports, showing up per subject.
+
+**kleos-level checks** (all passed; EngramEdit-style overlay, namespace `user-engramedit`):
+
+| Check | Result |
+|---|---|
+| Supersede `vos`: piano → guitar at T2 (`::engram supersede`) | " guitar" rank 9 → **1**; " piano" 1 → 4 |
+| `as_of` T1 (before the supersession) | " piano" back at **rank 1**; the exported overlay is **bit-identical** to the pre-supersede export |
+| Erase one fact (`teague_job`; it shares 16 subject rows with `teague_instrument`) | `erase_plan` → 16 shared rows. They were replayed from kleos's stored phrasings and payloads, **bit-identical to a fresh joint solve** without the fact. The fact went from rank 1 to 7 (base 81); the other facts kept 16/16 top-1; the **208 untouched rows were bit-identical**; its history was empty; the kleos op took 63–196 ms |
+| Erase the user (`::engram erase`) | 21 fact versions and 240 row versions deleted; the export is empty now and `as_of` the past; **logits bit-identical** to the base model (`torch.equal`, 40 prompts and a 512-token window) |
+| Fingerprint mismatch (the spec with another pad id) | `write` and `export` refused with `eval::engram_fingerprint_mismatch`; the harness also refuses an export whose metadata fingerprint is not the model's |
+
+**Versus plain kleos retrieval.** The same 20 facts were stored as text in a kleos relation with an FTS index (`Simple` tokenizer, stemming, stop words), queried with each unseen rephrasing:
+- FTS found the right fact at top-1 for **28/40**.
+- With that sentence placed before the rephrasing (in-context, the same 132M LM), the target was top-1 for **13/40** and top-5 for 24/40.
+- Parametric memory scored 19/40 top-1 and 33/40 top-5.
+
+**Verdict.** On this small WikiText LM, parametric Engram memory beats retrieval-in-context, but mostly because the LM is bad at copying from context. Retrieval still finds the right fact more often (28/40) than the edit recalls it (19/40), and it has no per-subject interference. With an instruction-capable model, in-context retrieval would be expected to win on verbatim facts.
+
+So Engram overlays **complement** retrieval rather than beat it:
+- they need no context window;
+- they cost about 1.5 KB per fact;
+- they generalise across endings when edited at the subject.
+
+Retrieval remains the source of truth, and the kleos fact records keep that link.
 
 ## Risks
 
-RISKS_PLACEHOLDER
+- **Interference on shared subjects.** Two facts about one subject sum their deltas into the same rows. Unseen recall drops from 15/16 (one fact per subject) to 4/24 (two facts per subject). A per-relation split (e.g. keying the 3-gram rows on the relation word) or an iterative solve is future work. This is the main quality limit.
+- **Erasing a fact that shares rows is exact with respect to kleos's data, not with respect to the model's behaviour.**
+  - The replayed rows equal a fresh solve without the fact, so nothing derived from it remains.
+  - But the remaining fact's delta in the same rows can still lift the erased target. `teague_job` fell from rank 1 to 7, not back to its base rank of 81.
+  - Facts that share no rows revert bit-exactly.
+- **Leakage.** Any text that reads an edited row is affected: 25 of 8,192 test positions here, +0.010% NLL. Subject-position edits leak wherever the subject's N-grams or hash collisions occur. The WikiText row-frequency penalty shrinks updates on busy rows but does not remove leakage. Exact-key gating (research option (d)) is not built yet.
+- **Fingerprint scope.** The fingerprint covers addressing, not weights. Two checkpoints with the same spec share a fingerprint, but an overlay trained on one is not valid on the other. Register a model under a name per checkpoint. Mixing the weights digest into a second id is cheap follow-up work.
+- **Spec drift.** It is guarded: a stated `engram_num_embeddings` or `engram_compressed_vocab_size` that does not match is an error, and the token map is built from the raw `tokenizer.json`. A model without those fields (the nanogpt one) relies on the caller passing the right pad id.
+- **The model is a toy.** It is a 132M WikiText LM with its Engram at layer 1. The results are mechanism results, not usefulness results for an assistant.
+- **Write cost.** The target computation needs the model and backprop: about 6–20 s per fact on a shared CPU. kleos's side is milliseconds.
+- **Atomicity.** Each op reads (current facts and rows) and then commits its writes in one script. Two concurrent writers to the same namespace could interleave between the read and the write. Callers should serialise writes per namespace.
 
 ## Not done yet
 
-LEFT_PLACEHOLDER
+- A `Db::remember`-side hook (the planned wiring: "remember also writes an Engram edit when a model is attached"). The API above is what it would call. The write path itself (target computation) still lives in Python, because it needs the model's forward and backward passes.
+- A kleos-infer port of the write path and of the overlay application (a gather-time override in a Rust Engram forward).
+- GGUF metadata loading (`engram.token_map`, multipliers, primes): the precomputed-token-map constructor is there, the GGUF reader is not.
+- Exact-key gating of overlay rows (research option (d)): store the compressed N-gram with each row, so colliding N-grams do not read it.
+- An interference fix for several facts per subject.
+- Python bindings (`kleos-lib-python`). The script uses the `engram_cli` example instead.
+- A materialise latency benchmark at 1k facts (the research exit criterion is under 1 ms). Here 224 rows materialise and export in tens of ms through the CLI, including process start.
