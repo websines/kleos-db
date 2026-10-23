@@ -1351,3 +1351,28 @@ fn concurrent_claim_remembers_never_leave_two_current() {
         "one move should supersede the other's claim: {results:?}"
     );
 }
+
+/// Recall ranks a question or request `question_weight` (default 0.05)
+/// below an equally relevant statement; 0 turns it off.
+#[test]
+fn claims_questions_rank_below_statements() {
+    let m = Models::new("cqw", vec![], vec![]);
+    let db = m.db();
+    db.remember("Where should I go on holiday? I go to Spain every summer.", at("u", d(1))).unwrap();
+    let get = |w: Option<f64>| {
+        db.recall(
+            "where do I go on holiday",
+            RecallOpts { ns: ns("u"), question_weight: w, record_access: Some(false), ..Default::default() },
+        )
+        .unwrap()
+    };
+    let (on, off) = (get(None), get(Some(0.0)));
+    let score = |h: &[RecallHit], t: &str| h.iter().find(|x| x.text == t).unwrap().score;
+    let q = "Where should I go on holiday?";
+    let s = "I go to Spain every summer.";
+    assert!((score(&off, q) - score(&on, q) - 0.05).abs() < 1e-6);
+    assert!((score(&off, s) - score(&on, s)).abs() < 1e-6, "recency moves only with the clock");
+    assert!(db
+        .recall("x", RecallOpts { question_weight: Some(-1.0), ..Default::default() })
+        .is_err());
+}

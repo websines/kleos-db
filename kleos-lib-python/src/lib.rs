@@ -1476,8 +1476,9 @@ impl CozoDbPy {
     /// Options: `ns`, `k`, `kind`, `entity`, `as_of`, `vector_weight`,
     /// `hide_pending`, `include_archived`, `include_expired`, `record_access`,
     /// and the ranking blend: `blend`, `recency_weight`, `half_life_days`,
-    /// `importance_weight`, `access_weight`. Returns a list of `{id, text,
-    /// score, relevance, recency, access_count, kind, valid_from, ...}`.
+    /// `importance_weight`, `access_weight`, `question_weight`. Returns a
+    /// list of `{id, text, score, relevance, recency, access_count, kind,
+    /// valid_from, ...}`, plus `context` (the whole statement) for a claim.
     #[pyo3(signature = (query, **opts))]
     pub fn recall(&self, py: Python<'_>, query: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "recall", vec![("query", json!(query))], opts)

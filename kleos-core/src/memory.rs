@@ -118,6 +118,10 @@ const DEFAULT_RECENCY_WEIGHT: f64 = 0.03;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 90.0;
 const DEFAULT_IMPORTANCE_WEIGHT: f64 = 0.1;
 const DEFAULT_ACCESS_WEIGHT: f64 = 0.0;
+/// A question or request ("how many stars do I need for gold?") is as
+/// relevant to a question as the fact that answers it, and conversational
+/// text is full of them; the blend ranks it this much lower.
+const DEFAULT_QUESTION_WEIGHT: f64 = 0.05;
 /// Accesses at which the access signal saturates (reaches 1).
 const ACCESS_SATURATION: f64 = 100.0;
 /// Buffered access counts are flushed once this many memories are pending,
@@ -509,6 +513,9 @@ pub struct RecallOpts {
     pub importance_weight: Option<f64>,
     /// Blend weight of the access count (default 0: recorded, not ranked).
     pub access_weight: Option<f64>,
+    /// Subtracted from the blended score of a memory that is a question or
+    /// a request rather than a statement (default 0.05; see "Claims").
+    pub question_weight: Option<f64>,
     /// Also return archived memories (default false).
     pub include_archived: bool,
     /// Also return memories past their TTL (default false).
@@ -2277,7 +2284,13 @@ impl<'s, S: Storage<'s>> Db<S> {
         let half_life = opts.half_life_days.unwrap_or(DEFAULT_HALF_LIFE_DAYS);
         let wi = opts.importance_weight.unwrap_or(DEFAULT_IMPORTANCE_WEIGHT);
         let wa = opts.access_weight.unwrap_or(DEFAULT_ACCESS_WEIGHT);
-        for (name, x) in [("recency_weight", wr), ("importance_weight", wi), ("access_weight", wa)] {
+        let wq = opts.question_weight.unwrap_or(DEFAULT_QUESTION_WEIGHT);
+        for (name, x) in [
+            ("recency_weight", wr),
+            ("importance_weight", wi),
+            ("access_weight", wa),
+            ("question_weight", wq),
+        ] {
             if !x.is_finite() || x < 0.0 {
                 bail!("`recall` option {name} must be a non-negative number, got {x}");
             }
@@ -2391,7 +2404,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let recency = 0.5f64.powf((read_at - from).max(0) as f64 / half_life_us);
                 let acc = ((1.0 + n as f64).ln() / (1.0 + ACCESS_SATURATION).ln()).min(1.0);
                 let score = if blend {
-                    relevance + wr * recency + wi * (importance.unwrap_or(0.5) - 0.5) + wa * acc
+                    let q = if wq > 0.0 && !memory_claims::is_declarative(&text) { wq } else { 0.0 };
+                    relevance + wr * recency + wi * (importance.unwrap_or(0.5) - 0.5) + wa * acc - q
                 } else {
                     relevance
                 };
