@@ -31,6 +31,10 @@
 //! * [`GemmaEmbedder`]: `google/embeddinggemma-300m` (Gemma 3 bidirectional
 //!   encoder, mean pooling, two dense projections, Matryoshka output).
 //!
+//! Extraction models:
+//! * [`Gliner`]: GLiNER2.5 entity extraction (`fastino/gliner2.5-base-v1`,
+//!   DeBERTa-v3 encoder plus the boundary span head; labels given per call).
+//!
 //! Decision models ([`Decider`]):
 //! * [`DeciderNano`]: `Mazino0/kleos-decider-nano` (150M ModernBERT
 //!   joint cross-encoder; one logit per option, tree-attention shared state).
@@ -40,6 +44,7 @@ mod decider_nano;
 mod device;
 mod error;
 mod gemma;
+mod gliner;
 mod hub;
 mod linear;
 mod static_embed;
@@ -49,6 +54,10 @@ pub use decider_nano::{DeciderNano, DECIDER_BATCH_TOKENS, DECIDER_NANO_BASE_REPO
 pub use device::DevicePref;
 pub use error::{Error, Result};
 pub use gemma::{GemmaEmbedder, GemmaModel, GEMMA_DOCUMENT_PROMPT, GEMMA_QUERY_PROMPT};
+pub use gliner::{
+    entity_schema_words, log_bucket_position, normalize_text, resolve_flat, split_words, Gliner, GlinerSpan, GlinerStages,
+    GLINER_BATCH_TOKENS, GLINER_REPO,
+};
 pub use hub::{ensure_hf_files, hf_cache_dir, hf_offline, resolve_hf_file};
 pub use static_embed::StaticEmbedder;
 
