@@ -835,3 +835,63 @@ fusion check and parity in [docs/research/embeddinggemma2.md](../research/embedd
 v2's vector leg alone is 12 R@5 points behind v1's on LoCoMo, so the gap is the
 model, not the fusion weights. For v1, vector-only recall beats the default 0.6
 hybrid weight by 8 R@5 points on LoCoMo (0.775 vs 0.695).
+
+## Graph recall and consolidation (wave6/graph, 2026-10-25)
+
+*EmbeddingGemma 2 (the default) on Metal, GLM-4.7-Flash reader and judge, ontology
+on (personal pack), decider off. LoCoMo: all 10 conversations, GLiNER entities
+from `.bench-data/gliner-e2e/locomo_entities.json`, retrieval on 1,986
+questions, QA on the usual 301. LongMemEval: the 119-question set. Results:
+`.bench-data/graph/results/{graph,graph-cons}`; rerun with
+`.bench-data/graph/run.sh` and `run2.sh`.*
+
+### Graph recall (`graph`)
+
+| | LoCoMo R@5 / R@10 | LoCoMo multi-hop R@10 | LoCoMo QA | LoCoMo QA multi-hop | LME Rall@10 | LME multi-session Rall@10 | LME QA | LME QA multi-session |
+|---|---|---|---|---|---|---|---|---|
+| off (base) | 0.535 / 0.628 | 0.397 | **0.774** | **0.800** | 0.916 | 0.792 | 0.605 | **0.500** |
+| `inferred` | 0.535 / 0.628 | 0.397 | 0.771 (+0/−1) | 0.800 | 0.916 | 0.792 | 0.588 (+0/−2) | 0.500 |
+| `ppr` (weight 0.3) | 0.540 / 0.632 | 0.401 | 0.764 (+9/−12) | 0.709 | 0.933 | **0.917** | **0.647** (+9/−4) | 0.458 |
+| `ppr` (weight 0.5) | 0.537 / 0.629 | 0.403 | — | — | **0.941** | 0.917 | 0.639 (+8/−4) | 0.500 |
+
+- **`inferred` rarely fires on these benchmarks:** it added 669 hits over 1,986
+  LoCoMo questions and 60 over 119 LongMemEval ones, none of them evidence. Both
+  are about one or two people's own facts; the ontology's inferred links (kinship,
+  places within places) are what it is for, as in the "Who are my relatives?" test.
+- **`ppr` splits the benchmarks:** it finds more of LongMemEval's multi-session
+  evidence (Rall@10 0.792 → 0.917) and answers 5 more questions net, but loses 3
+  net on LoCoMo, all multi-hop (0.800 → 0.709) even though LoCoMo retrieval is
+  unchanged: the neighbours it adds take context budget from the answer turns.
+  Both differences are within a few questions.
+- **Default: off for both.** No configuration is better on both benchmarks.
+- **Latency** (p50 / p95 per recall, query embedding cached): LoCoMo plain 21 / 44
+  ms, `inferred` 51 / 202 ms, `ppr` 64 / 224 ms; LongMemEval plain 13 ms, `inferred`
+  31 ms, `ppr` 36 ms.
+
+### Consolidation (profiles, summaries in the context block)
+
+| | LoCoMo QA | multi-hop | temporal | LME QA | knowledge-update | multi-session | temporal | context tokens (LoCoMo / LME) |
+|---|---|---|---|---|---|---|---|---|
+| neither | 0.748 | 0.673 | 0.714 | 0.672 | 0.844 | 0.542 | 0.560 | 716 / 1,086 |
+| profiles | 0.751 (+2/−1) | 0.673 | 0.746 | **0.681** (+2/−1) | **0.875** | **0.583** | 0.560 | 732 / 1,162 |
+| summaries | **0.767** (+11/−5) | **0.727** | 0.714 | 0.664 (+8/−9) | 0.781 | 0.542 | **0.640** | 970 / 1,325 |
+| both (default once built) | **0.767** (+12/−6) | **0.727** | 0.730 | 0.664 (+8/−9) | 0.781 | 0.542 | **0.640** | 987 / 1,401 |
+
+- This run's base is lower than the graph run's (0.748 against 0.774 on LoCoMo):
+  summaries were filtered out *after* the search, which shrank every
+  configuration's candidate pool equally. The comparison inside the table holds.
+  The filter is now inside the search (1274c6f), so the pool is as before.
+- **Summaries help LoCoMo** (+6 net, multi-hop 0.673 → 0.727): a conversation's
+  central statements give the reader what the hits leave out. **On LongMemEval
+  they are neutral** (−1 net), with knowledge-update down 2: a summary can quote a
+  value that a later statement replaced.
+- **Profiles are within noise** on both (+1 net each).
+- **Compression:** summaries are 27,074 tokens for LoCoMo's 208,043 tokens of
+  claims (7.7×; 272 sessions summarised) and 226,221 for LongMemEval's
+  1,035,923 (4.6×). They are additions to the context block, not replacements:
+  the block grows by 38% on LoCoMo.
+- **Cost:** consolidation took 33 s for all of LoCoMo (about 3.3 s per
+  conversation, 24 profiles) and 237 s for the 119 LongMemEval haystacks (about
+  2 s each), with no LLM.
+- **Quota:** about 1.1 points of the weekly plan for all QA in this section
+  (99.31% → 98.18% remaining).

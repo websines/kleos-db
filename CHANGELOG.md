@@ -17,6 +17,17 @@ to kleos.
 - **Documents by URL** (feature `docs-url`, off by default): `remember` attachments accept `http(s)` URLs, with public-address checks on every redirect hop, a 100 MB cap, timeouts and a document content-type check; the URL is kept in the document's metadata.
 - **Documents:** with an extractor configured, document chunks get entities (mentions, resolution, merges) in their batch's transaction; no kinship edges from documents.
 - **MCP:** `ontology` tool (list, facts, infer, learn, history, undo with confirmation) and `reembed` tool returning a task.
+- **Graph recall** (docs/specs/memory-api.md, "Graph recall"; `kleos-core/src/memory_graph.rs`).
+  - `recall {graph: 'inferred'}` pulls in memories linked to the question's nodes ("my", "my sister", names) and the top hits' subjects through the ontology's facts, inferred ones included ("Who are my relatives?" reaches the family through the new `relative_of` super-property). Hits say why (`via: "inferred: relative_of"`), in the list and the context block.
+  - `recall {graph: 'ppr', graph_weight}` re-ranks with a personalized PageRank (HippoRAG 2) over the memory / entity / ontology-node neighbourhood of the hits: the pool seeds the walk by relevance, hub entities and nodes are cut, at most 2,000 memories; it also runs the inferred expansion.
+  - Both off by default: on LoCoMo (301 QA, GLiNER entities) `ppr` was 0.764 against 0.774 and `inferred` 0.771; on LongMemEval (119) `ppr` was 0.647 against 0.605 (multi-session Rall@10 0.792 → 0.917). See docs/benchmarks/memory.md, "Graph recall and consolidation".
+- **Units of typed literals** (docs/specs/ontology.md, "Units"; `kleos-core/src/ontology_units.rs`): length, mass, temperature, duration, volume, speed and data convert to base units; currencies compare per ISO code (no exchange rates). Validation accepts convertible units, a single-valued value restated in another unit is not a change, `::ontology convert`.
+- **Consolidation** (docs/specs/consolidation.md, UPGRADE_PLAN E7; `kleos-core/src/memory_consolidate.rs`).
+  - `::memory consolidate` builds **entity profiles** (current ontology facts and cue/rule-typed claims per node, with valid-from and evidence) and **extractive session summaries** (centrality + MMR per conversation; memories of kind `summary`, role `other`, never authoritative). An OpenAI-compatible endpoint can make the summaries abstractive (off by default, `requests` feature).
+  - Rebuilt when their sources change; erased with them (`forget {mode: 'erase'}`).
+  - The context block shows the profiles of the hits' subjects and the summaries of their conversations ahead of the memories (`profiles`, `summaries` options); summary memories are hits only with `kind: 'summary'`.
+  - Automatic as the durable workflow `memory.consolidate` (built-in flow step `consolidate`): every N new memories (`every`) or on a schedule (`cron`).
+  - LoCoMo QA with summaries in the context block: 0.767 against 0.748 (multi-hop 0.673 → 0.727).
 - **TypeScript SDK (`sdk/ts`, package `kleos`).** See docs/sdk/typescript/.
   - **One client over two backends.** `open({ path })` runs an embedded store through the native module; `connect({ url, token })` talks to a `kleos server` over HTTP. Both have the same API and types, so switching is one line. `kleos/remote` is a fetch-only entry for serverless, edge and browser bundles.
   - **API.**

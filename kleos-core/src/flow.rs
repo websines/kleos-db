@@ -1171,6 +1171,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             "query" => self.flow_action_query(id, token, key, name, args),
             "remember" => self.flow_action_remember(id, token, key, name, args),
             "recall" => record(self.memory_call("recall", args.clone())?),
+            "consolidate" => record(self.memory_call("consolidate", args.clone())?),
             "embed" => {
                 let texts = flatten_texts(args.get("texts").unwrap_or(&JsonValue::Null))?;
                 let model = match args.get("embedder").and_then(|x| x.as_str()) {

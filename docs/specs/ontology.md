@@ -307,8 +307,16 @@ f[s, r, o2]     := f[s, p, o], f[o, q, o2], chain[r, p, q]
 Recursion is semi-naive, so transitive closures and chains of chains terminate.
 The program is generated per call from whatever ontology is active, so it works
 for imported ontologies (a FIBO-derived `isSubsidiaryOf` declared transitive
-gets its closure) exactly like for the default. `recall` can optionally expand
-over inferred edges (design; not built).
+gets its closure) exactly like for the default. `recall {graph: 'inferred'}`
+(and `graph: 'ppr'`) uses these facts, inferred ones included, to pull in
+memories linked to the question's nodes and properties (built; see
+"Graph recall" in docs/specs/memory-api.md).
+
+The personal pack's kinship relations have a common super-property,
+`relative_of` (symmetric; aliases relative, relatives, family member, kin):
+`partner`, `sibling_of`, `parent_of`, `child_of`, `grandparent_of`, `aunt_of`
+and `uncle_of` list it as a parent, so every family fact also derives
+`relative_of`. It is inferred only: claim typing never assigns it.
 
 ## Validation (built)
 
@@ -318,11 +326,32 @@ over inferred edges (design; not built).
 - domain and range: the subject's and object's classes (`kleos_onto_node`,
   through the class DAG) must be under one of the listed classes; unknown class
   passes with a warning;
-- data properties: `lit.datatype` must match `datatype`; `unit` must match when
-  the property has one;
+- data properties: `lit.datatype` must match `datatype`; `unit` must be the
+  property's unit or convert to it (see "Units");
 - cardinality: more than one current value of a `card: one` property for a
   subject;
 - `reject` refuses the whole assert; `flag` writes and returns the violations.
+
+## Units (built)
+
+`kleos-core/src/ontology_units.rs` brings a typed literal `{value, unit}` to
+its dimension's base unit with a small built-in table: length (m, km, cm, mm,
+mi, yd, ft, in), mass (kg, g, mg, t, lb, oz, st), temperature (K, °C, °F),
+duration (ms … years), volume (l, ml, gal), speed (m/s, km/h, mph) and data
+(B … TB, decimal). Currencies are a dimension per ISO 4217 code (`$`, `€`, `£`,
+`¥`, `₹` read as USD, EUR, GBP, JPY, INR): amounts compare only within one
+currency, with no exchange rates.
+
+- **Validation:** a value in another unit of the property's dimension passes
+  ("mi" for a property in "km"); another dimension is a `unit` violation.
+- **Supersession equality:** a single-valued fact restated in another unit
+  ("5000 m" after "5 km") is the same value: the stored fact stays current and
+  nothing ends. A different quantity ends the old value as before.
+- `::ontology convert {value, from, to}` converts a value (`{value, unit}`, or
+  an error for unknown units, different dimensions or two currencies).
+- `ontology_units::parse_quantity` reads a quantity from text ("5 km", "$1,500",
+  "72°F"; a short unit written as its own word, such as "5 in the park", is not
+  taken for one).
 
 ## Ops (built)
 
@@ -782,7 +811,7 @@ three bikes") was kept out of `supersedes` by two prototype-only types
 
 - ~~Branches~~, ~~extractor labels~~, ~~two kinship stores~~, ~~ontology
   learning~~, ~~courtesies~~: built in wave5/onto-auto.
-- **Recall over inferred edges** and **unit conversion**: designed, not built.
+- **Recall over inferred edges** and **unit conversion**: built (wave6/graph; "Inference", "Units", and "Graph recall" in docs/specs/memory-api.md).
 - **A branch cannot retract an inherited fact** (facts have no copy-up yet).
 - **Learning labels are word-based:** a cluster's label is its most
   distinctive word pair, not a canonical relation name; it reads well on

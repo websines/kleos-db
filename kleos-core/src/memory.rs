@@ -55,6 +55,12 @@ pub use reembed::ReembedOpts;
 /// Memory branches: fork, rewind, merge, diff, discard (docs/specs/memory-branches.md).
 #[path = "memory_branch.rs"]
 pub mod branch;
+// graph-aware recall: inferred ontology links and personalized PageRank
+#[path = "memory_graph.rs"]
+pub mod graph;
+// consolidation: entity profiles and session summaries (E7)
+#[path = "memory_consolidate.rs"]
+pub mod consolidate;
 use branch::{Scope, MEM_BRANCH, MEM_COPIED};
 pub use branch::{
     BranchInfo, BranchesOpts, DiffEntities, DiffMem, DiffOpts, DiffPending, DiffResult, DiscardOpts, DiscardResult,
@@ -207,6 +213,8 @@ const DEFAULT_EXPAND_WEIGHT: f64 = 0.5;
 const EXPAND_FROM: usize = 3;
 const EXPAND_MAX_DEGREE: usize = 25;
 const EXPAND_MAX_NEW: usize = 30;
+/// Session summaries a context block shows at most.
+const SUMMARIES_IN_CONTEXT: usize = 3;
 /// List hits of a claim of a longer statement carry this many characters of
 /// the statement around the claim as their `text` (`recall {hit_text,
 /// text_chars}`); 98% of LongMemEval's and all of LoCoMo's statements fit.
@@ -792,6 +800,19 @@ pub struct RecallOpts {
     /// What to search: `memory` and/or `docs` (document chunks); default
     /// both. `kind` overrides it.
     pub sources: Option<Vec<String>>,
+    /// Graph recall (memory_graph.rs): `off`, `inferred` (memories linked
+    /// through the ontology's facts, inferred ones included) or `ppr`
+    /// (personalized PageRank re-rank around the hits, plus `inferred`).
+    pub graph: Option<String>,
+    /// Share of the PageRank score in a `ppr` re-rank (default 0.3).
+    pub graph_weight: Option<f64>,
+    /// Entity profiles in the context block (memory_consolidate.rs; default
+    /// true when profiles exist).
+    pub profiles: Option<bool>,
+    /// Session summaries of the hits' conversations in the context block
+    /// (memory_consolidate.rs; default true when summaries exist). Summary
+    /// memories are hits only with `kind: 'summary'`.
+    pub summaries: Option<bool>,
 }
 
 /// Options of [`Db::memory_set`]: change a memory's importance, expiry or
@@ -1090,6 +1111,11 @@ pub struct RecallHit {
     /// heading}` (docs/specs/documents.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<JsonValue>,
+    /// Why graph recall included it: `inferred: <property>` (an inferred
+    /// ontology fact), `linked: <property>` (a stated one) or `graph`
+    /// (PageRank neighbourhood).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 impl RecallHit {
@@ -1919,17 +1945,23 @@ impl<'s, S: Storage<'s>> Db<S> {
             )
         };
         let mut filters = String::new();
-        if let Some(kd) = kind {
-            match kd.strip_prefix('!') {
-                Some(not) => {
-                    filters.push_str(", kind != $kind");
-                    p.push(("kind", s(not)));
-                }
-                None => {
-                    filters.push_str(", kind == $kind");
-                    p.push(("kind", s(kd)));
-                }
+        // summary memories (memory_consolidate.rs) are searched only when
+        // asked for by kind: the context block shows them per conversation
+        let mut not_kinds: Vec<String> = vec![];
+        match kind {
+            Some(kd) if !kd.starts_with('!') => {
+                filters.push_str(", kind == $kind");
+                p.push(("kind", s(kd)));
             }
+            Some(kd) => {
+                not_kinds.push(kd[1..].to_string());
+                not_kinds.push(consolidate::SUMMARY_KIND.to_string());
+            }
+            None => not_kinds.push(consolidate::SUMMARY_KIND.to_string()),
+        }
+        if !not_kinds.is_empty() {
+            filters.push_str(", !is_in(kind, $not_kinds)");
+            p.push(("not_kinds", str_list(&not_kinds)));
         }
         if let Some(eids) = entity {
             // every row of the entity's cluster (merged names included)
@@ -2911,6 +2943,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 Err(e) => serde_json::json!({"error": format!("{e}")}),
             });
         }
+        // consolidation every N new memories, when configured (best effort)
+        self.consolidate_after_remember(&ns, if res.claims.is_empty() { usize::from(res.id.is_some()) } else { res.claims.iter().filter(|c| c.action == "added").count() });
         Ok(res)
     }
 
@@ -3569,6 +3603,14 @@ impl<'s, S: Storage<'s>> Db<S> {
             None | Some("list") | Some("context") => {}
             Some(f) => bail!("`recall` option format must be 'list' or 'context', got '{f}'"),
         }
+        let gmode = opts.graph.clone().unwrap_or_else(|| graph::DEFAULT_GRAPH_MODE.to_string());
+        if !graph::GRAPH_MODES.contains(&gmode.as_str()) {
+            bail!("`recall` option graph must be 'off', 'inferred' or 'ppr', got '{gmode}'");
+        }
+        let gw = opts.graph_weight.unwrap_or(graph::DEFAULT_GRAPH_WEIGHT);
+        if !(0.0..=1.0).contains(&gw) {
+            bail!("`recall` option graph_weight must be in [0, 1], got {gw}");
+        }
         let diversity = opts.diversity.unwrap_or(true);
         let max_stmt = opts.max_per_statement.unwrap_or(DEFAULT_MAX_PER_STATEMENT);
         let max_src = opts.max_per_source.unwrap_or(DEFAULT_MAX_PER_SOURCE);
@@ -3653,6 +3695,29 @@ impl<'s, S: Storage<'s>> Db<S> {
                     rows.push(r);
                 }
             }
+        }
+        // graph recall: inferred ontology links, PageRank (memory_graph.rs)
+        let mut via: BTreeMap<String, String> = BTreeMap::new();
+        // (inferred links need no hit: the query's own nodes can seed them)
+        if gmode != "off" && eids.is_none() {
+            let g = self.graph_recall(&sc, &ns, query, &gmode, &rows, we, gw, opts.as_of, opts.kind.as_deref())?;
+            for r in rows.iter_mut() {
+                if let Some(id) = cell_str(&r[0]) {
+                    if let Some(&v) = g.set.get(&id) {
+                        if g.replace || v > r[1].get_float().unwrap_or(0.0) {
+                            r[1] = DataValue::from(v);
+                        }
+                    }
+                }
+            }
+            for r in g.new_rows {
+                if let Some(id) = cell_str(&r[0]) {
+                    if expanded.insert(id) {
+                        rows.push(r);
+                    }
+                }
+            }
+            via = g.via;
         }
         let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
         let iv = intervals(&self.mem_history(&sc, &ids)?, read_at);
@@ -3814,11 +3879,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                     claim: None,
                     events: sev.get(&id).cloned().unwrap_or_default(),
                     doc: None,
+                    via: via.get(&id).cloned(),
                     id,
                 })
             })
             .collect();
-        if blend || !expanded.is_empty() || !qdates.is_empty() {
+        if blend || !expanded.is_empty() || !qdates.is_empty() || gmode != "off" {
             // stable: equal scores keep the relevance order
             hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         }
@@ -4004,6 +4070,8 @@ impl<'s, S: Storage<'s>> Db<S> {
     pub fn recall_context(&'s self, query: &str, opts: RecallOpts) -> Result<memory_recall::RecallContext> {
         let budget = opts.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
         let show_source = opts.show_source;
+        let want_profiles = opts.profiles.unwrap_or(true);
+        let want_summaries = opts.summaries.unwrap_or(true);
         let ns = ns_of(&opts.ns);
         let sc = self.mem_scope(&ns)?;
         let read_at = opts.as_of.unwrap_or_else(now_micros);
@@ -4100,6 +4168,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 cite: h.doc.as_ref().and_then(|d| serde_json::from_value::<DocCite>(d.clone()).ok()).map(|d| d.cite()),
                 doc_name: h.doc.as_ref().and_then(|d| d.get("name")).and_then(|x| x.as_str()).map(|x| x.to_string()),
                 doc_page: h.doc.as_ref().and_then(|d| d.get("page")).and_then(|x| x.as_u64()).map(|x| x as usize),
+                via: h.via,
                 id: h.id,
                 text: h.text,
                 valid_from: h.valid_from,
@@ -4109,7 +4178,62 @@ impl<'s, S: Storage<'s>> Db<S> {
                 context: h.context,
             })
             .collect();
-        Ok(memory_recall::render_context(&items, budget, show_source))
+        // entity profiles of the hits' subjects and entities, ahead of the
+        // memories, while the budget lasts (memory_consolidate.rs)
+        let mut nodes: BTreeSet<String> = BTreeSet::new();
+        if want_profiles {
+            for it in &items {
+                for e in &it.entities {
+                    nodes.insert(e.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase());
+                }
+            }
+            for (_, n) in self.subjects_of(&sc, &ids)? {
+                nodes.insert(n);
+            }
+        }
+        let profiles = self.profiles_of(&ns, &nodes)?;
+        // session summaries of the hits' conversations, best-ranked first
+        let groups: Vec<String> = if want_summaries {
+            items.iter().filter_map(|it| it.source.as_deref().map(|s| memory_recall::source_group(s).to_string())).unique().collect()
+        } else {
+            vec![]
+        };
+        let summaries = self.summaries_of(&ns, &groups)?;
+        if profiles.is_empty() && summaries.is_empty() {
+            return Ok(memory_recall::render_context(&items, budget, show_source));
+        }
+        let mut cost = 0usize;
+        let mut take = |texts: Vec<String>, reserve: usize, max: usize| -> Vec<String> {
+            let mut out = vec![];
+            let mut used = 0usize;
+            for t in texts.into_iter().take(max) {
+                let c = memory_recall::estimate_tokens(&t) + 3;
+                if used + c > reserve {
+                    continue;
+                }
+                used += c;
+                out.push(format!("- {t}"));
+            }
+            cost += used;
+            out
+        };
+        let plines = take(profiles.into_iter().map(|x| x.1).collect(), budget / 4, usize::MAX);
+        let slines = take(summaries, budget / 5, SUMMARIES_IN_CONTEXT);
+        let mut ctx = memory_recall::render_context(&items, budget.saturating_sub(cost), show_source);
+        let mut block = String::new();
+        if !plines.is_empty() {
+            block.push_str(&format!("Profiles (current facts per person or thing):\n{}\n\n", plines.join("\n")));
+        }
+        if !slines.is_empty() {
+            block.push_str(&format!("Conversation summaries (the most central statements of each):\n{}\n\n", slines.join("\n")));
+        }
+        if !block.is_empty() {
+            ctx.text = format!("{block}{}", ctx.text);
+            ctx.tokens = memory_recall::estimate_tokens(&ctx.text);
+            ctx.budget = budget;
+            ctx.profiles = plines;
+        }
+        Ok(ctx)
     }
 
     /// The last version of each memory that started at or before `t`: its
@@ -4438,6 +4562,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             let other = (*f != ns).then(|| ns_gate(f));
             let _held = other.as_ref().map(|g| g.commit());
             erased.extend(self.erase_in(&cfg, f, &ids)?);
+        }
+        // what was derived from them goes too (summaries, profiles)
+        for f in &family {
+            self.consolidated_erase(&cfg, f, &erased)?;
         }
         Ok(ForgetResult { mode, ids: erased.into_iter().collect() })
     }
@@ -4842,9 +4970,11 @@ impl<'s, S: Storage<'s>> Db<S> {
             "branches" => serde_json::to_value(self.memory_branches(from_args(op, args)?)?).into_diagnostic()?,
             // moving the store's vectors to another embedder (memory_reembed.rs)
             "reembed" => self.memory_reembed(from_args(op, args)?)?,
+            // profiles and summaries (memory_consolidate.rs)
+            "consolidate" => self.memory_consolidate(from_args(op, args)?)?,
             other => bail!(
                 "unknown memory op '{other}': expected init, remember, recall, forget, reflect, link, set, flush, \
-                 fork, rewind, merge, diff, discard, branches or reembed"
+                 fork, rewind, merge, diff, discard, branches, reembed or consolidate"
             ),
         };
         Ok(out)
