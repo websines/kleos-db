@@ -172,6 +172,9 @@ pub struct RecallContext {
     pub ids: Vec<String>,
     /// Recalled memories left out because the budget was spent.
     pub omitted: Vec<String>,
+    /// Entity profiles shown ahead of the memories (memory_consolidate.rs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
 }
 
 /// One earlier value of a memory: the memory it superseded.
@@ -516,6 +519,7 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         budget,
         ids,
         omitted,
+        profiles: vec![],
     }
 }
 

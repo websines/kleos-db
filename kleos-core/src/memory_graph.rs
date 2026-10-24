@@ -202,7 +202,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     }
 
     /// Claim subjects (`kleos_mem_type`) of `ids`, as node keys.
-    fn subjects_of(&'s self, sc: &Scope, ids: &[String]) -> Result<Vec<(String, String)>> {
+    pub(crate) fn subjects_of(&'s self, sc: &Scope, ids: &[String]) -> Result<Vec<(String, String)>> {
         if ids.is_empty() || !self.rel_exists(crate::ontology::MEM_TYPE) {
             return Ok(vec![]);
         }

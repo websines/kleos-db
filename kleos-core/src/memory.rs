@@ -58,6 +58,9 @@ pub mod branch;
 // graph-aware recall: inferred ontology links and personalized PageRank
 #[path = "memory_graph.rs"]
 pub mod graph;
+// consolidation: entity profiles and session summaries (E7)
+#[path = "memory_consolidate.rs"]
+pub mod consolidate;
 use branch::{Scope, MEM_BRANCH, MEM_COPIED};
 pub use branch::{
     BranchInfo, BranchesOpts, DiffEntities, DiffMem, DiffOpts, DiffPending, DiffResult, DiscardOpts, DiscardResult,
@@ -2835,6 +2838,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 Err(e) => serde_json::json!({"error": format!("{e}")}),
             });
         }
+        // consolidation every N new memories, when configured (best effort)
+        self.consolidate_after_remember(&ns, if res.claims.is_empty() { usize::from(res.id.is_some()) } else { res.claims.iter().filter(|c| c.action == "added").count() });
         Ok(res)
     }
 
@@ -3960,6 +3965,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     pub fn recall_context(&'s self, query: &str, opts: RecallOpts) -> Result<memory_recall::RecallContext> {
         let budget = opts.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
         let show_source = opts.show_source;
+        let want_profiles = opts.profiles.unwrap_or(true);
         let ns = ns_of(&opts.ns);
         let sc = self.mem_scope(&ns)?;
         let read_at = opts.as_of.unwrap_or_else(now_micros);
@@ -4066,7 +4072,43 @@ impl<'s, S: Storage<'s>> Db<S> {
                 context: h.context,
             })
             .collect();
-        Ok(memory_recall::render_context(&items, budget, show_source))
+        // entity profiles of the hits' subjects and entities, ahead of the
+        // memories, while the budget lasts (memory_consolidate.rs)
+        let mut nodes: BTreeSet<String> = BTreeSet::new();
+        if want_profiles {
+            for it in &items {
+                for e in &it.entities {
+                    nodes.insert(e.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase());
+                }
+            }
+            for (_, n) in self.subjects_of(&sc, &ids)? {
+                nodes.insert(n);
+            }
+        }
+        let profiles = self.profiles_of(&ns, &nodes)?;
+        if profiles.is_empty() {
+            return Ok(memory_recall::render_context(&items, budget, show_source));
+        }
+        let mut lines: Vec<String> = vec![];
+        let mut cost = 0usize;
+        let reserve = budget / 4;
+        for (_, t) in profiles {
+            let c = memory_recall::estimate_tokens(&t) + 3;
+            if cost + c > reserve {
+                continue;
+            }
+            cost += c;
+            lines.push(format!("- {t}"));
+        }
+        let mut ctx = memory_recall::render_context(&items, budget.saturating_sub(cost), show_source);
+        if !lines.is_empty() {
+            let block = format!("Profiles (current facts per person or thing):\n{}\n\n", lines.join("\n"));
+            ctx.text = format!("{block}{}", ctx.text);
+            ctx.tokens = memory_recall::estimate_tokens(&ctx.text);
+            ctx.budget = budget;
+            ctx.profiles = lines;
+        }
+        Ok(ctx)
     }
 
     /// The last version of each memory that started at or before `t`: its
@@ -4395,6 +4437,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             let other = (*f != ns).then(|| ns_gate(f));
             let _held = other.as_ref().map(|g| g.commit());
             erased.extend(self.erase_in(&cfg, f, &ids)?);
+        }
+        // what was derived from them goes too (summaries, profiles)
+        for f in &family {
+            self.consolidated_erase(&cfg, f, &erased)?;
         }
         Ok(ForgetResult { mode, ids: erased.into_iter().collect() })
     }
@@ -4799,9 +4845,11 @@ impl<'s, S: Storage<'s>> Db<S> {
             "branches" => serde_json::to_value(self.memory_branches(from_args(op, args)?)?).into_diagnostic()?,
             // moving the store's vectors to another embedder (memory_reembed.rs)
             "reembed" => self.memory_reembed(from_args(op, args)?)?,
+            // profiles and summaries (memory_consolidate.rs)
+            "consolidate" => self.memory_consolidate(from_args(op, args)?)?,
             other => bail!(
                 "unknown memory op '{other}': expected init, remember, recall, forget, reflect, link, set, flush, \
-                 fork, rewind, merge, diff, discard, branches or reembed"
+                 fork, rewind, merge, diff, discard, branches, reembed or consolidate"
             ),
         };
         Ok(out)
