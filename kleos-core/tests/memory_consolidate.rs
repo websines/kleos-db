@@ -131,11 +131,42 @@ fn consolidation_runs_as_a_workflow() {
     for (i, t) in CHAT.iter().enumerate() {
         rem(&db, t, i as i64, &format!("chat-9#{i}"));
     }
-    // every 5 new memories started a run; a worker runs it
-    for _ in 0..4 {
+    // every 5 new memories started a run; the store's in-process runner (or
+    // this explicit tick, whichever claims it first) runs it
+    let mut n = 0;
+    for _ in 0..100 {
         let _ = db.flow_call("tick", json!({"max": 4, "schedules": false, "lease_ms": 2000}));
+        n = rows(&db, "?[sid] := *kleos_mem_summary{ns: 'u', sid}");
+        if n == 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let l = db.flow_call("list", json!({"workflow": "memory.consolidate"})).unwrap();
     assert!(l.as_array().is_some_and(|a| !a.is_empty()), "{l}");
-    assert_eq!(rows(&db, "?[sid] := *kleos_mem_summary{ns: 'u', sid}"), 1);
+    assert_eq!(n, 1);
+}
+
+/// Automatic consolidation runs in-process with no worker started by the
+/// caller: after `every` new memories the store builds profiles on its own,
+/// and the context block shows them.
+#[test]
+fn auto_consolidation_runs_in_process() {
+    let db = db();
+    db.memory_call("consolidate", json!({"ns": "u", "every": 3, "summaries": false})).unwrap();
+    rem(&db, "I live in Paris.", 1, "a#1");
+    rem(&db, "My sister Anna lives in Munich.", 2, "a#2");
+    rem(&db, "I work at Siemens as an engineer.", 3, "a#3");
+    let q = "?[node] := *kleos_mem_profile{ns: 'u', node}, node = 'user'";
+    let mut built = false;
+    for _ in 0..100 {
+        if rows(&db, q) > 0 {
+            built = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(built, "no profile built by the in-process consolidation runner");
+    let ctx = db.recall_context("Where do I live?", RecallOpts { ns: Some("u".into()), ..Default::default() }).unwrap();
+    assert!(ctx.text.starts_with("Profiles (current facts"), "{}", ctx.text);
 }
