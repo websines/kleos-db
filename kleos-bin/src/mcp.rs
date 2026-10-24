@@ -747,7 +747,7 @@ impl McpServer {
         if let Backend::Embedded(db) = &self.backend {
             let mut w = self.worker.lock().unwrap();
             if w.is_none() {
-                *w = Some(db.flow_worker(kleos::FlowWorkerOpts { queues: vec!["default".into()], ..Default::default() }));
+                *w = Some(db.flow_worker(kleos::FlowWorkerOpts { queues: vec!["default".into(), "consolidate".into()], ..Default::default() }));
             }
         }
     }
@@ -768,7 +768,8 @@ impl McpServer {
     }
 
     /// Entity profiles and session summaries: a task when the client takes
-    /// tasks (the `memory.consolidate` workflow), else run inside the call.
+    /// tasks (the `memory.consolidate` workflow on the `consolidate` queue,
+    /// as automatic consolidation uses), else run inside the call.
     fn consolidate(&self, ns: &str, args: &Value, era: &Era) -> ToolOut {
         let mut opts = json!({"ns": ns});
         for k in ["profiles", "summaries"] {
@@ -782,7 +783,7 @@ impl McpServer {
             let def = json!({"name": "memory.consolidate",
                 "graph": {"steps": [{"name": "consolidate", "consolidate": {"ns": "$input.ns"}, "retry": {"max_attempts": 3}}]}});
             let started = b.call(Area::Flow, "define", def).and_then(|_| {
-                b.call(Area::Flow, "start", json!({"workflow": "memory.consolidate", "input": {"ns": ns}, "serial": format!("consolidate:{ns}")}))
+                b.call(Area::Flow, "start", json!({"workflow": "memory.consolidate", "input": {"ns": ns}, "serial": format!("consolidate:{ns}"), "queue": "consolidate"}))
             });
             return match started {
                 Ok(v) => match v.get("id").and_then(|i| i.as_str()) {
