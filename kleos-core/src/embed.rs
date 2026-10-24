@@ -219,8 +219,8 @@ pub fn registered_embedders() -> Vec<(String, usize)> {
 /// What [`enable_embedder`] (and `::embedder enable`) should build. Every
 /// field is optional:
 ///
-/// * `model`: `embeddinggemma` (default; also `gemma` or
-///   `google/embeddinggemma-300m`), or a Model2Vec model such as
+/// * `model`: `embeddinggemma` (default: EmbeddingGemma 2, `google/embeddinggemma-2`;
+///   also `gemma`), `embeddinggemma-300m` / `gemma-v1` (v1, gated), or a Model2Vec model such as
 ///   `potion-base-8M` / `minishlab/potion-base-8M` (a bare `potion-*` name
 ///   resolves to the `minishlab` repo; any other `owner/repo` is read as a
 ///   Model2Vec model).
