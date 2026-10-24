@@ -267,6 +267,8 @@ Options:
 - `record_access`: count the returned memories as accessed. Default true; read-only `::memory recall` scripts never count;
 - diversity: `diversity` (default true), `max_per_statement` (default 1), `max_per_source` (default 0, no cap), `mmr_weight` (default 0), `pool` (see "Diversity");
 - `expand` (default false) and `expand_weight` (default 0.5): entity-graph expansion (see "Entity expansion");
+- `graph` (`off` default, `inferred`, `ppr`) and `graph_weight` (default 0.3): graph recall over inferred ontology links and personalized PageRank (see "Graph recall"); hits it added or raised carry `via`;
+- `profiles` (default true): entity profiles ahead of the memories in the context block (docs/specs/consolidation.md);
 - `assistant_weight` (default 0.05) and `role` (a filter): see "Speaker roles";
 - `from`, `to` (µs): only memories whose validity starts in `[from, to)` (see "Valid-from filters");
 - `format`: `list` (the default) or `context`, with `budget` (tokens, default 2000) and `show_source` (default false): see "Context output";
@@ -550,6 +552,58 @@ Options of `remember`: `extract` (default on; `false` off for the call, `true` r
 **Edge output shape** (for typed-edge consumers): `kleos_mem_link {ns, src, rel, dst => created, p, decided_by}` with `src` and `dst` entity ids of `kleos_mem_entity` (resolve canonical ids through `kleos_entity_merge`), `rel` the relation word, `decided_by = 'gliner-rule'`; and in `RememberResult.edges`: `{src, src_name, rel, dst, dst_name, p}`. Relative nodes are ordinary `kleos_mem_entity` rows whose name has the `<possessor>'s <relation>` form; they are linked from the memories that mention them (`kleos_mem_mention`) like any entity.
 
 **Precision.** f16 is the default; f32 and q8 (weight-only) are options. On the gold set every precision gives the same spans at the thresholds above (zero label flips, Rust vs gliner2 at f32 identical). LayerNorm, relative positions and the span head always run in f32.
+
+## Graph recall
+
+*Code: `kleos-core/src/memory_graph.rs`. Tests: `kleos-core/tests/memory_graph.rs`.*
+
+`recall {graph: 'off' | 'inferred' | 'ppr', graph_weight?}` adds the memory
+graph to the hybrid search. Default: `off`: `ppr` helped LongMemEval (QA +5
+net, multi-session Rall@10 0.792 → 0.917) and hurt LoCoMo (QA −3 net, all
+multi-hop), and `inferred` rarely fires on either (docs/benchmarks/memory.md,
+"Graph recall and consolidation").
+
+**`inferred`: memories reached through the ontology's facts.** The facts of
+the namespace (its lineage, each level as of its cut) and everything the active
+ontology infers from them (symmetric, inverse, sub-property, transitive,
+chains, `same_as`; "Inference" in docs/specs/ontology.md) link nodes. Seed
+nodes are:
+
+- the claim subjects and fact nodes of the top hits (each at that hit's
+  relevance);
+- the nodes the question names: `user` for first-person words, `user.<kin>`
+  for "my sister", any node key as a word ("Anna").
+
+A fact touching a seed node reaches its other end when the question asks about
+its property (an alias or a content word of the property's name: "relatives"
+→ `relative_of`, "live" → `lives_in`); with no such property, only inferred
+facts count (stated ones are what the search already finds). The memories
+about a reached node (its claims, the evidence of its facts, memories
+mentioning an entity of that name) join the pool at `expand_weight` (0.5) ×
+the seed's relevance, at most 20 new ones, each with `via` (`inferred:
+relative_of`, `linked: lives_in`). The context block shows it: `- [2026-01-03]
+Anna loves hiking in the Alps. (via inferred: relative_of)`. It needs no hit:
+"Who are my relatives?" finds the family through `user` alone.
+
+**`ppr`: personalized PageRank re-rank** (HippoRAG 2, arXiv 2502.14802). The
+graph around the top 10 hits:
+
+- memory nodes, entity nodes (canonical, merges followed) and ontology nodes;
+- edges: mentions, claim subjects, fact evidence, ontology facts (inferred at
+  weight 0.5), entity ↔ node by name, claims of one statement;
+- two hops: the pool's entities and nodes, then their other memories, with
+  entities mentioned by more than 100 memories not expanded, and at most 2,000
+  memories.
+
+The restart distribution is the hits by relevance plus the question's nodes
+and entities; damping 0.5, up to 30 iterations. A pool memory's relevance
+becomes `(1 − graph_weight) × relevance + graph_weight × PPR` (PPR scaled to
+the top relevance; `graph_weight` default 0.3), and up to 20 memories outside
+the pool join with `graph_weight × PPR` (`via: graph`). It also runs the
+`inferred` expansion.
+
+Both modes skip when `entity` is set. Graph rows are subject to the same
+filters (kind, validity, archive, expiry) and to the diversity selection.
 
 ## Concurrency and memory budget
 

@@ -198,6 +198,7 @@ def recall(db, ns, query, owner, k, **opts):
             "events": h.get("events") or None,
             "score": h.get("score"),
             "valid_from": h.get("valid_from"),
+            "via": h.get("via"),
             "pending_superseded_by": h.get("pending_superseded_by"),
             "text": h["text"][:4000],
         })
@@ -233,6 +234,10 @@ def run_lme(args, outdir):
         t0 = time.perf_counter()
         owner, st, lat = ingest(db, ns, units)
         ingest_s = time.perf_counter() - t0
+        if args.consolidate:
+            c0 = time.perf_counter()
+            st["consolidate"] = db.memory_consolidate(ns=ns)
+            st["consolidate_s"] = time.perf_counter() - c0
         ro0 = {"as_of": C.lme_ts(x["question_date"])} if args.as_of == "question" else {}
         per = {}
         for cname, copts in configs.items():
@@ -317,6 +322,10 @@ def run_locomo(args, outdir):
         t0 = time.perf_counter()
         owner, st, lat = ingest(db, ns, units)
         ingest_s = time.perf_counter() - t0
+        if args.consolidate:  # profiles and summaries (docs/specs/consolidation.md)
+            c0 = time.perf_counter()
+            st["consolidate"] = db.memory_consolidate(ns=ns)
+            st["consolidate_s"] = time.perf_counter() - c0
         per = {c: [] for c in configs}
         last_at = max(u["at"] for u in units)
         for qi, q in enumerate(conv["qa"]):
@@ -379,6 +388,7 @@ def main():
                     help="read time for recall: 'now' (default) or the question's date (LongMemEval), so the "
                          "recency blend sees the age a live agent would")
     ap.add_argument("--tag", default=os.environ.get("KLEOS_BENCH_TAG") or C.git_rev())
+    ap.add_argument("--consolidate", action="store_true", help="run ::memory consolidate after each ingest (profiles, summaries)")
     ap.add_argument("--ontology", default=None, help="activate an ontology per namespace: 'personal[:decide|pending|dup_only]'")
     args = ap.parse_args()
     args.shard_i, args.shard_n = map(int, args.shard.split("/"))
