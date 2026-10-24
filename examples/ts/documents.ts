@@ -1,6 +1,7 @@
 // Attaching documents and citing pages. Small documents ingest inside
 // `remember`; big ones (PDFs over 4 pages) return at once with status
-// "running" and ingest in the background, recallable batch by batch.
+// "running" and ingest in the background (a worker thread starts on its
+// own), recallable batch by batch.
 import { open, nativeFeatures } from 'kleos';
 import { join } from 'node:path';
 import { tempDir } from './_util.ts';
@@ -13,8 +14,6 @@ if (!nativeFeatures().includes('docs')) {
 
 const kleos = open({ path: join(tempDir(), 'docs.db') });
 await kleos.init();
-// the worker that ingests big documents in the background
-const worker = kleos.flowWorker({ queues: ['docs'] });
 
 const handbook = [
   '# Support handbook',
@@ -53,6 +52,5 @@ const again = await kleos.remember('The handbook again.', {
 });
 console.log('re-upload:', again.documents?.[0]?.status);
 
-worker.stop();
 await kleos.close();
 console.log('ok: documents');

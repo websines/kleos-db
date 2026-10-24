@@ -10,6 +10,18 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **TypeScript SDK (`sdk/ts`, package `kleos`).** See docs/sdk/typescript/.
+  - **One client over two backends.** `open({ path })` runs an embedded store through the native module; `connect({ url, token })` talks to a `kleos server` over HTTP. Both have the same API and types, so switching is one line. `kleos/remote` is a fetch-only entry for serverless, edge and browser bundles.
+  - **API.**
+    - Memory: `remember` (claims, entities, attachments, priority), `recall`, `recallContext`, `forget`, `reflect`, `set`, `flush`, `link` and `profile`.
+    - Branches: `fork`, `diff`, `merge`, `rewind`, `discard` and `branches`, plus `reembed`.
+    - Ontology, documents, workflows and queries: `ontology`, `docs`, `flow`, `flowWorker` and `run`.
+    - Models: enabling and disabling embedders, deciders and extractors.
+    
+    Options take camelCase or snake_case; results are kleos's JSON. Errors are `KleosError` with `op` and (remote) `status`.
+  - **MCP client.** A stateless client for protocol 2026-07-28 over Streamable HTTP and stdio (`kleos mcp`), with multi-round-trip confirmations (`onInputRequired`) and the Tasks extension.
+  - **Native binding.** `kleos-lib-nodejs` moves from neon to napi-rs. It is a thin JSON layer over `DbInstance::memory_call`, `ontology_call`, `flow_call` and `doc_call` and `run_script`, and every call runs on the libuv pool, so the event loop is never blocked. Node-API 8 means one build covers Node 18–24. Features: compact by default, with `infer`, `infer-metal`, `docs` and `engram` optional.
+  - **Tests (`npm test`).** Both backends, MCP over HTTP and stdio, an event-loop test, a parity test against the Python binding, every example under `examples/ts/`, and a check that the code in the docs matches those examples.
 - **Agent surfaces: stateless MCP server, `kleos` CLI and skills** (docs/specs/mcp-cli-skills.md).
   - **MCP, protocol 2026-07-28**, implemented in `kleos-bin` (`mcp.rs`, no SDK): no sessions or `initialize` for modern clients (per-request `_meta` version and capabilities, `server/discover`, `UnsupportedProtocolVersion` -32022), every result typed (`resultType`) and signed with `serverInfo`, `tools/list` / `resources/*` in a fixed order with `ttlMs` and `cacheScope`. Tools: `recall` (context block by default), `remember`, `forget`, `reflect`, `entity_profile`, `doc_add`, `doc_status`, `flow`, `branch`, and read-only `query` behind `--allow-query`. Destructive calls (`forget`, `branch` merge/rewind/discard) confirm through Multi Round-Trip Requests with an HMAC-signed, expiring, principal- and call-bound `requestState` (`KLEOS_MCP_STATE_KEY` to share across instances), or `confirm: true` for clients without elicitation. Large `doc_add` calls return a Tasks-extension task whose id is the ingestion workflow (`tasks/get`, `tasks/cancel`). Resources: namespaces, documents, entity profiles. Dual-era: `initialize` from 2025-11-25 / 2025-06-18 / 2025-03-26 clients selects legacy semantics without a session.
   - **Transports:** `kleos mcp` (stdio) and `kleos server --mcp` (`POST /mcp`: `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` validated against the body, base64 sentinel decoded, `HeaderMismatch` -32020; foreign `Origin` 403; notifications 202; `GET`/`DELETE` 405; session ids ignored, never minted). The server also accepts its admin secret as `Authorization: Bearer`.
