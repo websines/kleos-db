@@ -4,7 +4,7 @@
 //! ```text
 //! cargo +1.99.0 run --release --features infer-metal --example onto_baseline -- <model> [device]
 //! ```
-use kleos::ontology::{proto_baseline, prototypes, Active, OntologyDoc, PERSONAL};
+use kleos::ontology::{claim_anchors, proto_baseline, proto_neighbour, prototypes, Active, OntologyDoc, PERSONAL};
 use kleos::DbInstance;
 
 fn main() {
@@ -16,5 +16,6 @@ fn main() {
     let d: OntologyDoc = serde_json::from_str(PERSONAL).unwrap();
     let act = Active::merge(&[d], "cardinality", "decide");
     let ps = prototypes(&act, "onto_b").unwrap();
-    println!("{model}: {} prototypes, baseline {:.4}", ps.len(), proto_baseline(&ps));
+    println!("{model}: {} prototypes, baseline {:.4}, nearest-neighbour {:.4}", ps.len(), proto_baseline(&ps), proto_neighbour(&ps));
+    println!("  claim anchors (mean, mean best): {:?}", claim_anchors(&ps));
 }

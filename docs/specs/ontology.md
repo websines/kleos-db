@@ -477,6 +477,27 @@ added) as a new version, and marks it undone.
 packs (FIBO for finance, schema.org medical, LKIF legal, schema.org software)
 as review-only `pack` proposals, with a learning dry run.
 
+## Calibration (built)
+
+Prototype typing and the learning thresholds compare cosine similarities, and
+embedders put unrelated texts at very different similarities: the mean
+pairwise cosine of the personal pack's prototypes is 0.432 under
+EmbeddingGemma v1 and 0.703 under EmbeddingGemma 2 (`examples/onto_baseline.rs`).
+Thresholds tuned under v1 therefore typed far too much under v2 (4× the
+LoCoMo claims, 14.7 candidates per KU question kept out of `supersedes`
+against 2.3).
+
+Each prototype set's own baseline *b* (its mean pairwise cosine, cached with
+the set, so it follows the active embedder and recalibrates after a model
+swap or `::memory reembed`) maps every similarity onto the reference scale
+(v1's, `BASELINE_REF` 0.432): `ref = 0.432 + (s − b) · 0.568 / (1 − b)`.
+Typing scores (and the stored `kleos_mem_type.score`) are on that scale, so
+`PROTO_MIN`, the margin and `CONFIDENT` mean the same for any embedder;
+learning's clustering, vocabulary, coherence and merge thresholds move the
+other way (`calibrated(t, b)`). The mapping is one-sided: an embedder with a
+baseline below the reference keeps the absolute thresholds, so calibration
+never types more loosely than tuned.
+
 ## Extractor labels (built)
 
 The classes of the active ontology that are not the personal pack's (up to

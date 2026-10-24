@@ -417,11 +417,40 @@ lazy_static! {
 /// thresholds were tuned: EmbeddingGemma v1 on the personal pack's
 /// prototypes (docs/specs/ontology.md, "Calibration").
 pub const BASELINE_REF: f64 = 0.4318;
+/// [`proto_neighbour`] under the reference embedder.
+pub const NEIGHBOUR_REF: f64 = 0.0;
 
 /// Mean pairwise cosine of a prototype set: how similar unrelated
 /// properties look to this embedder. Embedders differ a lot here
 /// (EmbeddingGemma 2 puts most texts around 0.7), so absolute thresholds
 /// are rescaled to it ([`calibrated`]).
+/// The mean, over a prototype set, of each prototype's similarity to its
+/// nearest other prototype: how alike two *different but related*
+/// properties look to this embedder (the level that decides "confidently
+/// different").
+pub fn proto_neighbour(ps: &[(usize, Vec<f32>)]) -> f64 {
+    if ps.len() < 2 {
+        return NEIGHBOUR_REF;
+    }
+    let key = (ps.as_ptr() as usize, ps.len() + 1_000_000);
+    if let Some(b) = BASELINES.lock().unwrap().get(&key) {
+        return *b;
+    }
+    let mut sum = 0.0;
+    for i in 0..ps.len() {
+        let mut best = f64::MIN;
+        for j in 0..ps.len() {
+            if i != j {
+                best = best.max(cosine32(&ps[i].1, &ps[j].1));
+            }
+        }
+        sum += best;
+    }
+    let q = sum / ps.len() as f64;
+    BASELINES.lock().unwrap().insert(key, q);
+    q
+}
+
 pub fn proto_baseline(ps: &[(usize, Vec<f32>)]) -> f64 {
     if ps.len() < 2 {
         return BASELINE_REF;
@@ -490,7 +519,76 @@ pub fn calibrated_margin(m: f64, b: f64) -> f64 {
     m * (1.0 - b) / (1.0 - BASELINE_REF)
 }
 
-/// The prototype vectors of `act` under `embedder` (cached).
+/// Generic statements (not from any benchmark) whose scores against a
+/// prototype set calibrate claim typing per embedder ([`claim_anchors`]).
+pub const CALIB_CLAIMS: &[&str] = &[
+    "I moved to a new apartment near the river last spring.", "My brother works as a nurse at the city hospital.",
+    "I have been learning to play the guitar for two years.", "We adopted a rescue dog named Pepper in March.",
+    "I'm allergic to peanuts and shellfish.", "My favorite cuisine is Thai food.", "I drive a ten-year-old Honda Civic.",
+    "I go running three times a week before work.", "My daughter just started kindergarten.", "I switched jobs and now work in marketing.",
+    "I usually read mystery novels before bed.", "Our team uses Python for most of our data pipelines.",
+    "I visited Japan for the first time last year.", "My rent went up by two hundred dollars this month.",
+    "I'm trying to cut down on coffee.", "My grandmother turns ninety next week.", "I volunteer at the food bank on Saturdays.",
+    "I prefer working from home on Fridays.", "I bought a new laptop for video editing.", "My phone number changed when I switched carriers.",
+    "I've been saving up for a down payment on a house.", "I take the train to the office most days.",
+    "My partner and I are planning a trip to Portugal.", "I started a vegetable garden in the backyard.",
+    "I watch a lot of documentaries about history.", "I speak Spanish and a little French.", "My doctor told me to lower my cholesterol.",
+    "I have three cats and a parrot.", "I play in a recreational soccer league.", "I collect vintage vinyl records.",
+    "My birthday is in late October.", "I graduated with a degree in chemistry.", "I'm on a strict budget until the end of the year.",
+    "My sister lives in Chicago with her husband.", "I've been meditating every morning for a month.",
+    "I listen to podcasts about personal finance.", "My manager approved my vacation request.", "I'm renovating the kitchen this summer.",
+    "I subscribe to a weekly meal-kit service.", "I'm training for a half marathon in the fall.",
+];
+
+lazy_static! {
+    /// Claim-typing anchors of prototype sets, by (address, length).
+    static ref ANCHORS: Mutex<HashMap<(usize, usize), (f64, f64)>> = Mutex::new(HashMap::new());
+}
+
+/// [`claim_anchors`] under the reference embedder (EmbeddingGemma v1):
+/// mean claim-prototype similarity, and mean best similarity.
+pub const ANCHOR_REF: (f64, f64) = (0.3409, 0.5538);
+
+/// Typing anchors of a prototype set under its embedder: over
+/// [`CALIB_CLAIMS`], the mean similarity of a claim to every prototype and
+/// the mean of each claim's best similarity. `None` when the set was not
+/// built through [`prototypes`].
+pub fn claim_anchors(ps: &[(usize, Vec<f32>)]) -> Option<(f64, f64)> {
+    ANCHORS.lock().unwrap().get(&(ps.as_ptr() as usize, ps.len())).copied()
+}
+
+/// A claim-prototype similarity on the reference scale: the two-anchor map
+/// from this embedder's [`claim_anchors`] to the reference ones (falling
+/// back to [`to_ref`] with the prototype baseline). One-sided like
+/// [`to_ref`]: it only ever tightens.
+pub fn claim_to_ref(sim: f64, ps: &[(usize, Vec<f32>)]) -> f64 {
+    let Some((a, b)) = claim_anchors(ps) else {
+        return to_ref(sim, proto_baseline(ps));
+    };
+    let (ra, rb) = ANCHOR_REF;
+    if b - a <= 1e-6 || rb - ra <= 1e-6 {
+        return sim;
+    }
+    (ra + (sim - a) * (rb - ra) / (b - a)).min(sim)
+}
+
+fn compute_anchors(vecs: &[Arc<[f32]>], ps: &[(usize, Vec<f32>)]) -> (f64, f64) {
+    let (mut all, mut n, mut best_sum) = (0.0, 0usize, 0.0);
+    for v in vecs {
+        let mut best = f64::MIN;
+        for (_, p) in ps {
+            let x = cosine32(v, p);
+            all += x;
+            n += 1;
+            best = best.max(x);
+        }
+        best_sum += best;
+    }
+    (all / n.max(1) as f64, best_sum / vecs.len().max(1) as f64)
+}
+
+/// The prototype vectors of `act` under `embedder` (cached), with the
+/// set's claim-typing anchors computed alongside.
 pub fn prototypes(act: &Active, embedder: &str) -> Result<Arc<Vec<(usize, Vec<f32>)>>> {
     let key = (act.hash, embedder.to_string());
     if let Some(v) = PROTOS.lock().unwrap().get(&key) {
@@ -501,6 +599,13 @@ pub fn prototypes(act: &Active, embedder: &str) -> Result<Arc<Vec<(usize, Vec<f3
     let refs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
     let vecs = crate::embed::embed_texts(embedder, &refs)?;
     let out = Arc::new(idx.into_iter().zip(vecs).map(|(i, v)| (i, v.to_vec())).collect::<Vec<_>>());
+    if out.len() >= 2 {
+        if let Ok(cv) = crate::embed::embed_texts(embedder, CALIB_CLAIMS) {
+            let k = (out.as_ptr() as usize, out.len());
+            let anchors = compute_anchors(&cv, &out);
+            ANCHORS.lock().unwrap().insert(k, anchors);
+        }
+    }
     PROTOS.lock().unwrap().insert(key, out.clone());
     Ok(out)
 }

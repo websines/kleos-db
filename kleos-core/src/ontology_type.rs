@@ -385,10 +385,10 @@ fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &s
     let untyped = |subj: Option<String>| ClaimType { cls: "untyped".into(), subject: subj, prop: None, score: 0.0, by: "none".into(), speaker: None, content: 0, concrete: false };
     match (protos, vec) {
         (Some(ps), Some(v)) if !ps.is_empty() => {
-            // the active embedder's own baseline: thresholds hold for any model
-            let base = crate::ontology::proto_baseline(ps);
+            // the active embedder's own calibration: thresholds hold for any model
+            let orig = ps;
             let ps: Vec<(usize, Vec<f32>)> = ps.iter().filter(|(i, _)| !excluded(&act.props[*i])).cloned().collect();
-            let scored = rank(&ps, &cue, v, base);
+            let scored = rank(&ps, &cue, v, &|x| crate::ontology::claim_to_ref(x, orig));
             let (best, bi) = scored[0];
             let second = scored.get(1).map_or(0.0, |x| x.0);
             if best >= knob("PROTO_MIN", PROTO_MIN) && best - second >= knob("PROTO_MARGIN", PROTO_MARGIN) {
@@ -433,11 +433,11 @@ fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &s
 /// Properties by prototype score (cosine plus the cue bonus), best first.
 /// Prototype scores on the reference scale ([`crate::ontology::to_ref`]
 /// with the prototype set's baseline `b`), plus the cue bonus.
-fn rank(ps: &[(usize, Vec<f32>)], cue: &[usize], v: &[f32], b: f64) -> Vec<(f64, usize)> {
+fn rank(ps: &[(usize, Vec<f32>)], cue: &[usize], v: &[f32], to_ref: &dyn Fn(f64) -> f64) -> Vec<(f64, usize)> {
     let bonus = knob("CUE_BONUS", CUE_BONUS);
     let mut scored: Vec<(f64, usize)> = ps
         .iter()
-        .map(|(i, pv)| (crate::ontology::to_ref(cosine(v, pv), b) + if cue[*i] > 0 { bonus } else { 0.0 }, *i))
+        .map(|(i, pv)| (to_ref(cosine(v, pv)) + if cue[*i] > 0 { bonus } else { 0.0 }, *i))
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored
@@ -452,7 +452,7 @@ pub fn top_props(act: &Active, protos: &[(usize, Vec<f32>)], text: &str, vec: &[
         .iter()
         .map(|p| p.cues.iter().chain(p.aliases.iter()).filter(|c| has_phrase(&low, &c.to_lowercase())).map(|c| c.len()).max().unwrap_or(0))
         .collect();
-    rank(protos, &cue, vec, crate::ontology::proto_baseline(protos)).into_iter().take(n).map(|(s, i)| (act.props[i].name.clone(), (s * 1000.0).round() / 1000.0)).collect()
+    rank(protos, &cue, vec, &|x| crate::ontology::claim_to_ref(x, protos)).into_iter().take(n).map(|(s, i)| (act.props[i].name.clone(), (s * 1000.0).round() / 1000.0)).collect()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -522,9 +522,13 @@ pub fn gate(act: &Active, c: &ClaimType, d: &ClaimType) -> Gate {
         }
     }
     let conf = knob("CONFIDENT", CONFIDENT);
-    // cue-only typing (no embedder) is sure; a cue under prototypes adds a
-    // little confidence
-    let sure = |t: &ClaimType| t.by == "cue" || t.by == "rule" || t.score >= conf || (t.by.contains("cue") && t.score >= conf - 0.05);
+    // sure enough to keep a pair out of `supersedes`: a rule or a cue (cue
+    // alone, without an embedder; or a cue under prototypes at a confident
+    // score). A prototype match alone types a claim but never blocks a
+    // decision: prototype rankings are noisier under some embedders
+    // (EmbeddingGemma 2 lost a true update, "my other two bikes" → "I
+    // currently have three bikes", to two prototype-only types).
+    let sure = |t: &ClaimType| t.by == "cue" || t.by == "rule" || t.by == "learn" || (t.by.contains("cue") && t.score >= conf - 0.05);
     let lim = knob("THIN", THIN);
     let thin1 = |t: &ClaimType| !t.concrete && (t.content as f64) < lim;
     let thin = thin1(c) || thin1(d);
@@ -746,7 +750,7 @@ mod tests {
             subject: Some(subj.into()),
             prop: Some(prop.into()),
             score: 1.0,
-            by: "test".into(),
+            by: "cue+proto".into(),
             speaker: None,
             content: 8,
             concrete: true,
@@ -783,6 +787,12 @@ mod tests {
         assert_eq!(gate(&a, &f("caroline", "lives_in"), &f("melanie", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &st, &f("user", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &f("user", "birthday"), &f("user", "birthday")), Gate::CapPending);
+        // prototype-only types never keep a pair out of `supersedes`
+        let mut p1 = f("user", "vehicle");
+        p1.by = "proto".into();
+        let mut p2 = f("user", "collection");
+        p2.by = "proto".into();
+        assert_eq!(gate(&a, &p1, &p2), Gate::Allow);
     }
 
     #[test]
