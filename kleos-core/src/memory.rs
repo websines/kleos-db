@@ -458,6 +458,9 @@ struct Plan {
     claims: Vec<ClaimPlan>,
     ents: EntityPlan,
     res: RememberResult,
+    /// Claim types under the active ontology (parallel to `claims`).
+    types: Vec<Option<crate::ontology_type::ClaimType>>,
+    onto: Option<String>,
 }
 
 /// One claim of a `remember`, planned.
@@ -569,6 +572,10 @@ pub struct InitOpts {
     /// (`remember` / `forget` enqueue Engram jobs); `''` detaches.
     #[cfg(feature = "engram")]
     pub engram: Option<String>,
+    /// Activate this ontology (e.g. `personal`) on namespace `ns` (default
+    /// `default`) with the cardinality policy (docs/specs/ontology.md).
+    pub ontology: Option<String>,
+    pub ns: Option<String>,
 }
 
 /// Options of [`Db::remember`].
@@ -939,6 +946,26 @@ pub struct RememberResult {
     /// statement id: `forget` of it covers every claim).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<ClaimResult>,
+    /// With an active ontology: each claim's type (docs/specs/ontology.md),
+    /// and the candidates the cardinality policy kept out of `supersedes`
+    /// (`ontology_gated`) or out of every decision (`ontology_blocked`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<ClaimTypeOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ontology_gated: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ontology_blocked: Vec<String>,
+}
+
+/// A claim's type under the active ontology.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClaimTypeOut {
+    pub claim: String,
+    pub cls: String,
+    pub subject: Option<String>,
+    pub prop: Option<String>,
+    pub score: f64,
+    pub by: String,
 }
 
 /// One recalled memory.
@@ -1313,6 +1340,11 @@ impl<'s, S: Storage<'s>> Db<S> {
             .unwrap_or(0))
     }
 
+    /// The store's memory embedder, if any.
+    pub(crate) fn mem_embedder_name(&'s self) -> Result<Option<String>> {
+        Ok(self.mem_config()?.and_then(|c| c.embedder))
+    }
+
     fn mem_config(&'s self) -> Result<Option<MemConfig>> {
         let rows = match self.run_script(
             &format!("?[key, value] := *{MEM_CONFIG}{{key, value}}"),
@@ -1474,6 +1506,16 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// (attach an embedder, set the default decider). Idempotent. Returns
     /// the configuration.
     pub fn memory_init(&'s self, opts: InitOpts) -> Result<MemConfig> {
+        let onto = opts.ontology.clone().filter(|o| !o.is_empty());
+        let ns = ns_of(&opts.ns);
+        let cfg = self.memory_init_store(opts)?;
+        if let Some(o) = onto {
+            self.onto_activate(&ns, &[o], None, None)?;
+        }
+        Ok(cfg)
+    }
+
+    fn memory_init_store(&'s self, opts: InitOpts) -> Result<MemConfig> {
         let mut cfg = match self.mem_config()? {
             Some(c) => c,
             None => {
@@ -2276,10 +2318,32 @@ impl<'s, S: Storage<'s>> Db<S> {
         // take part in decisions in `auto` mode
         // assistant and other speakers' memories are never decided
         let user_said = opts.role.as_deref().map_or(true, |r| r == "user");
+        // ontology (docs/specs/ontology.md): claim types; small talk is
+        // stored but never decided
+        let onto = self.onto_active(ns)?;
+        let protos = match (&onto, cfg.embedder.as_deref()) {
+            (Some(a), Some(e)) if a.policy != "off" && claims.iter().any(|c| c.2.is_some()) => {
+                Some(crate::ontology::prototypes(a, e)?)
+            }
+            _ => None,
+        };
+        let types: Vec<Option<crate::ontology_type::ClaimType>> = claims
+            .iter()
+            .map(|c| {
+                onto.as_ref()
+                    .map(|a| crate::ontology_type::type_claim(a, protos.as_deref().map(|v| v.as_slice()), &c.1, c.2.as_deref()))
+            })
+            .collect();
         let decided: Vec<bool> = claims
             .iter()
-            .map(|c| user_said && (!auto || memory_claims::is_declarative(&c.1)))
+            .zip(&types)
+            .map(|(c, t)| {
+                user_said
+                    && (!auto || memory_claims::is_declarative(&c.1))
+                    && !t.as_ref().is_some_and(|t| t.is_smalltalk() && onto.as_ref().is_some_and(|a| a.policy != "off"))
+            })
             .collect();
+        let onto_on = onto.as_ref().is_some_and(|a| a.policy != "off");
         let mut rows_per: Vec<Vec<Vec<DataValue>>> = Vec::with_capacity(claims.len());
         for (ci, (_, text, vec)) in claims.iter().enumerate() {
             if !decided[ci] {
@@ -2315,6 +2379,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 rows.into_iter()
                     .filter(|r| cell_str(&r[0]).map_or(true, |id| spoken.get(&id).map_or(true, |x| x == "user")))
                     .filter(|r| !auto || r[2].get_str().is_some_and(memory_claims::is_declarative))
+                    .filter(|r| !onto_on || !r[2].get_str().is_some_and(crate::ontology_type::smalltalk))
                     .take(k)
                     .collect()
             })
@@ -2341,6 +2406,28 @@ impl<'s, S: Storage<'s>> Db<S> {
             } else {
                 BTreeMap::new()
             };
+
+        // the candidates' types: stored, else typed now from text and vector
+        let mut cand_types: BTreeMap<String, crate::ontology_type::ClaimType> = BTreeMap::new();
+        if let (true, Some(a)) = (onto_on, &onto) {
+            cand_types = self.onto_types_of(ns, &ids)?;
+            for r in rows_per.iter().flatten() {
+                let (Some(id), Some(t)) = (cell_str(&r[0]), r[2].get_str()) else { continue };
+                if let Some(ct) = cand_types.get_mut(&id) {
+                    crate::ontology_type::annotate(ct, t);
+                }
+                cand_types.entry(id.clone()).or_insert_with(|| {
+                    crate::ontology_type::type_claim(
+                        a,
+                        protos.as_deref().map(|v| v.as_slice()),
+                        t,
+                        cand_vecs.get(&id).map(|v| v.as_slice()),
+                    )
+                });
+            }
+        }
+        let mut onto_gated: Vec<String> = vec![];
+        let mut onto_blocked: Vec<String> = vec![];
 
         let mut plans: Vec<ClaimPlan> = vec![];
         let mut sup_todo: Vec<(usize, usize)> = vec![];
@@ -2387,9 +2474,31 @@ impl<'s, S: Storage<'s>> Db<S> {
                     capped[i] = true;
                 }
             }
+            // the ontology's cardinality policy
+            let mut blocked = vec![false; cands.len()];
+            if let (true, Some(a), Some(ct)) = (onto_on, &onto, &types[ci]) {
+                for (i, c) in cands.iter().enumerate() {
+                    let Some(dt) = cand_types.get(&c.id) else { continue };
+                    match crate::ontology_type::gate(a, ct, dt) {
+                        crate::ontology_type::Gate::Allow => {}
+                        crate::ontology_type::Gate::CapPending => capped[i] = true,
+                        crate::ontology_type::Gate::NoSupersede => {
+                            gated[i] = true;
+                            onto_gated.push(c.id.clone());
+                        }
+                        crate::ontology_type::Gate::Block => {
+                            blocked[i] = true;
+                            onto_blocked.push(c.id.clone());
+                        }
+                    }
+                }
+            }
             let key = norm_text(text);
             let mut dup: Vec<Option<Decision>> = vec![None; cands.len()];
             for (i, c) in cands.iter().enumerate() {
+                if blocked[i] {
+                    continue;
+                }
                 if norm_text(&c.text) == key {
                     dup[i] = Some(rule_decision(
                         Template::Duplicate,
@@ -2496,6 +2605,22 @@ impl<'s, S: Storage<'s>> Db<S> {
             decider: decider.clone(),
             embedded: claims.iter().any(|c| c.2.is_some()),
             gated: gated_ids.into_iter().unique().collect(),
+            ontology_gated: onto_gated.into_iter().unique().collect(),
+            ontology_blocked: onto_blocked.into_iter().unique().collect(),
+            types: claims
+                .iter()
+                .zip(&types)
+                .filter_map(|(c, t)| {
+                    t.as_ref().map(|t| ClaimTypeOut {
+                        claim: c.0.clone(),
+                        cls: t.cls.clone(),
+                        subject: t.subject.clone(),
+                        prop: t.prop.clone(),
+                        score: t.score,
+                        by: t.by.clone(),
+                    })
+                })
+                .collect(),
             ..Default::default()
         };
         for cp in plans.iter_mut() {
@@ -2570,6 +2695,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             claims: plans,
             ents,
             res,
+            types,
+            onto: onto.as_ref().map(|a| a.ontos.join("+")),
         })
     }
 
@@ -2675,6 +2802,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 claims: plans,
                 ents,
                 mut res,
+                types,
+                onto,
             } = plan;
 
             let now = now_micros();
@@ -2832,6 +2961,13 @@ impl<'s, S: Storage<'s>> Db<S> {
 
             let mut script = String::new();
             let mut p: Vec<(&str, DataValue)> = vec![("ns", s(&ns))];
+            // ontology: the added claims' types, and the kinship and role
+            // facts they state by rule (docs/specs/ontology.md)
+            if let Some(o) = &onto {
+                let (frag, ps) = crate::ontology::remember_blocks(&ns, o, at, &plans.iter().map(|cp| (cp.duplicate.is_none(), cp.id.clone(), cp.text.clone())).collect::<Vec<_>>(), &types);
+                script.push_str(&frag);
+                p.extend(ps);
+            }
             // a branch: inherited memories this statement ends or repeats
             // are copied up first (docs/specs/memory-branches.md)
             if !sc.is_plain() {

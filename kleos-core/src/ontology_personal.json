@@ -1,0 +1,2005 @@
+{
+ "onto": "personal",
+ "version": "1",
+ "doc": "kleos default personal-memory ontology (docs/specs/ontology.md)",
+ "classes": [
+  {
+   "name": "Thing",
+   "parents": [],
+   "label": "thing",
+   "doc": "anything",
+   "aliases": []
+  },
+  {
+   "name": "Person",
+   "parents": [
+    "Thing"
+   ],
+   "label": "person",
+   "doc": "a human being",
+   "aliases": [
+    "people",
+    "someone"
+   ]
+  },
+  {
+   "name": "Place",
+   "parents": [
+    "Thing"
+   ],
+   "label": "place",
+   "doc": "a city, country, address or venue",
+   "aliases": [
+    "location",
+    "city",
+    "country"
+   ]
+  },
+  {
+   "name": "Organization",
+   "parents": [
+    "Thing"
+   ],
+   "label": "organization",
+   "doc": "a company, school, team or other organisation",
+   "aliases": [
+    "company",
+    "employer",
+    "school"
+   ]
+  },
+  {
+   "name": "Pet",
+   "parents": [
+    "Thing"
+   ],
+   "label": "pet",
+   "doc": "an animal someone keeps",
+   "aliases": [
+    "animal"
+   ]
+  },
+  {
+   "name": "Item",
+   "parents": [
+    "Thing"
+   ],
+   "label": "item",
+   "doc": "an object someone owns, uses or bought",
+   "aliases": [
+    "object",
+    "possession"
+   ]
+  },
+  {
+   "name": "Event",
+   "parents": [
+    "Thing"
+   ],
+   "label": "event",
+   "doc": "something that happens at a time",
+   "aliases": []
+  },
+  {
+   "name": "Activity",
+   "parents": [
+    "Event"
+   ],
+   "label": "activity",
+   "doc": "something someone does or did",
+   "aliases": []
+  },
+  {
+   "name": "Media",
+   "parents": [
+    "Thing"
+   ],
+   "label": "media",
+   "doc": "a book, film, show, song or game",
+   "aliases": []
+  }
+ ],
+ "properties": [
+  {
+   "name": "lives_in",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Place"
+   ],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "lives in",
+   "doc": "where someone lives or moved to",
+   "aliases": [
+    "residence",
+    "home city"
+   ],
+   "cues": [
+    "live in",
+    "lives in",
+    "living in",
+    "moved to",
+    "moving to",
+    "relocated to",
+    "my apartment in",
+    "my flat in",
+    "based in",
+    "reside in"
+   ]
+  },
+  {
+   "name": "born_in",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Place"
+   ],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "born in",
+   "doc": "where someone was born or grew up",
+   "aliases": [
+    "hometown"
+   ],
+   "cues": [
+    "born in",
+    "grew up in",
+    "my hometown",
+    "originally from"
+   ]
+  },
+  {
+   "name": "home",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "home",
+   "doc": "the house or apartment someone lives in, buying a home, renovation",
+   "aliases": [
+    "house",
+    "apartment"
+   ],
+   "cues": [
+    "my house",
+    "my apartment",
+    "my flat",
+    "bought a house",
+    "new house",
+    "renovat*",
+    "the house"
+   ]
+  },
+  {
+   "name": "employer",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Organization"
+   ],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "employer",
+   "doc": "the company or organisation someone works for",
+   "aliases": [
+    "company"
+   ],
+   "cues": [
+    "work at",
+    "work for",
+    "working at",
+    "working for",
+    "works at",
+    "works for",
+    "joined",
+    "hired",
+    "my company",
+    "my employer",
+    "quit my job",
+    "laid off"
+   ]
+  },
+  {
+   "name": "job_title",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "job title",
+   "doc": "someone's job, role or position",
+   "aliases": [
+    "job",
+    "role",
+    "position",
+    "occupation"
+   ],
+   "cues": [
+    "work as",
+    "working as",
+    "works as",
+    "my job",
+    "my role",
+    "promoted",
+    "position as",
+    "job title"
+   ]
+  },
+  {
+   "name": "income",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": "xsd:decimal",
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": "currency",
+   "label": "income",
+   "doc": "salary, pay, raise or income",
+   "aliases": [
+    "salary",
+    "pay"
+   ],
+   "cues": [
+    "salary",
+    "my pay",
+    "a raise",
+    "income",
+    "i earn",
+    "i make"
+   ]
+  },
+  {
+   "name": "commute",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "commute",
+   "doc": "how someone gets to work and how long it takes",
+   "aliases": [],
+   "cues": [
+    "commute",
+    "to work by",
+    "drive to work"
+   ]
+  },
+  {
+   "name": "education",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "education",
+   "doc": "school, degree, course or class someone takes",
+   "aliases": [
+    "studies",
+    "degree"
+   ],
+   "cues": [
+    "studying",
+    "my degree",
+    "a course",
+    "my class",
+    "classes",
+    "university",
+    "college",
+    "graduated",
+    "master's",
+    "phd"
+   ]
+  },
+  {
+   "name": "partner",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "one",
+   "symmetric": true,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "partner",
+   "doc": "someone's partner, spouse, boyfriend or girlfriend",
+   "aliases": [
+    "spouse",
+    "husband",
+    "wife",
+    "boyfriend",
+    "girlfriend"
+   ],
+   "cues": [
+    "my partner",
+    "my boyfriend",
+    "my girlfriend",
+    "my wife",
+    "my husband",
+    "my fiance",
+    "my fiancee",
+    "dating",
+    "married",
+    "engaged",
+    "broke up"
+   ]
+  },
+  {
+   "name": "relationship_status",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "relationship status",
+   "doc": "whether someone is single, dating, married or divorced",
+   "aliases": [],
+   "cues": [
+    "i'm single",
+    "got married",
+    "got divorced",
+    "relationship status"
+   ]
+  },
+  {
+   "name": "sibling_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": true,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "sibling of",
+   "doc": "a brother or sister",
+   "aliases": [
+    "sibling"
+   ],
+   "cues": [
+    "have a sister",
+    "have a brother",
+    "is my sister",
+    "is my brother",
+    "siblings",
+    "have two sisters",
+    "have two brothers"
+   ]
+  },
+  {
+   "name": "sister_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [
+    "sibling_of"
+   ],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "sister of",
+   "doc": "is the sister of",
+   "aliases": [
+    "sister"
+   ],
+   "cues": []
+  },
+  {
+   "name": "brother_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [
+    "sibling_of"
+   ],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "brother of",
+   "doc": "is the brother of",
+   "aliases": [
+    "brother"
+   ],
+   "cues": []
+  },
+  {
+   "name": "parent_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": "child_of",
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "parent of",
+   "doc": "is a parent of",
+   "aliases": [
+    "parent"
+   ],
+   "cues": [
+    "have a son",
+    "have a daughter",
+    "my son",
+    "my daughter",
+    "my kids",
+    "my children",
+    "my baby"
+   ]
+  },
+  {
+   "name": "child_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "child of",
+   "doc": "is a child of",
+   "aliases": [
+    "child"
+   ],
+   "cues": [
+    "my mom",
+    "my dad",
+    "my mother",
+    "my father",
+    "my parents"
+   ]
+  },
+  {
+   "name": "mother_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [
+    "parent_of"
+   ],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "mother of",
+   "doc": "is the mother of",
+   "aliases": [
+    "mother",
+    "mom"
+   ],
+   "cues": []
+  },
+  {
+   "name": "father_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [
+    "parent_of"
+   ],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "father of",
+   "doc": "is the father of",
+   "aliases": [
+    "father",
+    "dad"
+   ],
+   "cues": []
+  },
+  {
+   "name": "aunt_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [
+    "sister_of",
+    "parent_of"
+   ],
+   "temporal": false,
+   "unit": null,
+   "label": "aunt of",
+   "doc": "is an aunt of (a sister of a parent)",
+   "aliases": [],
+   "cues": []
+  },
+  {
+   "name": "uncle_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [
+    "brother_of",
+    "parent_of"
+   ],
+   "temporal": false,
+   "unit": null,
+   "label": "uncle of",
+   "doc": "is an uncle of (a brother of a parent)",
+   "aliases": [],
+   "cues": []
+  },
+  {
+   "name": "grandparent_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [
+    "parent_of",
+    "parent_of"
+   ],
+   "temporal": false,
+   "unit": null,
+   "label": "grandparent of",
+   "doc": "is a grandparent of",
+   "aliases": [
+    "grandparent"
+   ],
+   "cues": [
+    "my grandma",
+    "my grandpa",
+    "my grandmother",
+    "my grandfather",
+    "my grandparents"
+   ]
+  },
+  {
+   "name": "children",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "children",
+   "doc": "how many children someone has, pregnancy",
+   "aliases": [],
+   "cues": [
+    "kids",
+    "children",
+    "pregnant",
+    "expecting a baby"
+   ]
+  },
+  {
+   "name": "family",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "family",
+   "doc": "parents, siblings and relatives and what they do",
+   "aliases": [],
+   "cues": [
+    "my family",
+    "my relatives",
+    "my cousin",
+    "my aunt",
+    "my uncle"
+   ]
+  },
+  {
+   "name": "friend_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": true,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "friend of",
+   "doc": "a friend",
+   "aliases": [
+    "friend"
+   ],
+   "cues": [
+    "my friend",
+    "best friend",
+    "friends with",
+    "a friend of mine"
+   ]
+  },
+  {
+   "name": "boss_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": "reports_to",
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "boss of",
+   "doc": "is the manager or boss of",
+   "aliases": [
+    "manager",
+    "boss"
+   ],
+   "cues": [
+    "my boss",
+    "my manager"
+   ]
+  },
+  {
+   "name": "reports_to",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "reports to",
+   "doc": "reports to (has as boss)",
+   "aliases": [],
+   "cues": []
+  },
+  {
+   "name": "pets",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "pets",
+   "doc": "pets someone has and how many",
+   "aliases": [
+    "pet",
+    "dog",
+    "cat"
+   ],
+   "cues": [
+    "my dog",
+    "my cat",
+    "my pet",
+    "my puppy",
+    "my kitten",
+    "dogs",
+    "cats",
+    "pets",
+    "adopted a"
+   ]
+  },
+  {
+   "name": "vehicle",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "vehicle",
+   "doc": "car, bike or motorcycle someone owns or rides",
+   "aliases": [
+    "car",
+    "bike"
+   ],
+   "cues": [
+    "my car",
+    "drive a",
+    "bought a car",
+    "my bike",
+    "motorcycle",
+    "my tesla",
+    "road bike"
+   ]
+  },
+  {
+   "name": "device",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "device",
+   "doc": "phone, computer, camera or other gadget",
+   "aliases": [],
+   "cues": [
+    "my phone",
+    "my laptop",
+    "my computer",
+    "my camera",
+    "iphone",
+    "new phone"
+   ]
+  },
+  {
+   "name": "collection",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "collection",
+   "doc": "items someone collects and how many",
+   "aliases": [],
+   "cues": [
+    "collect",
+    "my collection",
+    "postcards",
+    "stamps",
+    "vinyl",
+    "records"
+   ]
+  },
+  {
+   "name": "purchase",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "purchase",
+   "doc": "something someone bought and the price",
+   "aliases": [],
+   "cues": [
+    "bought",
+    "purchased",
+    "paid",
+    "spent"
+   ]
+  },
+  {
+   "name": "home_loan",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": "currency",
+   "label": "home loan",
+   "doc": "mortgage, loan, pre-approval or debt amount",
+   "aliases": [
+    "mortgage",
+    "loan"
+   ],
+   "cues": [
+    "mortgage",
+    "loan",
+    "pre-approved",
+    "pre-approval",
+    "debt",
+    "down payment"
+   ]
+  },
+  {
+   "name": "rent_or_bills",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": "currency",
+   "label": "rent or bills",
+   "doc": "rent, utilities and bills",
+   "aliases": [
+    "rent"
+   ],
+   "cues": [
+    "rent",
+    "utilities",
+    "bills",
+    "electricity bill"
+   ]
+  },
+  {
+   "name": "savings",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": "currency",
+   "label": "savings",
+   "doc": "savings, budget, spending and investments",
+   "aliases": [
+    "budget",
+    "investments"
+   ],
+   "cues": [
+    "savings",
+    "saved",
+    "budget",
+    "invest*",
+    "my portfolio",
+    "emergency fund"
+   ]
+  },
+  {
+   "name": "social_media",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": "xsd:integer",
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "social media",
+   "doc": "followers, posts, accounts and online audience",
+   "aliases": [
+    "follower count",
+    "followers"
+   ],
+   "cues": [
+    "followers",
+    "instagram",
+    "youtube",
+    "tiktok",
+    "twitter",
+    "subscribers",
+    "my channel",
+    "my blog"
+   ]
+  },
+  {
+   "name": "hobby",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "hobby",
+   "doc": "a hobby or craft and how far someone has got in it",
+   "aliases": [],
+   "cues": [
+    "hobby",
+    "pottery",
+    "painting",
+    "knitting",
+    "woodworking",
+    "sculpt*",
+    "photography"
+   ]
+  },
+  {
+   "name": "workout_routine",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "workout routine",
+   "doc": "gym, exercise and training frequency",
+   "aliases": [],
+   "cues": [
+    "gym",
+    "work out",
+    "workout",
+    "exercise",
+    "yoga",
+    "training",
+    "lift"
+   ]
+  },
+  {
+   "name": "running",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "running",
+   "doc": "runs, races, times and distances",
+   "aliases": [],
+   "cues": [
+    "run",
+    "running",
+    "5k",
+    "10k",
+    "marathon",
+    "personal best",
+    "race",
+    "triathlon"
+   ]
+  },
+  {
+   "name": "diet",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "diet",
+   "doc": "what someone eats or avoids, diet plan",
+   "aliases": [],
+   "cues": [
+    "vegan",
+    "vegetarian",
+    "diet",
+    "i eat",
+    "gluten",
+    "keto",
+    "calories"
+   ]
+  },
+  {
+   "name": "health",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "health",
+   "doc": "illness, condition, injury, allergy or medication",
+   "aliases": [],
+   "cues": [
+    "allergic",
+    "allergy",
+    "diagnosed",
+    "injury",
+    "injured",
+    "medication",
+    "doctor",
+    "sick",
+    "asthma"
+   ]
+  },
+  {
+   "name": "body_measure",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "body measure",
+   "doc": "weight, height or a fitness measure",
+   "aliases": [],
+   "cues": [
+    "weigh",
+    "my weight",
+    "lost",
+    "pounds",
+    "kg",
+    "height",
+    "bmi"
+   ]
+  },
+  {
+   "name": "sleep",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "sleep",
+   "doc": "sleep habits and hours",
+   "aliases": [],
+   "cues": [
+    "sleep",
+    "bedtime",
+    "wake up"
+   ]
+  },
+  {
+   "name": "drink_habit",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "drink habit",
+   "doc": "coffee, tea or alcohol habits",
+   "aliases": [],
+   "cues": [
+    "coffee",
+    "tea",
+    "drink",
+    "beer",
+    "wine",
+    "cocktail",
+    "negroni",
+    "espresso"
+   ]
+  },
+  {
+   "name": "reading",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "reading",
+   "doc": "books someone reads or has read and how many",
+   "aliases": [],
+   "cues": [
+    "reading",
+    "read",
+    "books",
+    "novel",
+    "page"
+   ]
+  },
+  {
+   "name": "watching",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "watching",
+   "doc": "shows, films and videos watched and how many",
+   "aliases": [],
+   "cues": [
+    "watching",
+    "watched",
+    "episodes",
+    "series",
+    "movie",
+    "films",
+    "videos"
+   ]
+  },
+  {
+   "name": "music",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "music",
+   "doc": "instrument, band, songs or concerts",
+   "aliases": [],
+   "cues": [
+    "guitar",
+    "piano",
+    "violin",
+    "band",
+    "concert",
+    "playlist",
+    "songs",
+    "drums"
+   ]
+  },
+  {
+   "name": "cooking",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "cooking",
+   "doc": "recipes, cooking, baking and how many dishes",
+   "aliases": [],
+   "cues": [
+    "recipe",
+    "cook",
+    "bake",
+    "baking",
+    "dish",
+    "chef"
+   ]
+  },
+  {
+   "name": "garden",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "garden",
+   "doc": "plants and gardening",
+   "aliases": [],
+   "cues": [
+    "garden",
+    "plants",
+    "tomatoes",
+    "seeds",
+    "succulent"
+   ]
+  },
+  {
+   "name": "volunteering",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "volunteering",
+   "doc": "volunteering, charity and donations",
+   "aliases": [],
+   "cues": [
+    "volunteer",
+    "charity",
+    "donat*",
+    "fundrais*"
+   ]
+  },
+  {
+   "name": "language",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "language",
+   "doc": "learning a language and level",
+   "aliases": [],
+   "cues": [
+    "learning spanish",
+    "learning french",
+    "learning german",
+    "duolingo",
+    "fluent",
+    "language"
+   ]
+  },
+  {
+   "name": "project_progress",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "project progress",
+   "doc": "progress on a project: pages, hours, percent done, count so far",
+   "aliases": [],
+   "cues": [
+    "so far",
+    "hours",
+    "finished",
+    "completed",
+    "progress",
+    "chapters"
+   ]
+  },
+  {
+   "name": "schedule",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "schedule",
+   "doc": "when something regularly happens, days per week",
+   "aliases": [],
+   "cues": [
+    "every week",
+    "times a week",
+    "days a week",
+    "every monday",
+    "on saturdays",
+    "weekly",
+    "every morning"
+   ]
+  },
+  {
+   "name": "membership",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "membership",
+   "doc": "subscriptions, memberships and plans",
+   "aliases": [],
+   "cues": [
+    "subscription",
+    "membership",
+    "member of",
+    "subscribed",
+    "plan"
+   ]
+  },
+  {
+   "name": "favourite",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "favourite",
+   "doc": "someone's favourite thing",
+   "aliases": [],
+   "cues": [
+    "favourite",
+    "favorite"
+   ]
+  },
+  {
+   "name": "age",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": "xsd:integer",
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "age",
+   "doc": "how old someone is",
+   "aliases": [],
+   "cues": [
+    "years old",
+    "turned",
+    "my age"
+   ]
+  },
+  {
+   "name": "birthday",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": "xsd:date",
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "birthday",
+   "doc": "someone's birthday or date of birth",
+   "aliases": [],
+   "cues": [
+    "birthday",
+    "born on"
+   ]
+  },
+  {
+   "name": "contact",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "one",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "contact",
+   "doc": "phone number, e-mail or address",
+   "aliases": [],
+   "cues": [
+    "phone number",
+    "email",
+    "e-mail",
+    "my address"
+   ]
+  },
+  {
+   "name": "likes",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "likes",
+   "doc": "something someone likes, loves or enjoys",
+   "aliases": [],
+   "cues": [
+    "i love",
+    "i like",
+    "i enjoy",
+    "i'm into",
+    "big fan of",
+    "obsessed with"
+   ]
+  },
+  {
+   "name": "dislikes",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "dislikes",
+   "doc": "something someone dislikes or hates",
+   "aliases": [],
+   "cues": [
+    "i hate",
+    "i dislike",
+    "can't stand",
+    "not a fan of"
+   ]
+  },
+  {
+   "name": "visited",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Place"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "visited",
+   "doc": "a place someone went to or travelled to",
+   "aliases": [
+    "trip",
+    "travel"
+   ],
+   "cues": [
+    "visited",
+    "went to",
+    "trip to",
+    "travelled to",
+    "traveled to",
+    "vacation in",
+    "holiday in",
+    "flew to"
+   ]
+  },
+  {
+   "name": "attended",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "attended",
+   "doc": "an event someone attended or will attend",
+   "aliases": [
+    "event"
+   ],
+   "cues": [
+    "attended",
+    "went to a",
+    "conference",
+    "festival",
+    "wedding",
+    "party",
+    "parade",
+    "workshop",
+    "meetup"
+   ]
+  },
+  {
+   "name": "activity",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "activity",
+   "doc": "something someone did, is doing or will do at a point in time",
+   "aliases": [],
+   "cues": [
+    "went",
+    "today i",
+    "yesterday i",
+    "last weekend",
+    "this weekend",
+    "i'm off to",
+    "just got back",
+    "took the kids",
+    "camping",
+    "hike",
+    "swimming"
+   ]
+  },
+  {
+   "name": "plan",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "plan",
+   "doc": "something someone plans, hopes or intends to do",
+   "aliases": [],
+   "cues": [
+    "planning to",
+    "plan to",
+    "thinking about",
+    "going to",
+    "hope to",
+    "want to",
+    "dream",
+    "goal is",
+    "next month",
+    "someday"
+   ]
+  },
+  {
+   "name": "opinion",
+   "kind": "data",
+   "domain": [
+    "Person"
+   ],
+   "range": [],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": true,
+   "unit": null,
+   "label": "opinion",
+   "doc": "what someone thinks or feels about something",
+   "aliases": [],
+   "cues": [
+    "i think",
+    "i feel",
+    "i believe",
+    "in my opinion",
+    "it was",
+    "it's been"
+   ]
+  },
+  {
+   "name": "same_as",
+   "kind": "object",
+   "domain": [
+    "Thing"
+   ],
+   "range": [
+    "Thing"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": true,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "same as",
+   "doc": "the same individual under another key (a name and a relation key)",
+   "aliases": [],
+   "cues": []
+  },
+  {
+   "name": "located_in",
+   "kind": "object",
+   "domain": [
+    "Place"
+   ],
+   "range": [
+    "Place"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": false,
+   "transitive": true,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "located in",
+   "doc": "a place is inside another place",
+   "aliases": [],
+   "cues": []
+  }
+ ]
+}

@@ -490,6 +490,17 @@ Re-embedding is a durable workflow (`kleos.memory.reembed`, built-in mode; see d
 
 `fork`, `rewind`, `merge`, `diff`, `discard` and `branches` are memory ops too (`::memory fork {from, to}`, `Db::memory_fork`, Python `memory_fork`, `POST /memory/fork`, …). A branch is a copy-on-write view of its parent. Every op above works on a branch, with reads routed through the lineage and writes to inherited memories copied up. See [memory-branches.md](memory-branches.md).
 
+### Ontology
+
+A namespace can have an active ontology (`memory_init {ontology: 'personal', ns}`, or `::ontology activate {ns, ontos}`; see [ontology.md](ontology.md)). With one, `remember`:
+
+- **types each claim** against it: small talk (reactions, greetings, thanks, sympathy, remarks about the listener, photo-only turns), or a property of the ontology (cue phrases plus the nearest property prototype under the store's embedder), or untyped; plus a subject (the speaker, `user`, `user.sister` for "my sister …", or a leading name). The types are returned in `types` and stored in `kleos_mem_type`;
+- **never decides small talk**: it is stored and recallable, but takes part in no `supersedes` or `duplicate` decision, as a new claim or as a candidate;
+- **applies the cardinality policy** to every (claim, candidate) pair: different known subjects → no decision (`ontology_blocked`); same single-valued temporal property → today's decision; same multi-valued property, or different properties → `duplicate` only (`ontology_gated`); same single-valued non-temporal property (a birthday) → a supersede is capped at pending; either side untyped → per the namespace's `untyped` setting (`decide`, `pending` or `dup_only`);
+- **writes kinship and role facts by rule** ("my sister Anna …" → `sister_of(anna, user)`) to `kleos_onto_fact`, in the same transaction.
+
+Without an active ontology, or with `policy: 'off'`, `remember` behaves exactly as before.
+
 ### Entity resolution
 
 `remember` resolves the names in `entities` with E3's `resolve_entities` ([entity-resolution.md](entity-resolution.md)) over the memory schema's own entity relation, `kleos_mem_entity`, scoped to the namespace (`EntityConfig.scope = ("ns", ns)`). There is no NER: the names are the caller's.
