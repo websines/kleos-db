@@ -159,6 +159,17 @@ Chunks that cross a batch boundary are cut there (a batch is chunked on its
 own pages; the carry-over of the last unfinished block into the next batch is
 recorded in the step result).
 
+### Documents by URL
+
+With the `docs-url` feature (off by default; it pulls in `requests`), an attachment may be `{url: "https://…"}`:
+- only `http` and `https`; no credentials in the URL;
+- every hop's host is resolved and refused unless all its addresses are public (no loopback, private, link-local, CGNAT, unique-local, multicast, unspecified or documentation ranges, IPv4-mapped included); redirects are followed by hand (at most 5) and each hop is checked again;
+- a 30 s timeout; a body cap of 100 MB (`KLEOS_DOC_URL_MAX_BYTES`), checked against `Content-Length` and while reading;
+- the content type must be a document type (PDF, image, text, HTML, DOCX, or `application/octet-stream` with detection from the bytes);
+- the final URL is stored in the document row's `meta.url`; the bytes' hash still decides re-ingestion, so fetching the same file again is a no-op.
+
+Limitation: the address check and the connection resolve the host separately, so a DNS server that changes its answer between the two (rebinding) is not fully excluded; deployments that must exclude it should fetch through an egress proxy.
+
 ### Entities
 
 With an extractor configured (`memory_init {extractor}`), each new chunk's names are extracted and resolved like a statement's, and the chunk mentions them (`kleos_mem_mention`), in the same transaction as the chunk batch (background ingestion runs at bulk priority). First-person words in a document are not the user's, so no kinship edges are written from chunks.

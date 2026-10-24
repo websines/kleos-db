@@ -177,6 +177,8 @@ pub mod engram;
 pub mod flow;
 #[cfg(feature = "docs")]
 pub mod docs;
+#[cfg(feature = "docs-url")]
+pub(crate) mod docs_url;
 pub mod ontology;
 pub mod ontology_type;
 pub(crate) mod ontology_ttl;
