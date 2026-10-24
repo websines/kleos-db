@@ -955,6 +955,10 @@ pub struct RememberResult {
     pub ontology_gated: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ontology_blocked: Vec<String>,
+    /// When this `remember` triggered automatic ontology learning: what it
+    /// proposed and applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology_learned: Option<serde_json::Value>,
 }
 
 /// A claim's type under the active ontology.
@@ -1340,7 +1344,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         Ok(self.mem_config()?.and_then(|c| c.embedder))
     }
 
-    fn mem_config(&'s self) -> Result<Option<MemConfig>> {
+    pub(crate) fn mem_config(&'s self) -> Result<Option<MemConfig>> {
         let rows = match self.run_script(
             &format!("?[key, value] := *{MEM_CONFIG}{{key, value}}"),
             Default::default(),
@@ -1503,8 +1507,14 @@ impl<'s, S: Storage<'s>> Db<S> {
         let onto = opts.ontology.clone().filter(|o| !o.is_empty());
         let ns = ns_of(&opts.ns);
         let cfg = self.memory_init_store(opts)?;
-        if let Some(o) = onto {
-            self.onto_activate(&ns, &[o], None, None)?;
+        match onto.as_deref() {
+            // the personal pack is the default for every namespace without an
+            // activation of its own (docs/specs/ontology.md, "Defaults")
+            None => {}
+            Some("none") | Some("off") => self.set_mem_config(crate::ontology::DEFAULT_KEY, Some("none".to_string()))?,
+            Some(o) => {
+                self.onto_activate(&ns, &[o.to_string()], None, None)?;
+            }
         }
         Ok(cfg)
     }
@@ -2191,6 +2201,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         text: &str,
         claims: &[String],
         opts: &RememberOpts,
+        extra: &[String],
     ) -> Result<Option<memory_extract::AutoEntities>> {
         if !opts.entities.is_empty() || opts.extract == Some(false) {
             return Ok(None);
@@ -2214,7 +2225,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         };
         let thr = opts.extract_thresholds.clone().unwrap_or_default();
         Ok(Some(match opts.extract_granularity.as_deref() {
-            None | Some("statement") => memory_extract::auto_entities(&*ex, text, claims, subject, &thr)?,
+            None | Some("statement") => memory_extract::auto_entities(&*ex, text, claims, subject, &thr, extra)?,
             Some("claim") => {
                 let mut all = memory_extract::AutoEntities {
                     claim_names: vec![vec![]; claims.len()],
@@ -2222,7 +2233,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     ..Default::default()
                 };
                 for (ci, c) in claims.iter().enumerate() {
-                    let one = memory_extract::auto_entities(&*ex, c, std::slice::from_ref(c), subject, &thr)?;
+                    let one = memory_extract::auto_entities(&*ex, c, std::slice::from_ref(c), subject, &thr, extra)?;
                     let map: Vec<usize> = one.names.iter().map(|n| all.name(n)).collect();
                     all.claim_names[ci] = one.claim_names[0].iter().map(|&i| map[i]).collect();
                     all.spans.extend(one.spans.into_iter().map(|mut sp| {
@@ -2318,9 +2329,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             .iter()
             .zip(&types)
             .map(|(c, t)| {
+                // `split: none` decides every statement as before, small talk too
                 user_said
                     && (!auto || memory_claims::is_declarative(&c.1))
-                    && !t.as_ref().is_some_and(|t| t.is_smalltalk() && onto.as_ref().is_some_and(|a| a.policy != "off"))
+                    && !(auto && t.as_ref().is_some_and(|t| t.is_smalltalk() && onto.as_ref().is_some_and(|a| a.policy != "off")))
             })
             .collect();
         let onto_on = onto.as_ref().is_some_and(|a| a.policy != "off");
@@ -2359,7 +2371,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 rows.into_iter()
                     .filter(|r| cell_str(&r[0]).map_or(true, |id| spoken.get(&id).map_or(true, |x| x == "user")))
                     .filter(|r| !auto || r[2].get_str().is_some_and(memory_claims::is_declarative))
-                    .filter(|r| !onto_on || !r[2].get_str().is_some_and(crate::ontology_type::smalltalk))
+                    .filter(|r| !onto_on || !auto || !r[2].get_str().is_some_and(crate::ontology_type::smalltalk))
                     .take(k)
                     .collect()
             })
@@ -2476,7 +2488,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             let key = norm_text(text);
             let mut dup: Vec<Option<Decision>> = vec![None; cands.len()];
             for (i, c) in cands.iter().enumerate() {
-                if blocked[i] {
+                // the same words are a duplicate whatever their type
+                if blocked[i] && norm_text(&c.text) != key {
                     continue;
                 }
                 if norm_text(&c.text) == key {
@@ -2693,7 +2706,21 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// deletes. Without a decider it uses the exact-text and value rules
     /// only; without an embedder, FTS candidates only.
     pub fn remember(&'s self, text: &str, opts: RememberOpts) -> Result<RememberResult> {
-        self.remember_with(text, opts, None)
+        let ns = ns_of(&opts.ns);
+        let mut res = self.remember_with(text, opts, None)?;
+        // zero-maintenance ontology: learn from the untyped claims every
+        // `KLEOS_ONTO_LEARN_EVERY` of them (docs/specs/ontology.md, "Learning")
+        let untyped = res.types.iter().filter(|t| t.cls == "untyped").count();
+        if crate::ontology_learn::note_untyped(&ns, untyped) {
+            res.ontology_learned = Some(match self.onto_learn(crate::ontology_learn::LearnOpts {
+                ns: Some(ns.clone()),
+                ..Default::default()
+            }) {
+                Ok(v) => v,
+                Err(e) => serde_json::json!({"error": format!("{e}")}),
+            });
+        }
+        Ok(res)
     }
 
     /// [`Db::remember`] whose commit also runs the script blocks `extra`
@@ -2758,7 +2785,16 @@ impl<'s, S: Storage<'s>> Db<S> {
         // defaults to the planning time, so the statement committed later is
         // also the later one in valid time.
         let claim_texts: Vec<String> = claims.iter().map(|c| c.1.clone()).collect();
-        let extracted = self.auto_for(&cfg, text, &claim_texts, &opts)?;
+        // a domain ontology's classes become extra extractor labels
+        let extra_labels: Vec<String> = if opts.entities.is_empty() && (opts.extractor.is_some() || cfg.extractor.is_some()) {
+            match self.onto_active(&ns_of(&opts.ns))? {
+                Some(a) => crate::ontology::domain_labels(&a),
+                None => vec![],
+            }
+        } else {
+            vec![]
+        };
+        let extracted = self.auto_for(&cfg, text, &claim_texts, &opts, &extra_labels)?;
         let gate = ns_gate(&ns);
         let mut attempt = 0;
         let mut res = loop {
@@ -2945,7 +2981,14 @@ impl<'s, S: Storage<'s>> Db<S> {
             // ontology: the added claims' types, and the kinship and role
             // facts they state by rule (docs/specs/ontology.md)
             if let Some(o) = &onto {
-                let (frag, ps) = crate::ontology::remember_blocks(&ns, o, at, &plans.iter().map(|cp| (cp.duplicate.is_none(), cp.id.clone(), cp.text.clone())).collect::<Vec<_>>(), &types);
+                // the extractor's kinship and role edges become ontology facts
+                // (one source of truth; `kleos_mem_link` is not written for them)
+                let edge_facts: Vec<crate::ontology_type::KinFact> = ents
+                    .edge_out
+                    .iter()
+                    .filter_map(|e| crate::ontology_type::edge_fact(&e.src_name, &e.rel, &e.dst_name))
+                    .collect();
+                let (frag, ps) = crate::ontology::remember_blocks(&ns, o, at, &plans.iter().map(|cp| (cp.duplicate.is_none(), cp.id.clone(), cp.text.clone())).collect::<Vec<_>>(), &types, &edge_facts);
                 script.push_str(&frag);
                 p.extend(ps);
             }
@@ -3045,7 +3088,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                 ));
                 p.push(("elinks", DataValue::List(ents.links.clone())));
             }
-            if !ents.edges.is_empty() {
+            if !ents.edges.is_empty() && onto.is_some() {
+                res.edges = ents.edge_out.clone();
+            } else if !ents.edges.is_empty() {
                 script.push_str(&format!(
                     "{{?[ns, src, rel, dst, created, p, decided_by] <- $edges \
                       :put {MEM_LINK} {{ns, src, rel, dst => created, p, decided_by}}}}"

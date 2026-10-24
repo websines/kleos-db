@@ -561,7 +561,8 @@ fn entities_gate_supersedes_to_shared_subjects() {
     // one "user" entity in all
     assert_eq!(count(&db, "?[e] := *kleos_mem_entity{ns: 'u', eid: e, norm: 'user'}"), 1);
 
-    // without entities on the new statement: behaves as before (no gate).
+    // without entities on the new statement, the default ontology still
+    // tells the subjects apart ("my sister" is not the user)
     // (one registry read guard at a time: a waiting writer would deadlock)
     drop(db);
     drop(m);
@@ -569,7 +570,13 @@ fn entities_gate_supersedes_to_shared_subjects() {
     let db2 = m2.db();
     let b2 = db2.remember(BERLIN, with_ents("u", d(1), &["user"])).unwrap().id.unwrap();
     let s2 = db2.remember(SISTER, at("u", d(2))).unwrap();
-    assert_eq!(s2.superseded, vec![b2], "{s2:?}");
+    assert!(s2.superseded.is_empty(), "{s2:?}");
+    assert!(s2.ontology_blocked.contains(&b2), "{s2:?}");
+    // with the default ontology off: as before (no gate)
+    db2.memory_init(InitOpts { ontology: Some("none".into()), ..Default::default() }).unwrap();
+    let b3 = db2.remember(BERLIN, with_ents("v", d(1), &["user"])).unwrap().id.unwrap();
+    let s3 = db2.remember(SISTER, at("v", d(2))).unwrap();
+    assert_eq!(s3.superseded, vec![b3], "{s3:?}");
 }
 
 #[test]

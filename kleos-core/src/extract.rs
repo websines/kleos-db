@@ -60,6 +60,13 @@ pub trait EntityExtractor: Send + Sync {
     /// Spans of each text whose score is at least the extractor's decode
     /// floor; texts of any length.
     fn extract(&self, texts: &[&str]) -> Result<Vec<Vec<ExtractSpan>>>;
+    /// [`EntityExtractor::extract`] with `extra` labels after the trained
+    /// ones (an open-label model such as GLiNER reads them zero-shot; e.g.
+    /// the classes of a domain ontology). The default ignores `extra`.
+    fn extract_labels(&self, texts: &[&str], extra: &[String]) -> Result<Vec<Vec<ExtractSpan>>> {
+        let _ = extra;
+        self.extract(texts)
+    }
     /// Whether the weights are in memory (`None`: not applicable).
     fn is_loaded(&self) -> Option<bool> {
         None

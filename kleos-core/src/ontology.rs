@@ -35,6 +35,16 @@ pub const ONTO_NS: &str = "kleos_onto_ns";
 pub const ONTO_FACT: &str = "kleos_onto_fact";
 pub const ONTO_NODE: &str = "kleos_onto_node";
 pub const MEM_TYPE: &str = "kleos_mem_type";
+pub const ONTO_PROPOSAL: &str = "kleos_onto_proposal";
+pub const ONTO_CHANGE: &str = "kleos_onto_change";
+/// Memory-config key holding the store's default ontology for namespaces
+/// with no activation of their own (`personal` when unset; `none` turns
+/// the default off).
+pub const DEFAULT_KEY: &str = "onto_default";
+/// The ontology a namespace learns into (docs/specs/ontology.md, "Learning").
+pub fn learned_name(ns: &str) -> String {
+    format!("learned:{ns}")
+}
 
 const DDL: &[(&str, &str)] = &[
     (ONTO, "{onto: String, vt: Validity => version: String, doc: String, source: String}"),
@@ -58,6 +68,16 @@ const DDL: &[(&str, &str)] = &[
     (
         MEM_TYPE,
         "{ns: String, id: String => onto: String, cls: String, subject: String?, prop: String?, score: Float, by: String}",
+    ),
+    (
+        ONTO_PROPOSAL,
+        "{ns: String, id: String => kind: String, body: Json, evidence: [String], score: Float, status: String, \
+         created: Int, decided: Int?}",
+    ),
+    (
+        ONTO_CHANGE,
+        "{ns: String, id: String => at: Int, kind: String, onto: String, target: String, before: Json, after: Json, \
+         evidence: [String], by: String, undone: Bool}",
     ),
 ];
 
@@ -365,6 +385,27 @@ pub fn proto_text(p: &OntoProp) -> String {
 /// (chains) and inverse-only twins without cues.
 pub fn typable(p: &OntoProp) -> bool {
     p.chain.is_empty() && p.kind != "role" && p.name != "same_as"
+}
+
+lazy_static! {
+    static ref PERSONAL_CLASSES: BTreeSet<String> = serde_json::from_str::<OntologyDoc>(PERSONAL)
+        .map(|d| d.classes.into_iter().map(|c| c.name).collect())
+        .unwrap_or_default();
+}
+
+/// The classes of the active ontology that are not the personal pack's,
+/// as extractor labels (lower case, at most 12): a domain ontology's
+/// classes are read zero-shot by an open-label extractor (docs/specs/ontology.md,
+/// "Extractor labels").
+pub fn domain_labels(act: &Active) -> Vec<String> {
+    let trained = ["person", "location", "organization", "relative"];
+    act.classes
+        .values()
+        .filter(|c| !PERSONAL_CLASSES.contains(&c.name))
+        .map(|c| if c.label.trim().is_empty() { c.name.replace('_', " ") } else { c.label.clone() }.to_lowercase())
+        .filter(|l| !trained.contains(&l.as_str()) && !l.is_empty())
+        .take(12)
+        .collect()
 }
 
 /// The prototype vectors of `act` under `embedder` (cached).
@@ -751,9 +792,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         Ok(json!({"ns": ns, "deactivated": !r.rows.is_empty() || true}))
     }
 
-    /// The ontology active on `ns`, merged, or `None` (no ontology: memory
-    /// behaves as before).
-    pub fn onto_active(&'s self, ns: &str) -> Result<Option<Arc<Active>>> {
+    /// The activation row of `ns`: (ontologies, policy, untyped).
+    fn onto_ns_row(&'s self, ns: &str) -> Result<Option<(Vec<String>, String, String)>> {
         if !self.onto_exists()? {
             return Ok(None);
         }
@@ -761,13 +801,83 @@ impl<'s, S: Storage<'s>> Db<S> {
             &format!("?[ontos, policy, untyped] := *{ONTO_NS}{{ns: $ns, ontos, policy, untyped @ 'NOW'}}"),
             vec![("ns", s(ns))],
         )?;
-        let Some(row) = r.rows.first() else { return Ok(None) };
-        let names = cell_strs(&row[0]);
-        let policy = cell(&row[1]);
-        let untyped = cell(&row[2]);
+        Ok(r.rows.first().map(|row| (cell_strs(&row[0]), cell(&row[1]), cell(&row[2]))))
+    }
+
+    /// The store's default ontology (`None`: off, or no memory store).
+    pub(crate) fn onto_default(&'s self) -> Option<String> {
+        let r = self
+            .run_script(
+                &format!("?[v] := *kleos_mem_config{{key: '{DEFAULT_KEY}', value: v}}"),
+                Default::default(),
+                ScriptMutability::Immutable,
+            )
+            .ok()?;
+        match r.rows.first().and_then(|row| row[0].get_str()) {
+            Some("none") | Some("off") | Some("") => None,
+            Some(x) => Some(x.to_string()),
+            // the memory store exists (the query ran): the personal pack
+            None => Some("personal".to_string()),
+        }
+    }
+
+    /// The lineage of `ns`, nearest first (`ns`, parent, grandparent, ...);
+    /// just `ns` outside a branch.
+    fn onto_lineage(&'s self, ns: &str) -> Vec<String> {
+        self.onto_levels(ns, None).into_iter().map(|l| l.0).collect()
+    }
+
+    /// The lineage of `ns` with the time each level is read at: `at` for
+    /// `ns` itself, an ancestor as of the fork (docs/specs/memory-branches.md),
+    /// so a branch inherits its parent's facts as they were when it forked.
+    pub(crate) fn onto_levels(&'s self, ns: &str, at: Option<i64>) -> Vec<(String, Option<i64>)> {
+        match self.mem_scope(ns) {
+            Ok(sc) => sc
+                .levels
+                .iter()
+                .map(|l| (l.ns.clone(), match (l.cut, at) {
+                    (None, a) => a,
+                    (Some(c), Some(a)) => Some(c.min(a)),
+                    (Some(c), None) => Some(c),
+                }))
+                .collect(),
+            Err(_) => vec![(ns.to_string(), at)],
+        }
+    }
+
+    /// The ontology active on `ns`, merged, or `None` (no ontology: memory
+    /// behaves as before). Zero maintenance (docs/specs/ontology.md,
+    /// "Defaults"): a namespace's own activation, else its nearest branch
+    /// ancestor's, else the store default (`personal` unless turned off);
+    /// the learned layers of the lineage (`learned:<ns>`, ancestors first)
+    /// go on top.
+    pub fn onto_active(&'s self, ns: &str) -> Result<Option<Arc<Active>>> {
+        let lineage = self.onto_lineage(ns);
+        let mut found = None;
+        for l in &lineage {
+            if let Some(r) = self.onto_ns_row(l)? {
+                found = Some(r);
+                break;
+            }
+        }
+        let (names, policy, untyped) = match found {
+            Some(r) => r,
+            None => match self.onto_default() {
+                Some(d) => (vec![d], "cardinality".to_string(), DEFAULT_UNTYPED.to_string()),
+                None => return Ok(None),
+            },
+        };
         let mut docs = vec![];
         for n in &names {
             docs.push(self.onto_load(n)?);
+        }
+        for l in lineage.iter().rev() {
+            let name = learned_name(l);
+            if !names.contains(&name) {
+                if let Some(d) = self.onto_get(&name, None)? {
+                    docs.push(d);
+                }
+            }
         }
         Ok(Some(Arc::new(Active::merge(&docs, &policy, &untyped))))
     }
@@ -971,11 +1081,18 @@ impl<'s, S: Storage<'s>> Db<S> {
         if !self.onto_exists()? {
             return Ok(BTreeMap::new());
         }
-        let r = self.on_q(
-            &format!("?[node, class] := *{ONTO_NODE}{{ns: $ns, node, class @ {}}}", at_clause(at)),
-            vec![("ns", s(ns))],
-        )?;
-        Ok(r.rows.iter().map(|x| (cell(&x[0]), cell(&x[1]))).collect())
+        let mut out = BTreeMap::new();
+        // nearest level wins
+        for (l, a) in self.onto_levels(ns, at) {
+            let r = self.on_q(
+                &format!("?[node, class] := *{ONTO_NODE}{{ns: $ns, node, class @ {}}}", at_clause(a)),
+                vec![("ns", s(&l))],
+            )?;
+            for x in &r.rows {
+                out.entry(cell(&x[0])).or_insert_with(|| cell(&x[1]));
+            }
+        }
+        Ok(out)
     }
 
     fn statuses(st: &Option<String>) -> Result<Vec<String>> {
@@ -992,23 +1109,31 @@ impl<'s, S: Storage<'s>> Db<S> {
         if !self.onto_exists()? {
             return Ok(json!([]));
         }
-        let r = self.on_q(
-            &format!(
-                "?[s, p, o, lit, conf, by, mem, status] := *{ONTO_FACT}{{ns, s, p, o, lit, conf, by, mem, status @ {}}}, \
-                 ns = $ns, is_in(status, $st)",
-                at_clause(o.at)
-            ),
-            vec![("ns", s(&ns)), ("st", strs(&Self::statuses(&o.status)?))],
-        )?;
-        let out: Vec<JsonValue> = r
-            .rows
-            .iter()
-            .filter(|x| filt(o, &cell(&x[0]), &cell(&x[1]), &cell(&x[2])))
-            .map(|x| {
-                json!({"s": jv(&x[0]), "p": jv(&x[1]), "o": jv(&x[2]), "lit": jv(&x[3]), "conf": jv(&x[4]),
-                       "by": jv(&x[5]), "mem": jv(&x[6]), "status": jv(&x[7])})
-            })
-            .collect();
+        let st = strs(&Self::statuses(&o.status)?);
+        let mut seen = BTreeSet::new();
+        let mut out: Vec<JsonValue> = vec![];
+        // a branch reads its own facts, then each ancestor's as of the fork
+        for (li, (l, a)) in self.onto_levels(&ns, o.at).into_iter().enumerate() {
+            let r = self.on_q(
+                &format!(
+                    "?[s, p, o, lit, conf, by, mem, status] := *{ONTO_FACT}{{ns, s, p, o, lit, conf, by, mem, status @ {}}}, \
+                     ns = $ns, is_in(status, $st)",
+                    at_clause(a)
+                ),
+                vec![("ns", s(&l)), ("st", st.clone())],
+            )?;
+            for x in r.rows.iter().filter(|x| filt(o, &cell(&x[0]), &cell(&x[1]), &cell(&x[2]))) {
+                if !seen.insert((cell(&x[0]), cell(&x[1]), cell(&x[2]))) {
+                    continue;
+                }
+                let mut f = json!({"s": jv(&x[0]), "p": jv(&x[1]), "o": jv(&x[2]), "lit": jv(&x[3]), "conf": jv(&x[4]),
+                       "by": jv(&x[5]), "mem": jv(&x[6]), "status": jv(&x[7])});
+                if li > 0 {
+                    f["inherited_from"] = json!(l);
+                }
+                out.push(f);
+            }
+        }
         Ok(JsonValue::Array(out))
     }
 
@@ -1019,7 +1144,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         let Some(act) = self.onto_active(ns)? else {
             bail!("ontology infer: namespace '{ns}' has no active ontology");
         };
-        let (prog, p) = infer_program(&act, ns, at, &Self::statuses(status)?);
+        let levels = self.onto_levels(ns, at);
+        let (prog, p) = infer_program(&act, &levels, &Self::statuses(status)?);
         let r = self.on_q(&prog, p)?;
         Ok(r
             .rows
@@ -1231,9 +1357,36 @@ impl<'s, S: Storage<'s>> Db<S> {
                     .collect::<Vec<_>>());
                 out
             }
+            // zero maintenance (docs/specs/ontology.md, "Learning", "Maintenance")
+            "learn" => self.onto_learn(
+                serde_json::from_value(from(m)?).map_err(|e| miette!("ontology learn: bad options: {e}"))?,
+            )?,
+            "maintain" => {
+                let ns = ns_of(&take(&mut m, "ns"));
+                let dry = m.remove("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+                self.onto_maintain(&ns, dry)?
+            }
+            "proposals" => {
+                let ns = ns_of(&take(&mut m, "ns"));
+                let st = take(&mut m, "status");
+                self.onto_proposals(&ns, st.as_deref())?
+            }
+            "approve" | "reject" => {
+                let ns = ns_of(&take(&mut m, "ns"));
+                let id = take(&mut m, "id").ok_or_else(|| miette!("ontology {op} needs 'id'"))?;
+                self.onto_decide_proposal(&ns, &id, op == "approve")?
+            }
+            "history" => self.onto_history(&ns_of(&take(&mut m, "ns")))?,
+            "undo" => {
+                let ns = ns_of(&take(&mut m, "ns"));
+                let id = take(&mut m, "change").ok_or_else(|| miette!("ontology undo needs 'change' (an id from history)"))?;
+                self.onto_undo(&ns, &id)?
+            }
+            "suggest" => self.onto_suggest(&ns_of(&take(&mut m, "ns")))?,
             other => bail!(
                 "unknown ontology op '{other}': expected define, import, export, get, list, activate, deactivate, \
-                 assert, retract, facts, infer, validate, type or gate"
+                 assert, retract, facts, infer, validate, type, gate, learn, maintain, proposals, approve, reject, \
+                 history, undo or suggest"
             ),
         })
     }
@@ -1248,11 +1401,13 @@ pub(crate) fn remember_blocks<'a>(
     at: i64,
     claims: &[(bool, String, String)],
     types: &[Option<crate::ontology_type::ClaimType>],
+    edges: &[crate::ontology_type::KinFact],
 ) -> (String, Vec<(&'a str, DataValue)>) {
     let mut trows = vec![];
     let mut frows = vec![];
     let mut nrows = vec![];
     let mut seen_nodes = BTreeSet::new();
+    let mut seen_facts: BTreeSet<(String, String, String)> = BTreeSet::new();
     for ((added, id, text), t) in claims.iter().zip(types) {
         if !added {
             continue;
@@ -1270,6 +1425,9 @@ pub(crate) fn remember_blocks<'a>(
             ]));
         }
         for k in crate::ontology_type::kin_facts(text) {
+            if !seen_facts.insert((k.s.clone(), k.p.clone(), k.o.clone())) {
+                continue;
+            }
             frows.push(DataValue::List(vec![
                 s(ns),
                 s(&k.s),
@@ -1286,6 +1444,31 @@ pub(crate) fn remember_blocks<'a>(
                 if seen_nodes.insert(node.clone()) && k.p != "same_as" {
                     nrows.push(DataValue::List(vec![s(ns), s(node), vt(at, true), s("Person"), opt_s(label), s(id)]));
                 }
+            }
+        }
+    }
+    // the extractor's kinship and role edges: one source of truth, the
+    // ontology's facts (only those the rules above did not already state)
+    let first_mem = claims.iter().find(|c| c.0).map(|c| c.1.clone());
+    for k in edges {
+        if !seen_facts.insert((k.s.clone(), k.p.clone(), k.o.clone())) {
+            continue;
+        }
+        frows.push(DataValue::List(vec![
+            s(ns),
+            s(&k.s),
+            s(&k.p),
+            s(&k.o),
+            vt(at, true),
+            DataValue::Null,
+            DataValue::from(0.9),
+            s("extractor:kin"),
+            opt_s(&first_mem),
+            s("current"),
+        ]));
+        for node in [&k.s, &k.o] {
+            if seen_nodes.insert(node.clone()) {
+                nrows.push(DataValue::List(vec![s(ns), s(node), vt(at, true), s("Person"), DataValue::Null, opt_s(&first_mem)]));
             }
         }
     }
@@ -1385,7 +1568,16 @@ pub fn validate_facts(act: &Active, facts: &[Fact], classes: &BTreeMap<String, S
 }
 
 /// The inference program for `act` over the namespace's facts.
-pub fn infer_program<'a>(act: &Active, ns: &str, at: Option<i64>, statuses: &[String]) -> (String, Vec<(&'a str, DataValue)>) {
+/// Parameter names of the lineage levels in [`infer_program`].
+const LEVEL_PARAMS: [&str; 18] = [
+    "ns0", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "ns8", "ns9", "ns10", "ns11", "ns12", "ns13", "ns14",
+    "ns15", "ns16", "ns17",
+];
+
+/// The inference program over the facts of `levels` (a namespace and,
+/// for a branch, its ancestors, each read at its own time; see
+/// [`Db::onto_levels`]).
+pub fn infer_program<'a>(act: &Active, levels: &[(String, Option<i64>)], statuses: &[String]) -> (String, Vec<(&'a str, DataValue)>) {
     let mut sym = vec![];
     let mut trans = vec![];
     let mut inv: BTreeSet<(String, String)> = BTreeSet::new();
@@ -1426,11 +1618,23 @@ pub fn infer_program<'a>(act: &Active, ns: &str, at: Option<i64>, statuses: &[St
         v.push(DataValue::List(vec![s("\u{0}"), s("\u{0}"), s("\u{0}")]));
         DataValue::List(v)
     };
+    let base: String = levels
+        .iter()
+        .take(LEVEL_PARAMS.len())
+        .enumerate()
+        .map(|(i, (_, a))| {
+            format!(
+                "base[s, p, o] := *{ONTO_FACT}{{ns, s, p, o, status @ {}}}, ns = ${}, is_in(status, $st) ",
+                at_clause(*a),
+                LEVEL_PARAMS[i]
+            )
+        })
+        .collect();
     let prog = format!(
         "inv[p, q] <- $inv \
          sup[p, q] <- $sup \
          chain[r, p, q] <- $chain \
-         base[s, p, o] := *{ONTO_FACT}{{ns, s, p, o, status @ {a}}}, ns = $ns, is_in(status, $st) \
+         {base}\
          f[s, p, o] := base[s, p, o] \
          f[o, p, s] := f[s, p, o], is_in(p, $sym) \
          f[o, q, s] := f[s, p, o], inv[p, q] \
@@ -1440,11 +1644,9 @@ pub fn infer_program<'a>(act: &Active, ns: &str, at: Option<i64>, statuses: &[St
          f[t, p, o] := f[x, p, o], f[x, 'same_as', t], p != 'same_as', t != o \
          f[s, p, t] := f[s, p, x], f[x, 'same_as', t], p != 'same_as', s != t \
          ?[s, p, o, derived] := f[s, p, o], base[s, p, o], derived = false \
-         ?[s, p, o, derived] := f[s, p, o], not base[s, p, o], derived = true",
-        a = at_clause(at)
+         ?[s, p, o, derived] := f[s, p, o], not base[s, p, o], derived = true"
     );
-    let p = vec![
-        ("ns", s(ns)),
+    let mut p = vec![
         ("st", strs(statuses)),
         ("sym", strs(&sym)),
         ("trans", strs(&trans)),
@@ -1452,6 +1654,9 @@ pub fn infer_program<'a>(act: &Active, ns: &str, at: Option<i64>, statuses: &[St
         ("sup", pad2(sup)),
         ("chain", pad3(chs)),
     ];
+    for (i, (l, _)) in levels.iter().take(LEVEL_PARAMS.len()).enumerate() {
+        p.push((LEVEL_PARAMS[i], s(l)));
+    }
     (prog, p)
 }
 

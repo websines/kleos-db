@@ -219,9 +219,12 @@ fn auto_entities_gate_supersession_across_subjects() {
     assert_eq!(sis.edges.len(), 1, "{sis:?}");
     let e = &sis.edges[0];
     assert_eq!((e.src_name.as_str(), e.rel.as_str(), e.dst_name.as_str()), ("user", "sister", "user's sister"));
-    // the edge is stored
+    // the edge is stored once: as an ontology fact (the personal pack is on
+    // by default), not as a `kleos_mem_link` row
     let links = rows(&s.db, "?[rel, decided_by] := *kleos_mem_link{ns: 'u', rel, decided_by}, rel = 'sister'");
-    assert_eq!(links.len(), 1);
+    assert!(links.is_empty(), "{links:?}");
+    let facts = rows(&s.db, "?[s, o] := *kleos_onto_fact{ns: 'u', s, p, o}, p = 'sister_of'");
+    assert_eq!(facts.len(), 1, "{facts:?}");
 
     // the user's own move does supersede
     let me = s.db.remember(ME_BERLIN, at(d(3))).unwrap();

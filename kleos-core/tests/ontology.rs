@@ -76,7 +76,8 @@ impl Models {
         let db = DbInstance::new("mem", "", "").unwrap();
         db.memory_init(InitOpts {
             decider: Some(self.decider.clone()),
-            ontology: onto.then(|| "personal".to_string()),
+            // the personal pack is on by default: `none` turns it off
+            ontology: Some(if onto { "personal" } else { "none" }.to_string()),
             ns: Some("u".into()),
             ..Default::default()
         })
