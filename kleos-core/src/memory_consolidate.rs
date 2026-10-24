@@ -33,6 +33,23 @@ use super::*;
 pub const MEM_PROFILE: &str = "kleos_mem_profile";
 pub const MEM_SUMMARY: &str = "kleos_mem_summary";
 pub const MEM_CONSOL: &str = "kleos_mem_consol";
+/// New memories of a namespace between automatic consolidations when the
+/// namespace has no setting (`::memory consolidate {every: 0}` turns it off).
+pub const DEFAULT_CONSOLIDATE_EVERY: i64 = 200;
+/// Flow queue of the automatic consolidation runs (run in-process by
+/// [`crate::DbInstance::consolidate_kick`] or by any flow worker).
+pub const CONSOLIDATE_QUEUE: &str = "consolidate";
+
+/// The in-process consolidation runner's state.
+#[derive(Default)]
+pub struct ConsolState {
+    /// a run was started and waits for the in-process runner
+    pub(crate) pending: std::sync::atomic::AtomicBool,
+    pub(crate) running: std::sync::atomic::AtomicBool,
+    /// ns → (every, new memories since the last trigger); `every` read once
+    /// per namespace and open store.
+    pub(crate) auto: Mutex<HashMap<String, (i64, i64)>>,
+}
 /// Kind of a summary memory.
 pub const SUMMARY_KIND: &str = "summary";
 /// The built-in workflow that consolidates one namespace (`input.ns`).
@@ -184,12 +201,6 @@ pub fn select_central(texts: &[String], vecs: &[Option<Vec<f32>>], m: usize) -> 
         }
     }
     picked
-}
-
-lazy_static::lazy_static! {
-    /// ns → (every, new memories since the last trigger); `every` read once
-    /// per namespace and process.
-    static ref AUTO: Mutex<HashMap<String, (i64, i64)>> = Mutex::new(HashMap::new());
 }
 
 impl<'s, S: Storage<'s>> Db<S> {
@@ -723,7 +734,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 ("cron", cron.as_deref().map(s).unwrap_or(DataValue::Null)),
             ],
         )?;
-        AUTO.lock().unwrap().insert(ns.to_string(), (every, 0));
+        self.consol_state.auto.lock().unwrap().insert(ns.to_string(), (every, 0));
         self.define_consolidate_workflow()?;
         let mut out = serde_json::json!({"every": every, "workflow": CONSOLIDATE_WORKFLOW});
         if let Some(c) = cron {
@@ -754,7 +765,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             return;
         }
         let every = {
-            let mut a = AUTO.lock().unwrap();
+            let mut a = self.consol_state.auto.lock().unwrap();
             if let Some(x) = a.get_mut(ns) {
                 if x.0 <= 0 {
                     return;
@@ -772,11 +783,11 @@ impl<'s, S: Storage<'s>> Db<S> {
                     self.mem_q(&format!("?[every] := *{MEM_CONSOL}{{ns: $ns, every}}"), vec![("ns", s(ns))])
                         .ok()
                         .and_then(|r| r.rows.first().and_then(|x| x[0].get_int()))
-                        .unwrap_or(0)
+                        .unwrap_or(DEFAULT_CONSOLIDATE_EVERY)
                 } else {
-                    0
+                    DEFAULT_CONSOLIDATE_EVERY
                 };
-                AUTO.lock().unwrap().insert(ns.to_string(), (e, added as i64));
+                self.consol_state.auto.lock().unwrap().insert(ns.to_string(), (e, added as i64));
                 return;
             }
         };
@@ -785,9 +796,11 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.flow_call(
                 "start",
                 serde_json::json!({"workflow": CONSOLIDATE_WORKFLOW, "input": {"ns": ns},
-                    "id": format!("consolidate:{ns}:{head}"), "serial": format!("consolidate:{ns}")}),
+                    "id": format!("consolidate:{ns}:{head}"), "serial": format!("consolidate:{ns}"),
+                    "queue": CONSOLIDATE_QUEUE}),
             )
         });
+        self.consol_state.pending.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = every;
     }
 }

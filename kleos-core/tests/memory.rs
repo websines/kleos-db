@@ -175,6 +175,15 @@ fn recall(db: &DbInstance, q: &str, ns_: &str, as_of: Option<i64>) -> Vec<String
     .collect()
 }
 
+/// `recall` with the graph modes off, for tests that check exact results.
+fn recall_off(db: &DbInstance, q: &str, ns_: &str, as_of: Option<i64>) -> Vec<String> {
+    db.recall(q, RecallOpts { ns: ns(ns_), as_of, graph: Some("off".into()), ..Default::default() })
+        .unwrap()
+        .into_iter()
+        .map(|h| h.memory_text().to_string())
+        .collect()
+}
+
 fn count(db: &DbInstance, script: &str) -> usize {
     db.run_script(script, Default::default(), ScriptMutability::Immutable)
         .unwrap()
@@ -515,8 +524,8 @@ fn no_ml_degrades_to_add_only_fts_and_rules() {
     // and exact restatements are duplicates
     assert_eq!(db.remember("I live in Berlin", at("u", d(5))).unwrap().action, "duplicate");
     // FTS-only recall
-    assert_eq!(recall(&db, "how much is the rent?", "u", None), vec!["My rent is $2,100 per month.".to_string()]);
-    assert_eq!(recall(&db, "rent", "u", Some(d(2))), vec!["My rent is $1,800 per month.".to_string()]);
+    assert_eq!(recall_off(&db, "how much is the rent?", "u", None), vec!["My rent is $2,100 per month.".to_string()]);
+    assert_eq!(recall_off(&db, "rent", "u", Some(d(2))), vec!["My rent is $1,800 per month.".to_string()]);
     // reflect still works
     let r = db.reflect(ReflectOpts { ns: ns("u"), since: Some(0), ..Default::default() }).unwrap();
     assert!(r.changes.iter().any(|c| c.change == "ended"));
@@ -1496,11 +1505,11 @@ fn recall_entity_expansion() {
             .unwrap();
     }
     let q = "what dog did Anna adopt";
-    let base = db.recall(q, ropts("u", 2)).unwrap();
+    let base = db.recall(q, RecallOpts { graph: Some("off".into()), ..ropts("u", 2) }).unwrap();
     assert!(base.iter().all(|h| !h.expanded));
     assert!(!base.iter().any(|h| h.text.contains("nurse")), "{:?}", texts(&base));
     let ex = db
-        .recall(q, RecallOpts { expand: Some(true), expand_weight: Some(0.9), ..ropts("u", 2) })
+        .recall(q, RecallOpts { expand: Some(true), expand_weight: Some(0.9), graph: Some("off".into()), ..ropts("u", 2) })
         .unwrap();
     // the seed keeps the top; the memory about the same entity follows
     assert_eq!(ex[0].text, "Anna adopted a greyhound called Pixel.", "{:?}", texts(&ex));
@@ -1511,7 +1520,7 @@ fn recall_entity_expansion() {
     }
     db.remember("I adopted a greyhound called Pixel.", with_ents("h", d(40), &["user"])).unwrap();
     let hub = db
-        .recall("greyhound", RecallOpts { expand: Some(true), expand_weight: Some(1.0), ..ropts("h", 3) })
+        .recall("greyhound", RecallOpts { expand: Some(true), expand_weight: Some(1.0), graph: Some("off".into()), ..ropts("h", 3) })
         .unwrap();
     assert!(hub.iter().all(|h| !h.expanded), "{:?}", texts(&hub));
 }

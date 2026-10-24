@@ -10,6 +10,7 @@ to kleos.
 ## Unreleased
 
 ### Changed
+- **Graph recall and consolidation are on by default** (the user's choice): `recall` defaults to `graph: 'ppr'` (which also follows inferred ontology links; `graph: 'off'` opts out), and each namespace consolidates automatically after every 200 new memories (`every: 0` opts out), run by a lazily started in-process thread (`DbInstance::consolidate_kick`) on the flow queue `consolidate`; profiles and summaries appear in the context block once built. The auto-consolidation counters are per open store, not per process.
 - **Ontology quality (wave6/quality).** A thin claim (nothing concrete, under 5 content words) never auto-supersedes a substantive one, however the pair is typed; it is capped at pending ("It's definitely isn't, Maria." no longer ends "Investing in our future generations is key…"), and a name closing its sentence after a comma counts as a vocative. Maintenance (cardinality flips, merges, retirement) counts only cue-, rule-, learning- or extractor-backed types as evidence, never prototype-only ones. A memory branch can retract a fact it inherited (a tombstone hides the ancestor's copy from the branch's `facts` and `infer`; the parent keeps it).
 
 ### Fixed

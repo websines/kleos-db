@@ -73,8 +73,16 @@ extractive text (`llm_errors`).
     `consolidate:<ns>`);
   - `cron: '@every 1h'` (any `::flow` schedule) runs it on a schedule.
 
-  A flow worker (`flow_worker`, `kleos server --flow-worker`) or `::flow tick`
-  executes the runs.
+  **On by default:** a namespace with no setting consolidates after every
+  `DEFAULT_CONSOLIDATE_EVERY` (200) new memories; `every: 0` turns it off.
+  Runs go to the flow queue `consolidate`, and the store runs them itself: a
+  background thread of the process (`DbInstance::consolidate_kick`), started
+  lazily after a `remember` that queued a run, ticks that queue until nothing
+  is due and exits. A flow worker (`flow_worker`, `kleos server
+  --flow-worker`) or `::flow tick` can run them too; leases keep one run from
+  executing twice. Profiles and summaries are shown in the context block by
+  default once built (the user's choice; about +38% context tokens on LoCoMo,
+  QA +1.9 points there and −0.8 on LongMemEval, docs/benchmarks/memory.md).
 
 ## Context output
 
