@@ -2301,6 +2301,81 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
     }
 
+    /// Entity writes for document chunks (docs/specs/documents.md): with an
+    /// extractor configured and enabled, each chunk's names are extracted and
+    /// resolved like a statement's, and the chunk mentions them. Kinship
+    /// edges are not written: first-person words in a document are not the
+    /// user's. Returns scripts for the chunk batch's own transaction.
+    pub(crate) fn chunk_entity_scripts(
+        &'s self,
+        ns: &str,
+        chunks: &[(String, String)],
+    ) -> Result<Vec<(String, BTreeMap<String, DataValue>)>> {
+        let Some(cfg) = self.memory_config()? else { return Ok(vec![]) };
+        let Some(name) = cfg.extractor.clone() else { return Ok(vec![]) };
+        let Some(ex) = crate::extract::get_extractor(&name) else { return Ok(vec![]) };
+        if chunks.is_empty() {
+            return Ok(vec![]);
+        }
+        let thr = BTreeMap::new();
+        let mut names: Vec<String> = vec![];
+        let mut per_chunk: Vec<Vec<String>> = Vec::with_capacity(chunks.len());
+        for (_, text) in chunks {
+            let x = memory_extract::auto_entities(&*ex, text, std::slice::from_ref(text), None, &thr, &[])?;
+            for n in &x.names {
+                if !names.iter().any(|m| norm_name(m) == norm_name(n)) {
+                    names.push(n.clone());
+                }
+            }
+            per_chunk.push(x.names);
+        }
+        if names.is_empty() {
+            return Ok(vec![]);
+        }
+        let sc = self.mem_scope(ns)?;
+        let view = self.entity_view(&sc)?;
+        let decider = self.pick_decider(None, &cfg);
+        let ents = self.plan_entities(&sc, &names, decider.as_deref(), &view)?;
+        let eid_of: BTreeMap<String, String> = ents.out.iter().map(|e| (norm_name(&e.name), e.eid.clone())).collect();
+        let mut mentions = vec![];
+        for ((id, _), ns_) in chunks.iter().zip(&per_chunk) {
+            let mut seen = BTreeSet::new();
+            for n in ns_ {
+                if let Some(eid) = eid_of.get(&norm_name(n)) {
+                    if seen.insert(eid.clone()) {
+                        mentions.push(DataValue::List(vec![s(ns), s(id), s(eid)]));
+                    }
+                }
+            }
+        }
+        let mut out = vec![];
+        if !ents.rows.is_empty() {
+            out.push((
+                format!("?[ns, eid, name, norm, kind, created] <- $ents :put {MEM_ENTITY} {{ns, eid => name, norm, kind, created}}"),
+                params(vec![("ents", DataValue::List(ents.rows))]),
+            ));
+        }
+        if !ents.merges.is_empty() {
+            out.push((
+                format!("?[relation, from, vt, into, p, decided_by, reason] <- $merges :put {ENTITY_MERGES} {{relation, from, vt => into, p, decided_by, reason}}"),
+                params(vec![("merges", DataValue::List(ents.merges))]),
+            ));
+        }
+        if !ents.links.is_empty() {
+            out.push((
+                format!("?[relation, a, b, p, band, decided_by, status, at] <- $elinks :put {ENTITY_LINKS} {{relation, a, b => p, band, decided_by, status, at}}"),
+                params(vec![("elinks", DataValue::List(ents.links))]),
+            ));
+        }
+        if !mentions.is_empty() {
+            out.push((
+                format!("?[ns, id, eid] <- $mentions :put {MEM_MENTION} {{ns, id, eid}}"),
+                params(vec![("mentions", DataValue::List(mentions))]),
+            ));
+        }
+        Ok(out)
+    }
+
     /// Automatic entities of a statement (docs/specs/memory-api.md,
     /// "Automatic entities"), or `None` when entities were passed, the call
     /// turned extraction off, or no extractor is configured.

@@ -657,6 +657,13 @@ impl<'s, S: Storage<'s>> Db<S> {
         out
     }
 
+    /// Entities named in new chunks, when the store has an extractor
+    /// (`memory_init {extractor}`); nothing otherwise.
+    fn chunk_entities(&'s self, ns: &str, rows: &[ChunkRow]) -> Result<Vec<(String, BTreeMap<String, DataValue>)>> {
+        let chunks: Vec<(String, String)> = rows.iter().map(|r| (r.id.clone(), r.text.clone())).collect();
+        self.chunk_entity_scripts(ns, &chunks)
+    }
+
     /// Embed chunk texts with the store's embedder (None per row without one).
     fn embed_chunks(&'s self, rows: &[ChunkRow]) -> Result<Vec<Option<Vec<f32>>>> {
         let cfg = self.memory_config()?;
@@ -782,6 +789,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let ids: BTreeSet<String> = rows.iter().map(|r| r.id.clone()).collect();
         let gone: Vec<String> = previous.iter().filter(|x| !ids.contains(*x)).cloned().collect();
         let mut scripts = self.chunk_scripts(ns, doc, &new_rows, &vecs, at);
+        scripts.extend(self.chunk_entities(ns, &new_rows)?);
         scripts.extend(self.retract_scripts(ns, &gone, at));
         scripts.push((
             self.doc_row_script(),
@@ -1064,7 +1072,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                     let embed_ms = t2.elapsed().as_secs_f64() * 1000.0;
                     let t3 = Instant::now();
                     let at = now_us();
-                    let scripts = self.chunk_scripts(&input.ns, &input.doc, &new_rows, &vecs, at);
+                    let mut scripts = self.chunk_scripts(&input.ns, &input.doc, &new_rows, &vecs, at);
+                    scripts.extend(self.chunk_entities(&input.ns, &new_rows)?);
                     let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
                     let n_end = n0 + rows.len() as i64;
                     let mut stage = timings.clone();
