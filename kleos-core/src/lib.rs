@@ -171,6 +171,9 @@ pub mod memory_engram;
 pub mod entity;
 pub mod engram;
 pub mod flow;
+pub mod ontology;
+pub mod ontology_type;
+pub(crate) mod ontology_ttl;
 pub(crate) mod flow_builtin;
 pub(crate) mod flow_cron;
 pub(crate) mod fixed_rule;
@@ -1418,6 +1421,10 @@ impl DbInstance {
     /// Dispatcher method. See [crate::Db::memory_call].
     pub fn memory_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
         dispatch_db!(self, db => db.memory_call(op, args))
+    }
+    /// Ontologies (docs/specs/ontology.md). See [crate::Db::ontology_call].
+    pub fn ontology_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
+        dispatch_db!(self, db => db.ontology_call(op, args))
     }
     /// Durable workflows (docs/specs/durable-workflows.md). See [crate::Db::flow_call].
     pub fn flow_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {

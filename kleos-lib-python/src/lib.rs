@@ -1497,6 +1497,21 @@ impl CozoDbPy {
     pub fn remember(&self, py: Python<'_>, text: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "remember", vec![("text", json!(text))], opts)
     }
+    /// Ontologies (kleos fork; docs/specs/ontology.md): run ontology op `op`
+    /// (`define`, `import`, `export`, `get`, `list`, `activate`,
+    /// `deactivate`, `assert`, `retract`, `facts`, `infer`, `validate`,
+    /// `type`) with `args` (a dict). Returns the op's JSON result.
+    #[pyo3(signature = (op, args=None))]
+    pub fn ontology_call(&self, py: Python<'_>, op: &str, args: Option<&PyAny>) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let a = match args {
+            None => serde_json::Value::Null,
+            Some(x) if x.is_none() => serde_json::Value::Null,
+            Some(x) => serde_json::Value::from(py_to_value(x)?),
+        };
+        let out = py.allow_threads(|| db.ontology_call(op, a)).map_err(report2py)?;
+        Ok(json_to_py(out, py))
+    }
     /// Durable workflows (kleos fork; docs/specs/durable-workflows.md): run
     /// flow op `op` (`define`, `start`, `signal`, `cancel`, `status`,
     /// `list`, `history`, `stats`, `schedule`, `claim`, `step`, `record`,

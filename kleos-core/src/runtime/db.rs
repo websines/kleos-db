@@ -2780,6 +2780,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             SysOp::Engram(op) => crate::engram::run_engram_op(self, op, read_only, true),
             SysOp::Flow(op, _) => bail!("`::flow {op}` must run as a script of its own, not inside an imperative block"),
+            SysOp::Ontology(op, _) => bail!("`::ontology {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3588,6 +3589,15 @@ impl<'s, S: Storage<'s>> Db<S> {
                     bail!("`::flow {op}` cannot run in read-only mode");
                 }
                 let out = self.flow_call(op, args.clone())?;
+                return Ok(crate::flow::flow_rows(out));
+            }
+            // kleos fork: ontologies run their own scripts (docs/specs/ontology.md)
+            SysOp::Ontology(op, args) => {
+                let reads = ["get", "list", "export", "facts", "infer", "validate", "type"];
+                if read_only && !reads.contains(&op.as_str()) {
+                    bail!("`::ontology {op}` cannot run in read-only mode");
+                }
+                let out = self.ontology_call(op, args.clone())?;
                 return Ok(crate::flow::flow_rows(out));
             }
             SysOp::KillRunning(id) => {
