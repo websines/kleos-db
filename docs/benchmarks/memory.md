@@ -887,7 +887,7 @@ questions, QA on the usual 301. LongMemEval: the 119-question set. Results:
   value that a later statement replaced.
 - **Profiles are within noise** on both (+1 net each).
 - **Compression:** summaries are 27,074 tokens for LoCoMo's 208,043 tokens of
-  claims (7.7×; 272 conversations' sessions) and 226,221 for LongMemEval's
+  claims (7.7×; 272 sessions summarised) and 226,221 for LongMemEval's
   1,035,923 (4.6×). They are additions to the context block, not replacements:
   the block grows by 38% on LoCoMo.
 - **Cost:** consolidation took 33 s for all of LoCoMo (about 3.3 s per
