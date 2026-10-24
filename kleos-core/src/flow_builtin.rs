@@ -28,7 +28,7 @@ use crate::runtime::db::{Db, ScriptMutability};
 use crate::storage::Storage;
 
 const ACTIONS: [&str; 6] = ["query", "remember", "recall", "embed", "decide", "http"];
-const KINDS: [&str; 15] = [
+const KINDS: [&str; 16] = [
     "query",
     "remember",
     "recall",
@@ -44,6 +44,7 @@ const KINDS: [&str; 15] = [
     "fan_out",
     "set",
     "return",
+    "continue_as_new",
 ];
 const STEP_FIELDS: [&str; 4] = ["name", "retry", "on_error", "timeout_ms"];
 const DEFAULT_MAX_LOOP: i64 = 1000;
@@ -141,6 +142,8 @@ fn need_str<'a>(args: &'a JsonValue, k: &str, kind: &str) -> Result<&'a str> {
 enum Out {
     Val(JsonValue),
     Ret(JsonValue),
+    /// Continue as new with this input (a fresh history, same id).
+    Continue(JsonValue),
     Wait(Vec<Wait>),
 }
 
@@ -477,6 +480,7 @@ impl<'s, S: Storage<'s>> Run<'s, S> {
                 for r in results {
                     match r? {
                         Out::Val(v) | Out::Ret(v) => vals.push(v),
+                        Out::Continue(_) => bail!("flow graph: continue_as_new cannot run inside fan_out"),
                         Out::Wait(w) => waits.extend(w),
                     }
                 }
@@ -488,6 +492,7 @@ impl<'s, S: Storage<'s>> Run<'s, S> {
             }
             "set" => Ok(Out::Val(self.expr(args, env)?)),
             "return" => Ok(Out::Ret(self.expr(args, env)?)),
+            "continue_as_new" => Ok(Out::Continue(self.expr(args, env)?)),
             other => bail!("flow graph: unknown step kind '{other}'"),
         }
     }
@@ -621,6 +626,10 @@ pub(crate) fn run<'s, S: Storage<'s>>(db: &'s Db<S>, c: Claimed) -> Result<Strin
                 Err(e) => settle(e),
             }
         }
+        Ok(Out::Continue(input)) => match db.flow_continue(&id, token, &input) {
+            Ok(_) => Ok("continued".to_string()),
+            Err(e) => settle(e),
+        },
         Ok(Out::Wait(ws)) => {
             let mut o = SuspendOpts {
                 id: id.clone(),

@@ -210,3 +210,45 @@ def test_two_workers_share_the_queue(db):
     done = db.flow_call("list", {"status": "completed", "limit": 100})
     assert len(done) == 20
     assert all(v == 1 for v in CALLS.values()) and len(CALLS) == 20
+
+
+def test_continue_as_new_restarts_with_a_fresh_history(db):
+    @workflow("counter")
+    def counter(ctx, n):
+        n = ctx.step(lambda: n + 1, name="inc")
+        if n < 4:
+            ctx.continue_as_new(n)
+        return n
+
+    start(db, "counter", 0, id="c1")
+    w = Worker(db, [counter])
+    st = run_until(w, db, "c1")
+    assert st["output"] == 4
+    types = [e["type"] for e in db.flow_call("history", {"id": "c1"})]
+    # only the last run's events: started (input 3), its step, completed
+    assert types == ["started", "step", "completed"], types
+
+
+def _sleepy(sec):
+    import time as _t
+
+    _t.sleep(sec)
+    return sec
+
+
+def test_isolated_step_timeout_stops_the_function(db):
+    @workflow("slow")
+    def slow(ctx, _):
+        try:
+            ctx.step(_sleepy, 30, name="nap", timeout=0.5, isolate=True, retry=RetryPolicy(max_attempts=1))
+        except StepFailed as e:
+            return str(e)
+        return "finished?"
+
+    start(db, "slow", None, id="s1")
+    w = Worker(db, [slow])
+    t0 = time.time()
+    st = run_until(w, db, "s1", limit=20)
+    assert "timed out" in st["output"], st
+    # the child process was terminated, not waited for
+    assert time.time() - t0 < 15

@@ -1513,6 +1513,45 @@ impl<'s, S: Storage<'s>> Db<S> {
         Ok(json!({"id": id, "status": status}))
     }
 
+    /// Continue-as-new (Temporal's): end this run and start a fresh history
+    /// for the same workflow id with `input`, so a long-running loop's
+    /// history stays bounded. The new run's `started` event records the
+    /// run number; timers are dropped, buffered signals stay.
+    pub(crate) fn flow_continue(&'s self, id: &str, token: i64, input: &JsonValue) -> Result<JsonValue> {
+        let w = self.flow_wf(id)?.ok_or_else(|| miette!("no workflow '{id}'"))?;
+        let runs = w["meta"]["runs"].as_i64().unwrap_or(1) + 1;
+        let mut meta = if w["meta"].is_object() { w["meta"].clone() } else { json!({}) };
+        meta["runs"] = json!(runs);
+        let now = now_us();
+        let script = format!(
+            "{}{} \
+             {{?[wf, seq] := *{FLOW_EVENT}{{wf, seq}}, wf = $fl_id :rm {FLOW_EVENT} {{wf, seq}}}} \
+             {{?[wf, seq, type, key, name, data, at, token] <- [[$fl_id, 1, 'started', null, $fl_name, $fl_input, $fl_now, $fl_token]] \
+              :put {FLOW_EVENT} {{wf, seq => type, key, name, data, at, token}}}} \
+             {{?[wf, key] := *{FLOW_TIMER}{{wf, key}}, wf = $fl_id :rm {FLOW_TIMER} {{wf, key}}}} \
+             {{?[id, status, input, seq, owner, lease_until, wait, attempts, meta, updated] <- \
+                 [[$fl_id, 'pending', $fl_input, 1, null, null, null, 0, $fl_meta, $fl_now]] \
+              :update {FLOW_WF} {{id => status, input, seq, owner, lease_until, wait, attempts, meta, updated}}}} \
+             {{?[wf, queue, due, serial, serial_seq] := *{FLOW_WF}{{id: $fl_id, queue, serial, serial_seq}}, wf = $fl_id, due = $fl_now \
+              :put {FLOW_TASK} {{wf => queue, due, serial, serial_seq}}}}",
+            fence(),
+            not_canceled()
+        );
+        self.fl_w(
+            &script,
+            vec![
+                ("fl_id", sv(id)),
+                ("fl_token", DataValue::from(token)),
+                ("fl_name", w["name"].as_str().map(sv).unwrap_or(DataValue::Null)),
+                ("fl_input", jd(input)),
+                ("fl_meta", jd(&meta)),
+                ("fl_now", DataValue::from(now)),
+            ],
+        )
+        .map_err(|e| self.fl_diagnose(id, token, e))?;
+        Ok(json!({"id": id, "status": "pending", "continued": true, "run": runs}))
+    }
+
     fn flow_fail(&'s self, o: FailOpts) -> Result<JsonValue> {
         let w = self.flow_wf(&o.id)?.ok_or_else(|| miette!("no workflow '{}'", o.id))?;
         let canceled = o.canceled.unwrap_or(false) || w["cancel"].as_bool().unwrap_or(false);
@@ -1803,6 +1842,17 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.flow_finish(&o.id, o.token, "completed", &o.output, None)?
             }
             "fail" => self.flow_fail(from_args(op, args)?)?,
+            "continue_as_new" => {
+                #[derive(Default, Deserialize)]
+                #[serde(default, deny_unknown_fields)]
+                struct C {
+                    id: String,
+                    token: i64,
+                    input: JsonValue,
+                }
+                let o: C = from_args(op, args)?;
+                self.flow_continue(&o.id, o.token, &o.input)?
+            }
             "heartbeat" => self.flow_heartbeat(from_args(op, args)?)?,
             "tick" => self.flow_tick(from_args(op, args)?)?,
             "next_due" => {
@@ -1818,7 +1868,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             other => bail!(
                 "unknown flow op '{other}': expected define, start, signal, cancel, status, list, history, stats, \
                  schedule, unschedule, schedules, adopt_engram, claim, step, record, consume_signal, start_child, \
-                 suspend, complete, fail, heartbeat, tick or next_due"
+                 suspend, complete, fail, continue_as_new, heartbeat, tick or next_due"
             ),
         })
     }

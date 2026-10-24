@@ -91,6 +91,50 @@ class _Suspend(BaseException):
         self.children = list(children)
 
 
+class _ContinueAsNew(BaseException):
+    """Unwinds the workflow function to restart it with a fresh history."""
+
+    def __init__(self, input):
+        super().__init__("continue_as_new")
+        self.input = input
+
+
+def _child_call(conn, fn, args, kwargs):
+    try:
+        conn.send((True, fn(*args, **kwargs)))
+    except Exception as e:  # noqa: BLE001
+        conn.send((False, f"{type(e).__name__}: {e}"))
+    finally:
+        conn.close()
+
+
+def _run_isolated(fn, args, kwargs, timeout):
+    """Run `fn` in a child process; on timeout the process is terminated (the
+    function really stops). `fn`, its arguments and its result must pickle."""
+    import multiprocessing as mp
+
+    mctx = mp.get_context("spawn")
+    parent, child = mctx.Pipe(duplex=False)
+    p = mctx.Process(target=_child_call, args=(child, fn, args, kwargs), daemon=True)
+    p.start()
+    child.close()
+    try:
+        if parent.poll(timeout):
+            ok, val = parent.recv()
+            p.join(5)
+            if ok:
+                return val
+            raise RuntimeError(val)
+        raise _FutTimeout()
+    finally:
+        if p.is_alive():
+            p.terminate()
+            p.join(2)
+            if p.is_alive():
+                p.kill()
+        parent.close()
+
+
 class RetryPolicy:
     """Attempts of a step and the back-off between them (seconds)."""
 
@@ -230,10 +274,12 @@ class Context:
         return False, None, fails
 
     # ---- commands ---------------------------------------------------------------------------
-    def step(self, fn, *args, name=None, retry=None, timeout=None, **kwargs):
+    def step(self, fn, *args, name=None, retry=None, timeout=None, isolate=False, **kwargs):
         """Run `fn(*args, **kwargs)` once and record its (JSON) result; replays return the record.
-        `retry`: a RetryPolicy (default 3 attempts, 1 s doubling); `timeout`: seconds per attempt
-        (the function's thread cannot be stopped, it is abandoned)."""
+        `retry`: a RetryPolicy (default 3 attempts, 1 s doubling); `timeout`: seconds per attempt.
+        With `isolate=True` the attempt runs in a child process that a timeout terminates (`fn`, its
+        arguments and result must pickle); otherwise a timed-out thread cannot be stopped and is
+        abandoned."""
         name = name or getattr(fn, "__name__", "step")
         key = self._key(name)
         done, val, fails = self._replay_step(key, name)
@@ -242,7 +288,9 @@ class Context:
         self._check_cancel()
         retry = retry or RetryPolicy()
         try:
-            if timeout is None:
+            if isolate:
+                result = _run_isolated(fn, args, kwargs, timeout)
+            elif timeout is None:
                 result = fn(*args, **kwargs)
             else:
                 ex = ThreadPoolExecutor(max_workers=1)
@@ -322,6 +370,12 @@ class Context:
             self._record("timer_fired", key, name)
             return
         raise _Suspend(timers=[(key, due, "sleep")])
+
+    def continue_as_new(self, input=None):
+        """End this run and start the workflow again from the top with `input` and a fresh history
+        (same id), so a long-running loop's history stays bounded. Does not return."""
+        self._check_cancel()
+        raise _ContinueAsNew(_jsonable(input))
 
     def wait_signal(self, signal, timeout=None):
         """The payload of the next signal `signal` sent to this workflow (signals sent earlier are
@@ -500,6 +554,8 @@ class Worker:
             ctx._call("complete", output=out)
             rec["outcome"] = "completed"
             rec["output"] = out
+        except _ContinueAsNew as cn:
+            self._settle(ctx, rec, "continue_as_new", input=cn.input, outcome="continued")
         except _Suspend as s:
             try:
                 ctx._call("suspend", timers=[{"key": k, "due": d, "kind": kind} for k, d, kind in s.timers],
