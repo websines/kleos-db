@@ -573,6 +573,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .route("/text-query", post(text_query))
         .route("/memory/:op", post(memory_op))
         .route("/flow/:op", post(flow_op))
+        .route("/ontology/:op", post(ontology_op))
         .route("/export/:relations", get(export_relations))
         .route("/import", put(import_relations))
         .route("/backup", post(backup))
@@ -879,6 +880,34 @@ async fn flow_op(
         );
     }
     let result = spawn_blocking(move || st.db.flow_call(&op, args)).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "message": err.to_string()}).into(),
+        ),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Ontologies (kleos fork; docs/specs/ontology.md): `POST
+/// /ontology/{define|import|export|get|list|activate|assert|facts|infer|...}`
+/// with the op's options as a JSON object. A read-only principal may only
+/// read (`get`, `list`, `export`, `facts`, `infer`, `validate`, `type`).
+async fn ontology_op(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let reads = ["get", "list", "export", "facts", "infer", "validate", "type", "gate"];
+    if matches!(mutability, ScriptMutability::Immutable) && !reads.contains(&op.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            json!({"ok": false, "message": format!("ontology {op} needs write access")}).into(),
+        );
+    }
+    let result = spawn_blocking(move || st.db.ontology_call(&op, args)).await;
     match result {
         Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
         Ok(Err(err)) => (
