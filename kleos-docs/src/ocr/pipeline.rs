@@ -760,12 +760,16 @@ impl Ocr {
         let t0 = std::time::Instant::now();
         let small = preview(gray, PREVIEW_SIDE);
         let a = estimate_skew(&small, 800, self.threads);
+        let t_skew = t0.elapsed().as_secs_f64() * 1000.0;
         let k = if turn {
             let s = if a.abs() >= DESKEW_MIN { rotate_page(&small, a) } else { small.clone() };
             self.orientation(&s)?
         } else {
             0
         };
+        if std::env::var("KLEOS_OCR_PROF").is_ok() {
+            eprintln!("orient: preview+skew {t_skew:.0} ms, model {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0 - t_skew);
+        }
         let orient_ms = ms(t0);
         let mut page = self.read_turned(gray, k, a, Some(&small))?;
         *page.timings.entry("orient_ms".into()).or_insert(0.0) += orient_ms;

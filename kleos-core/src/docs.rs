@@ -127,7 +127,8 @@ pub struct DocOpts {
     pub batch_pages: Option<usize>,
     /// Ingest inside `remember` whatever the size.
     pub sync: Option<bool>,
-    /// Pages OCR'd in parallel (default: the cores, at most 8).
+    /// Pages OCR'd in parallel, one single-threaded worker each (default:
+    /// the cores, at most 4).
     pub threads: Option<usize>,
     /// Render resolution for OCR (default 200).
     pub dpi: Option<f64>,
@@ -214,8 +215,9 @@ pub fn ocr_engine() -> Result<Arc<Ocr>> {
         return Ok(o.clone());
     }
     let dir = kleos_docs::ocr::model_dir().map_err(|e| miette!("OCR models: {e}"))?;
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(4);
-    let o = Arc::new(Ocr::load(&dir, threads).map_err(|e| miette!("OCR models: {e}"))?);
+    // single-threaded inside a page: pages run in parallel instead (one
+    // worker per core, as Indra's own convert_many does)
+    let o = Arc::new(Ocr::load(&dir, 1).map_err(|e| miette!("OCR models: {e}"))?);
     *g = Some(o.clone());
     Ok(o)
 }
@@ -334,7 +336,7 @@ fn converter_mode(o: &DocOpts) -> Result<Mode> {
 }
 
 fn threads_of(o: &DocOpts) -> usize {
-    o.threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8)).max(1)
+    o.threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(4)).max(1)
 }
 
 /// Blocks of pages [from, to) and the time spent (render/text, OCR and so on).

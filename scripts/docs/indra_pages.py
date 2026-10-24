@@ -30,7 +30,7 @@ def main():
     for i in pages:
         t = time.time()
         p = conv.pdf_page(book, doc, i)
-        res["pages"][str(i)] = {"lines": [l.text for l in p.lines], "markdown": p.markdown, "source": p.source, "s": round(time.time() - t, 3)}
+        res["pages"][str(i)] = {"lines": [l.text for l in p.lines], "markdown": p.markdown, "source": p.source, "s": round(time.time() - t, 3), "timings": p.timings}
     res["sample_s"] = round(time.time() - t0, 2)
     res["sample_pages_per_s"] = round(len(pages) / (time.time() - t0), 3)
     doc.close()

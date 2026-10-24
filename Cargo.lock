@@ -3346,6 +3346,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
+ "tract-core",
  "tract-linalg",
  "tract-onnx",
  "unicode-bidi",

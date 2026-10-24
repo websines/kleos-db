@@ -5,7 +5,9 @@ use tract_onnx::prelude::*;
 fn main() -> TractResult<()> {
     let a: Vec<String> = std::env::args().collect();
     let (path, b, h, w): (String, usize, usize, usize) = (a[1].clone(), a[2].parse()?, a[3].parse()?, a[4].parse()?);
-    let model = tract_onnx::onnx().model_for_path(&path)?.into_optimized()?.into_runnable()?;
+    let mut m = tract_onnx::onnx().model_for_path(&path)?;
+    if let Some(n) = a.get(5) { let outs = m.output_outlets()?.to_vec(); let n: usize = n.parse()?; m.select_output_outlets(&outs[..n])?; }
+    let model = m.into_optimized()?.into_runnable()?;
     let x = Tensor::zero::<f32>(&[b, 1, h, w])?;
     let ws = tensor1(&vec![w as i64; b]);
     for rep in 0..2 {
