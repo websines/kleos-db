@@ -437,6 +437,30 @@ impl McpServer {
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
             }),
             json!({
+                "name": "ontology",
+                "title": "Ontology",
+                "description": "Inspect and steer the self-maintaining ontology: list, facts, infer (derived facts), learn, history, undo (asks for confirmation).",
+                "inputSchema": {"type": "object", "properties": {
+                    "action": {"type": "string", "enum": ["list", "facts", "infer", "learn", "history", "undo"]},
+                    "ns": ns,
+                    "subject": {"type": "string", "description": "facts/infer: filter by subject"},
+                    "property": {"type": "string", "description": "facts/infer: filter by property"},
+                    "change": {"type": "string", "description": "undo: change id from history"},
+                    "confirm": {"type": "boolean", "description": "Set after the user agreed (clients without elicitation)"}
+                }, "required": ["action"]},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
+            }),
+            json!({
+                "name": "reembed",
+                "title": "Re-embed",
+                "description": "Move a namespace's vectors to another embedder as a durable background job (returns a task).",
+                "inputSchema": {"type": "object", "properties": {
+                    "embedder": {"type": "string", "description": "Name of an enabled embedder"},
+                    "ns": ns
+                }, "required": ["embedder"]},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
+            }),
+            json!({
                 "name": "branch",
                 "title": "Memory branches",
                 "description": "fork a namespace (instant copy), diff two, merge one into another (dry_run first), rewind to a time, discard, or list. merge/rewind/discard ask for confirmation.",
@@ -474,13 +498,14 @@ impl McpServer {
             Some(v @ Value::Object(_)) => v.clone(),
             Some(_) => return Err(RpcError::new(INVALID_PARAMS, "'arguments' must be an object")),
         };
-        let known = ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "branch"];
+        let known = ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "branch", "ontology", "reembed"];
         if !known.contains(&name) && !(name == "query" && self.allow_query) {
             return Err(RpcError::new(INVALID_PARAMS, format!("Unknown tool: {name}")));
         }
         let read_tool = matches!(name, "recall" | "reflect" | "entity_profile" | "doc_status" | "query")
             || (name == "branch" && matches!(args.get("action").and_then(|a| a.as_str()), Some("diff" | "list")))
-            || (name == "flow" && matches!(args.get("action").and_then(|a| a.as_str()), Some("status" | "list")));
+            || (name == "flow" && matches!(args.get("action").and_then(|a| a.as_str()), Some("status" | "list")))
+            || (name == "ontology" && matches!(args.get("action").and_then(|a| a.as_str()), Some("list" | "facts" | "infer" | "history")));
         let out = if conn.read_only && !read_tool {
             tool_error(format!("'{name}' needs write access; this connection is read-only"))
         } else {
@@ -606,6 +631,8 @@ impl McpServer {
                 }
             }
             "branch" => self.branch(&ns, args, params, era, conn)?,
+            "ontology" => self.ontology(&ns, args, params, era, conn)?,
+            "reembed" => self.reembed(&ns, args, era),
             "query" => {
                 let Some(script) = args.get("script").and_then(|v| v.as_str()) else { return Ok(tool_error("query needs 'script'")) };
                 match b.query(script, args.get("params").unwrap_or(&Value::Null)) {
@@ -658,6 +685,71 @@ impl McpServer {
             }));
         }
         done(r)
+    }
+
+    fn ontology(&self, ns: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
+        let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+        let call = |op: &str, a: Value| match self.backend.call(Area::Ontology, op, a) {
+            Ok(v) => done(v),
+            Err(e) => tool_error(e),
+        };
+        let action = s("action").unwrap_or_default();
+        Ok(match action.as_str() {
+            "list" => call("list", json!({})),
+            "history" => call("history", json!({"ns": ns})),
+            "learn" => call("learn", json!({"ns": ns})),
+            "facts" | "infer" => {
+                let mut a = json!({"ns": ns});
+                if let Some(v) = s("subject") {
+                    a["s"] = json!(v);
+                }
+                if let Some(v) = s("property") {
+                    a["p"] = json!(v);
+                }
+                if action == "infer" {
+                    a["derived_only"] = json!(true);
+                }
+                match self.backend.call(Area::Ontology, &action, a) {
+                    Ok(v) if action == "infer" => done(json!({"inferred": v})),
+                    Ok(v) => done(json!({"facts": v})),
+                    Err(e) => tool_error(e),
+                }
+            }
+            "undo" => {
+                let Some(change) = s("change") else { return Ok(tool_error("ontology undo needs 'change' (an id from history)")) };
+                let msg = format!("Undo ontology change '{change}' in namespace '{ns}'?");
+                match self.confirm("ontology", args, params, era, conn, &msg)? {
+                    Confirm::Yes => call("undo", json!({"ns": ns, "change": change})),
+                    other => other.into_out(),
+                }
+            }
+            other => tool_error(format!("ontology: unknown action '{other}' (list, facts, infer, learn, history, undo)")),
+        })
+    }
+
+    fn reembed(&self, ns: &str, args: &Value, era: &Era) -> ToolOut {
+        let Some(embedder) = args.get("embedder").and_then(|v| v.as_str()) else { return tool_error("reembed needs 'embedder'") };
+        let r = match self.backend.call(Area::Memory, "reembed", json!({"ns": ns, "embedder": embedder, "wait": false})) {
+            Ok(v) => v,
+            Err(e) => return tool_error(e),
+        };
+        match (r.get("status").and_then(|s| s.as_str()), r.get("id").and_then(|i| i.as_str())) {
+            (Some("running"), Some(flow)) if era.has_tasks() => {
+                let task_id = encode_task(&json!({"k": "reembed", "ns": ns, "flow": flow}));
+                let now = iso_now();
+                ToolOut::Task(json!({
+                    "resultType": "task",
+                    "taskId": task_id,
+                    "status": "working",
+                    "statusMessage": format!("re-embedding '{ns}' with {embedder}"),
+                    "createdAt": now,
+                    "lastUpdatedAt": now,
+                    "ttlMs": Value::Null,
+                    "pollIntervalMs": 2000,
+                }))
+            }
+            _ => done(r),
+        }
     }
 
     fn branch(&self, ns: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
@@ -804,6 +896,27 @@ impl McpServer {
                 });
                 let ns = t.get("ns").and_then(|v| v.as_str()).unwrap_or_default();
                 let doc = t.get("doc").and_then(|v| v.as_str()).unwrap_or_default();
+                if t.get("k").and_then(|k| k.as_str()) == Some("reembed") {
+                    match st {
+                        "completed" => {
+                            let out = w.get("output").cloned().unwrap_or(Value::Null);
+                            r["status"] = json!("completed");
+                            r["result"] = json!({
+                                "resultType": "complete",
+                                "content": [{"type": "text", "text": format!("re-embedded '{ns}'")}],
+                                "structuredContent": out,
+                            });
+                        }
+                        "failed" => {
+                            r["status"] = json!("failed");
+                            let msg = w.get("error").map(|e| e.to_string()).unwrap_or_else(|| "re-embed failed".into());
+                            r["error"] = json!({"code": -1, "message": msg});
+                        }
+                        "canceled" | "cancelled" => r["status"] = json!("cancelled"),
+                        _ => r["status"] = json!("working"),
+                    }
+                    return Ok(r);
+                }
                 match st {
                     "completed" => {
                         let d = self.backend.call(Area::Doc, "get", json!({"ns": ns, "doc": doc})).unwrap_or(Value::Null);

@@ -149,6 +149,8 @@ errors (unknown tool, bad params) as JSON-RPC errors.
 | `doc_add` | `path?` or `data_b64` + `mime` + `name`, `text?`, `ns?` | write | may return a task |
 | `doc_status` | `doc?`, `ns?` | read-only | one document, or the list |
 | `flow` | `action` (`start`, `status`, `signal`, `cancel`, `list`), `workflow?`, `input?`, `id?`, `name?`, `payload?` | write | durable workflows |
+| `ontology` | `action` (`list`, `facts`, `infer`, `learn`, `history`, `undo`), `ns?`, `subject?`, `property?`, `change?`, `confirm?` | undo asks (MRTR) | the self-maintaining ontology; `infer` returns derived facts only |
+| `reembed` | `embedder`, `ns?` | write | moves a namespace to another embedder; returns a task (`tasks/get`) when the client supports tasks |
 | `branch` | `action` (`fork`, `diff`, `merge`, `rewind`, `discard`, `list`), `from?`, `to?`, `ns?`, `a?`, `b?`, `into?`, `at?`, `dry_run?`, `confirm?` | destructive for merge/rewind/discard | memory branches |
 | `query` | `script`, `params?` | read-only | CozoScript, always run immutable; off unless `--allow-query` |
 
