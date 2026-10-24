@@ -106,17 +106,17 @@ def main(which, out_path, limit, extra):
                     sups.append(rec)
                     if d["action"] == "pending":
                         pend.append(rec)
-        hits = db.recall(q["question"], ns=ns, k=10)
+        hits = db.recall(q["question"], ns=ns, k=10, **RO)
         srcs = [h.get("source") for h in hits]
         ans_dates = sorted(((micros(dates[s]), s) for s in q["answer_session_ids"] if s in dates))
         latest = ans_dates[-1][1] if ans_dates else None
         first_ans = next((s for s in srcs if s in q["answer_session_ids"]), None)
         qw = {}
         for w in QWS:
-            hw = db.recall(q["question"], ns=ns, k=10, question_weight=w, record_access=False)
+            hw = db.recall(q["question"], ns=ns, k=10, question_weight=w, record_access=False, **RO)
             fw = next((h.get("source") for h in hw if h.get("source") in q["answer_session_ids"]), None)
             qw[str(w)] = {"latest_first": fw == latest, "stale_first": fw is not None and fw != latest}
-        hh = db.recall(q["question"], ns=ns, k=10, hide_pending=True)
+        hh = db.recall(q["question"], ns=ns, k=10, hide_pending=True, **RO)
         hsrcs = [h.get("source") for h in hh]
         h_first = next((s for s in hsrcs if s in q["answer_session_ids"]), None)
         rec = {
@@ -161,6 +161,8 @@ def main(which, out_path, limit, extra):
 NODEC = False
 # KLEOS_ONTOLOGY=personal[:decide|pending|dup_only]: activate an ontology per question
 ONTOLOGY = os.environ.get("KLEOS_ONTOLOGY", "")
+# extra recall options for every recall (evaluation), e.g. {"vector_weight": 0.6}
+RO = json.loads(os.environ.get("KU_RECALL_OPTS") or "{}")
 QWS = [0.0, 0.02, 0.05, 0.1]
 if __name__ == "__main__":
     if sys.argv[1].endswith("-nodec"):

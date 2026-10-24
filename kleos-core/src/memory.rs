@@ -156,6 +156,10 @@ const DEFAULT_K: usize = 5;
 /// data for both EmbeddingGemma models (docs/benchmarks/memory.md, "Fusion
 /// weight"); it was the SciFact-tuned 0.6.
 const DEFAULT_VECTOR_WEIGHT: f64 = 0.9;
+/// Vector-leg weight of `remember`'s candidate search (which earlier
+/// statements a new one is checked against); kept at 0.6, the weight the
+/// supersession results were measured with.
+const CANDIDATE_VECTOR_WEIGHT: f64 = 0.6;
 /// A `supersedes` answer at or above this p, but below the calibrated
 /// threshold, is kept for review. The tuned decider-nano calibration has
 /// threshold = τ_auto (0.995), so it has no tentative band of its own.
@@ -2499,7 +2503,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 None,
                 not_docs,
                 None,
-                DEFAULT_VECTOR_WEIGHT,
+                CANDIDATE_VECTOR_WEIGHT,
                 false,
                 None,
             )?;
