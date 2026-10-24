@@ -408,6 +408,88 @@ pub fn domain_labels(act: &Active) -> Vec<String> {
         .collect()
 }
 
+lazy_static! {
+    /// Baselines of prototype sets, by (address, length) of the cached set.
+    static ref BASELINES: Mutex<HashMap<(usize, usize), f64>> = Mutex::new(HashMap::new());
+}
+
+/// The embedder's similarity baseline under which the typing and learning
+/// thresholds were tuned: EmbeddingGemma v1 on the personal pack's
+/// prototypes (docs/specs/ontology.md, "Calibration").
+pub const BASELINE_REF: f64 = 0.4318;
+
+/// Mean pairwise cosine of a prototype set: how similar unrelated
+/// properties look to this embedder. Embedders differ a lot here
+/// (EmbeddingGemma 2 puts most texts around 0.7), so absolute thresholds
+/// are rescaled to it ([`calibrated`]).
+pub fn proto_baseline(ps: &[(usize, Vec<f32>)]) -> f64 {
+    if ps.len() < 2 {
+        return BASELINE_REF;
+    }
+    let key = (ps.as_ptr() as usize, ps.len());
+    if let Some(b) = BASELINES.lock().unwrap().get(&key) {
+        return *b;
+    }
+    let mut sum = 0.0;
+    let mut n = 0usize;
+    for i in 0..ps.len() {
+        for j in (i + 1)..ps.len() {
+            sum += cosine32(&ps[i].1, &ps[j].1);
+            n += 1;
+        }
+    }
+    let b = sum / n as f64;
+    BASELINES.lock().unwrap().insert(key, b);
+    b
+}
+
+fn cosine32(a: &[f32], b: &[f32]) -> f64 {
+    let (mut d, mut na, mut nb) = (0f64, 0f64, 0f64);
+    for (x, y) in a.iter().zip(b) {
+        d += (*x as f64) * (*y as f64);
+        na += (*x as f64) * (*x as f64);
+        nb += (*y as f64) * (*y as f64);
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        d / (na.sqrt() * nb.sqrt())
+    }
+}
+
+/// A similarity under an embedder with baseline `b`, on the reference
+/// scale: the same position between the baseline and 1 as under the
+/// reference embedder. Typing thresholds and stored claim-type scores are on
+/// this scale, so they mean the same whichever embedder is active.
+///
+/// One-sided: only an embedder whose baseline is above the reference (a
+/// compressed space such as EmbeddingGemma 2's) is rescaled; a lower
+/// baseline keeps the absolute thresholds, so calibration never makes typing
+/// looser than it was tuned.
+pub fn to_ref(sim: f64, b: f64) -> f64 {
+    if b <= BASELINE_REF || b >= 1.0 {
+        return sim;
+    }
+    BASELINE_REF + (sim - b) * (1.0 - BASELINE_REF) / (1.0 - b)
+}
+
+/// A similarity threshold tuned at [`BASELINE_REF`], moved to baseline `b`
+/// (the same relative position between the baseline and 1).
+pub fn calibrated(t: f64, b: f64) -> f64 {
+    if b <= BASELINE_REF {
+        return t;
+    }
+    b + (t - BASELINE_REF) * (1.0 - b) / (1.0 - BASELINE_REF)
+}
+
+/// A similarity margin tuned at [`BASELINE_REF`], scaled to baseline `b`.
+pub fn calibrated_margin(m: f64, b: f64) -> f64 {
+    if b <= BASELINE_REF {
+        return m;
+    }
+    m * (1.0 - b) / (1.0 - BASELINE_REF)
+}
+
 /// The prototype vectors of `act` under `embedder` (cached).
 pub fn prototypes(act: &Active, embedder: &str) -> Result<Arc<Vec<(usize, Vec<f32>)>>> {
     let key = (act.hash, embedder.to_string());
@@ -1658,6 +1740,28 @@ pub fn infer_program<'a>(act: &Active, levels: &[(String, Option<i64>)], statuse
         p.push((LEVEL_PARAMS[i], s(l)));
     }
     (prog, p)
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+
+    #[test]
+    fn compressed_spaces_map_onto_the_reference() {
+        // at the reference baseline nothing changes
+        assert_eq!(to_ref(0.6, BASELINE_REF), 0.6);
+        // v2-like baseline: its baseline maps to the reference baseline, 1 to 1
+        let b = 0.7032;
+        assert!((to_ref(b, b) - BASELINE_REF).abs() < 1e-9);
+        assert!((to_ref(1.0, b) - 1.0).abs() < 1e-9);
+        // a v2 score of 0.71 (barely above its baseline) is below PROTO_MIN
+        assert!(to_ref(0.71, b) < crate::ontology_type::PROTO_MIN);
+        // thresholds move the other way
+        assert!((to_ref(calibrated(0.7, b), b) - 0.7).abs() < 1e-9);
+        // a lower baseline keeps absolute values
+        assert_eq!(to_ref(0.3, 0.1), 0.3);
+        assert_eq!(calibrated(0.7, 0.1), 0.7);
+    }
 }
 
 #[cfg(test)]

@@ -641,6 +641,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             Some(e) => Some(crate::ontology::prototypes(&act, e)?),
             None => None,
         };
+        // similarity thresholds were tuned under the reference embedder: move
+        // them to this one's baseline (docs/specs/ontology.md, "Calibration")
+        let base = protos.as_ref().map_or(crate::ontology::BASELINE_REF, |p| crate::ontology::proto_baseline(p));
+        let cal = |t: f64| crate::ontology::calibrated(t, base);
         let rejected: BTreeSet<String> = self
             .ol_q(
                 &format!("?[id] := *{ONTO_PROPOSAL}{{ns: $ns, id, status}}, is_in(status, ['rejected', 'active'])"),
@@ -654,7 +658,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut proposals = vec![];
         let mut applied = vec![];
         let mut used_names: BTreeSet<String> = act.props.iter().map(|p| p.name.clone()).collect();
-        for (members, coherence) in cluster(&vecs, o.sim) {
+        for (members, coherence) in cluster(&vecs, cal(o.sim)) {
             if members.len() < o.min_support {
                 continue;
             }
@@ -683,7 +687,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             let subjects: Vec<Option<String>> = ctexts.iter().map(|t| crate::ontology_type::subject(t)).collect();
             let score = members.len() as f64 * coherence;
             let (kind, body) = match near {
-                Some((pi, x)) if x >= knob("KLEOS_ONTO_VOCAB_SIM", 0.80) => {
+                Some((pi, x)) if x >= cal(knob("KLEOS_ONTO_VOCAB_SIM", 0.80)) => {
                     let p = &act.props[pi];
                     let new_cues: Vec<String> = cues.iter().filter(|c| !p.cues.contains(c)).cloned().collect();
                     if new_cues.is_empty() {
@@ -729,7 +733,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             // auto mode: strong, coherent clusters; a single-valued guess needs
             // the decider's or the cues' clear support (a wrong `one` wrongly
             // supersedes, a wrong `many` only misses replacements)
-            let strong = members.len() >= o.auto_support && coherence >= knob("KLEOS_ONTO_AUTO_COHERENCE", 0.60);
+            let strong = members.len() >= o.auto_support && coherence >= cal(knob("KLEOS_ONTO_AUTO_COHERENCE", 0.60));
             let mut body = body;
             if kind == "property" && strong && body["prop"]["card"] == "one" {
                 let sh = body["shape"].clone();
@@ -903,6 +907,12 @@ impl<'s, S: Storage<'s>> Db<S> {
         let doc = self.learned_doc(ns)?;
         let learned: Vec<OntoProp> = doc.properties.iter().filter(|p| p.doc.starts_with("Learned")).cloned().collect();
         let cfg = self.mem_config()?.unwrap_or_default();
+        let base = cfg
+            .embedder
+            .as_deref()
+            .and_then(|e| crate::ontology::prototypes(&act, e).ok())
+            .map_or(crate::ontology::BASELINE_REF, |p| crate::ontology::proto_baseline(&p));
+        let cal = |t: f64| crate::ontology::calibrated(t, base);
         let lv: Option<Vec<Vec<f32>>> = match cfg.embedder.as_deref() {
             Some(e) if learned.len() >= 2 => {
                 let t: Vec<String> = learned.iter().map(crate::ontology::proto_text).collect();
@@ -924,7 +934,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     !wa.is_empty() && wa == wb
                 };
                 let sim = lv.as_ref().map(|v| cosine(&v[i], &v[j])).unwrap_or(0.0);
-                if !(same_words || sim >= knob("KLEOS_ONTO_MERGE_SIM", 0.90)) {
+                if !(same_words || sim >= cal(knob("KLEOS_ONTO_MERGE_SIM", 0.90))) {
                     continue;
                 }
                 // keep the one more claims use

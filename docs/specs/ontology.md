@@ -623,6 +623,89 @@ reasonably left untyped, though a few were typable: "prepping for my dance
 studio", "stayed up all night playing games"). Typing recall on chat is low;
 the policy is built so that an untyped claim falls back to today's decision.
 
+### Zero maintenance (wave5/onto-auto)
+
+*2026-10-24, wave5/onto-auto. Real models through the Python wheel on Metal:
+**EmbeddingGemma v1** int8 (main's default when these ran; see "With
+EmbeddingGemma 2" for v2) and decider-nano at the 0.995 supersedes
+threshold. Scripts `scripts/ontology/self_build_demo.py`,
+`scripts/ontology/learn_probe.py`, `scripts/memory-api/claims_ku.py`,
+`scripts/ontology/life_stream_py.py`, `scripts/bench-l2/retrieval.py`; data in
+`.bench-data/onto-auto/`.*
+
+**Defaults on, no regression:**
+
+| Check | Before (ontology activated by hand, 0.997) | Default on, 0.995 |
+|---|---|---|
+| 23 held-out KU questions: latest first (hide_pending) | 83% (91%) | **83% (91%)** |
+| KU auto-supersedes per question | 0.43 | 0.52 (both extra ones right) |
+| Life stream: auto-supersedes right / wrong / missed | 12 / 0 / 3 | **13 / 0 / 2** |
+| Life stream top-1 (hide_pending) | 15/20 (19/20) | **16/20 (19/20)** |
+| LoCoMo, 3 conversations, decider on: auto-supersedes | 1 (wrong) | 2 (both wrong) |
+| LoCoMo pending decisions | 693 | 686 |
+| LoCoMo QA, 385 questions, context output | 0.847 (no ontology: 0.852) | **0.862** |
+
+- The LoCoMo run had automatic learning on (every 200 untyped claims). QA
+  against the earlier ontology run: 7 questions gained, 1 lost; against no
+  ontology 13 and 9. Within noise: the policy's value stays a cleaner store,
+  not higher scores. By category: single-hop (74) 0.865, temporal (90) 0.933,
+  multi-hop (21) 0.762, open-domain (200) 0.840.
+- **The 0.995 threshold's cost:** one more wrong automatic replacement on
+  LoCoMo ("I painted this after I visited a LGBTQ center" replaced by "I
+  painted it after I visited the beach last week", p 0.9958; two different
+  paintings), against one more right one on the life stream and two more on
+  KU ("I've watched 4 MCU films" → "12 films, including 5 MCU"; "17 new
+  postcards" → "25 new postcards"). The other LoCoMo replacement (p 0.9972)
+  happens at 0.997 too.
+
+**Learning on real chat** (LoCoMo, no decider, `learn` in review mode and the
+proposals with ≥ 8 claims approved, then `maintain`):
+
+| | untyped share before | after |
+|---|---|---|
+| conv-26 | 0.562 | 0.524 |
+| conv-30 | 0.564 | 0.414 |
+
+- Learned: `adoption`, `pottery`, `pride` (conv-26); `dance` (60 claims),
+  `store` (27), `business`, `job` (conv-30). On chat, learned properties are
+  topics and all came out multi-valued: they type claims (and keep different
+  topics from superseding each other) without enabling any replacement.
+- Maintenance merged `dance_x` into `dance` (prototype cosine 0.94) and made
+  the pack's `family` multi-valued from the data (2 subjects holding ≥ 3
+  current values without update cues).
+- A first version made labels of greetings ("thanks", "hey") and put speaker
+  names in cues; greetings, evaluations and addressed names are filtered now.
+
+**A company corpus builds its own ontology** (61 notes from templates: team
+headcounts, cloud vendors, incidents, offices, chatter; decider on; automatic
+learning every 30 untyped claims; no human input):
+
+- After 33 notes, automatic learning added `engineers` (single-valued, number,
+  cues "team engineers", "team grew"; "2 of its statements were already
+  replaced by later ones"; 13 claims of evidence) and typed 12 claims with it.
+- A new note, "The data team now has 30 engineers.", was typed `engineers`
+  (cue + prototype) and superseded the data team's old count; the other teams'
+  counts stayed (pending at p ≈ 0.97, below the threshold).
+- Vendors and incidents stayed proposals (below the auto-apply support).
+- Two fixes came from this run: replaced claims (and `supersedes` links
+  inside a cluster) now count as evidence, since a value that keeps being
+  replaced vanishes from the current claims; and clusters whose centroids
+  nearly coincide merge ("the team now has 12 engineers" / "the team grew to
+  14 engineers").
+- Team names are not subjects (`subject()` finds speakers, `user`,
+  relatives and leading names), so the cardinality gate cannot keep teams
+  apart; the decider does.
+
+**GLiNER CPU and thresholds:**
+
+- Apple Accelerate (now part of `infer-metal`): GLiNER on the CPU 94–118
+  ms per claim against 249–311 ms (f32, 64 gold claims, load about 9);
+  GLiNER and decider-nano parity tests pass with it.
+- Retuning GLiNER's per-label thresholds on the 200 hand-checked claims, with
+  2-fold cross-validation over three splits, changed names F by +0.008,
+  −0.010 and −0.016 and lowered relatives: the thresholds stay (person 0.8,
+  location 0.9, organization 0.8, relative 0.5).
+
 ## Left
 
 - ~~Branches~~, ~~extractor labels~~, ~~two kinship stores~~, ~~ontology
