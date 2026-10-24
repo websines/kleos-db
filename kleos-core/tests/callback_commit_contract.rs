@@ -175,3 +175,24 @@ fn commit_failure_switch_is_one_shot() {
         "the transaction after a failed one must still publish"
     );
 }
+
+/// A bounded subscription nobody reads must never block writers (it used to:
+/// the document worker's own wake-up subscription filled up with its own
+/// heartbeats and its next write waited forever).
+#[test]
+fn full_bounded_subscription_never_blocks_writers() {
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.run_script(":create kv {k: Int => v: Int}", Default::default(), ScriptMutability::Mutable).unwrap();
+    let (_id, _rx) = db.register_callback("kv", Some(2));
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let d = db.clone();
+    std::thread::spawn(move || {
+        for i in 0..200 {
+            d.run_script(&format!("?[k, v] <- [[{i}, {i}]] :put kv {{k => v}}"), Default::default(), ScriptMutability::Mutable).unwrap();
+        }
+        done_tx.send(()).unwrap();
+    });
+    assert!(done_rx.recv_timeout(std::time::Duration::from_secs(20)).is_ok(), "writes blocked on a full subscription");
+    // the subscription is still there and got the first changes
+    assert_eq!(_rx.len(), 2);
+}
