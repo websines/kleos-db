@@ -5,7 +5,7 @@
 //   KLEOS_FEATURES=infer-metal,docs node scripts/build-native.mjs
 //   KLEOS_PROFILE=debug node scripts/build-native.mjs
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -26,5 +26,8 @@ const src = join(targetDir, profile, lib);
 if (!existsSync(src)) throw new Error(`build output not found: ${src}`);
 const out = resolve(here, '../native', `kleos.${process.platform}-${process.arch}.node`);
 mkdirSync(dirname(out), { recursive: true });
+// unlink first: on macOS, overwriting a signed library in place makes the
+// kernel kill the next process that loads it (stale code-signature cache)
+rmSync(out, { force: true });
 copyFileSync(src, out);
 console.log(`native module: ${out}`);

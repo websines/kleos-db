@@ -81,8 +81,8 @@ export interface RememberOptions {
   priority?: Priority;
   /** Documents (PDF, images, Markdown, HTML, DOCX). Needs the `docs` build for embedded use. */
   attachments?: (string | Attachment)[];
-  /** One document instead of text. */
-  file?: string | Attachment;
+  /** A document path instead of text (bytes go in `attachments`). */
+  file?: string;
   /** Turn automatic entity extraction off for this call. */
   extract?: boolean;
   [key: string]: unknown;
