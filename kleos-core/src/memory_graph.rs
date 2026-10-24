@@ -698,8 +698,12 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut fresh = vec![];
         for (id, p) in mscore {
             match rel.get(&id) {
+                // the walk can lift a row it supports, never sink one the
+                // search found: replacing relevance with the blend let an
+                // older, better-linked value outrank the current one
+                // (knowledge-update questions, docs/benchmarks/memory.md)
                 Some(&r) => {
-                    out.set.insert(id, (1.0 - gw) * r + gw * p);
+                    out.set.insert(id, r.max((1.0 - gw) * r + gw * p));
                 }
                 None => {
                     if p > 0.0 {
@@ -708,9 +712,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
             }
         }
-        // pool rows outside the neighbourhood keep their share of relevance
+        // pool rows outside the neighbourhood keep their relevance
         for (id, r) in &rel {
-            out.set.entry(id.clone()).or_insert((1.0 - gw) * r);
+            out.set.entry(id.clone()).or_insert(*r);
         }
         fresh.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
         fresh.truncate(GRAPH_MAX_NEW);

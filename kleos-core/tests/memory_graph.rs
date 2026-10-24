@@ -106,6 +106,25 @@ fn ppr_reaches_through_shared_entities() {
 }
 
 #[test]
+fn ppr_lifts_but_never_sinks_a_hit() {
+    // the older value is well linked, the current one is not: the walk may
+    // lift the old one, but the current one keeps its own relevance
+    // (knowledge-update questions lost the newest value to this)
+    let db = db();
+    let old = rem(&db, "My personal best for the charity run is 30 minutes.", 1, &["charity run", "Oakdale"]);
+    rem(&db, "The charity run goes through Oakdale park.", 2, &["charity run", "Oakdale"]);
+    rem(&db, "I trained for the charity run in Oakdale all spring.", 3, &["charity run", "Oakdale"]);
+    let new = rem(&db, "New personal best today: 27 minutes!", 4, &[]);
+    let plain = recall(&db, "personal best", "off");
+    let ppr = recall(&db, "personal best", "ppr");
+    let rel = |hits: &[kleos::memory::RecallHit], id: &str| {
+        hits.iter().find(|h| h.id == id).map(|h| h.relevance).unwrap_or_else(|| panic!("{hits:?}"))
+    };
+    assert!((rel(&ppr, &new) - rel(&plain, &new)).abs() < 1e-9, "{plain:?}\n{ppr:?}");
+    assert!(rel(&ppr, &old) >= rel(&plain, &old) - 1e-9, "{plain:?}\n{ppr:?}");
+}
+
+#[test]
 fn units_convert_validate_and_restate() {
     let db = DbInstance::new("mem", "", "").unwrap();
     db.ontology_call(
