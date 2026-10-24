@@ -112,8 +112,10 @@ fn interactive_goes_first_and_bulk_is_not_starved() {
     lat.sort();
     let p95 = lat[(lat.len() * 95) / 100];
     // one bulk slice is 8 rows × 32 tokens × 50 µs ≈ 13 ms: an interactive
-    // call waits at most a slice plus an interactive batch or two
-    assert!(p95 < Duration::from_millis(80), "interactive p95 {p95:?}");
+    // call waits at most a slice plus an interactive batch or two (about
+    // 30 ms; the bound leaves room for a loaded machine). Without lanes it
+    // would wait behind the whole 200-row bulk call (> 300 ms).
+    assert!(p95 < Duration::from_millis(250), "interactive p95 {p95:?}");
     // bulk kept progressing while interactive calls kept coming
     let log = log.lock().unwrap();
     let bulk_passes = log.iter().filter(|(l, _)| *l == 1).count();

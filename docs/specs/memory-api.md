@@ -530,6 +530,79 @@ Options of `remember`: `extract` (default on; `false` off for the call, `true` r
 
 **Precision.** f16 is the default; f32 and q8 (weight-only) are options. On the gold set every precision gives the same spans at the thresholds above (zero label flips, Rust vs gliner2 at f32 identical). LayerNorm, relative positions and the span head always run in f32.
 
+## Concurrency and memory budget
+
+Many agents, conversations, trace streams and document ingestions share the
+built-in models (EmbeddingGemma, decider-nano, GLiNER) inside one process.
+`kleos-infer/src/sched.rs` and `kleos-infer/src/budget.rs` keep that bounded.
+
+- **One budget.** `KLEOS_MEMORY_BUDGET` (default 3 GiB) covers the models'
+  weights plus the activations of running forward passes. One pass is capped
+  at `KLEOS_ACTIVATION_CAP` (default 256 MiB), and every model sizes its
+  batches to fit it from an activation estimate. So the peak follows the cap,
+  not the load.
+- **Loading and unloading.** Loading a model reserves its weights. Idle
+  models are unloaded (least recently used first) when another would not fit.
+  A model idle for `KLEOS_MODEL_IDLE_SECS` (default 900; `0` keeps models
+  loaded) is unloaded and reloads on its next call. A running model is never
+  evicted.
+- **Priority lanes.** `remember` and `recall` take `priority: 'interactive'`
+  (the default) or `'bulk'`. From Rust,
+  `kleos::sched::with_priority(Priority::Bulk, || …)` covers everything on the
+  thread; document ingestion and trace imports should run that way.
+  - Interactive work goes first.
+  - Bulk keeps at least `KLEOS_BULK_SHARE` (0.25) of device time, so it is
+    never starved.
+  - While interactive traffic is recent (2 s), bulk batches are cut to
+    `KLEOS_BULK_SLICE_TOKENS` (1024) so no interactive call waits behind a
+    long pass.
+- **Cross-request batching.** Embedding rows from concurrent callers share
+  forward passes.
+  - One waiting caller at a time leads and runs everybody's rows (no worker
+    thread).
+  - Queues are bounded per lane (`KLEOS_QUEUE_TOKENS`, 65,536 bulk and half
+    that interactive); a caller that would overfill one waits (backpressure).
+  - Batched vectors equal one-at-a-time vectors within 2e-7 (CPU f32) and
+    6e-5 (Metal f16).
+  - The decider and GLiNER take the same priority gate per forward pass.
+- **Shared instances.** Enabling the same model (repo and engine settings) in
+  several stores, or several times, reuses one object: one copy of the
+  weights, one gate, one queue.
+- **Cache.** The embedding cache (byte-capped LRU, `embed_texts`) already
+  answers repeated texts, such as duplicate agent traces, without the model.
+
+**Measured** with `kleos-core/examples/concurrency_bench.rs` on an M3,
+EmbeddingGemma q8 on Metal, in-memory store; footprint is the process's
+physical footprint, including Metal buffers.
+
+*Mixed workload.* A 2,000-chunk bulk stream (300-word chunks, 16 per call),
+50 conversations doing `remember` + `recall` (10 turns each), and an
+agent-trace stream:
+
+| | before | after |
+|---|---|---|
+| peak footprint above base | +734 MB | **+219 MB** |
+| interactive `recall` p50 / p95 / max | 2.28 / 3.34 / 4.70 s | **0.97 / 1.96 / 2.07 s** |
+| conversations finished | 48 s | **23 s** |
+| whole run (bulk finishes) | 343 s | 380 s (bulk yields to interactive) |
+
+- **More load:** 100 conversations (1,000 chunks) peak at +262 MB.
+- **Smaller cap:** `KLEOS_ACTIVATION_CAP=128MB` (50 conversations, 1,000
+  chunks) gives +128 MB, with p95 1.48 s.
+
+*Many callers embedding one fresh query each* (no cache hits):
+
+| callers | before p50 / p95, texts/s, peak above base | after |
+|---|---|---|
+| 10 | 104 / 112 ms, 94/s, +10 MB | 110 / 165 ms, 86/s, +27 MB |
+| 100 | 1.06 / 3.95 s, 59/s, +2 MB | 1.04 / 1.50 s, 93/s, +171 MB |
+| 500 | 5.16 / 5.22 s, 96/s, +31 MB | 5.62 / 6.67 s, 82/s, +193 MB |
+
+Queries are batched about 50 rows per pass, but throughput stays near
+2,000 tokens/s: EmbeddingGemma q8 on Metal is compute-bound, with no per-call
+overhead for batching to amortise. Latency at 500 callers is the queue, not a
+fault, and the extra memory is the batched pass, bounded by the cap.
+
 ## Surfaces
 
 The same options everywhere: one JSON object per op, handled by `Db::memory_call(op, args)`.
