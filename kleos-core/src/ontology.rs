@@ -795,6 +795,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     by: cell(&row[5]),
                     speaker: None,
                     content: 0,
+                    concrete: false,
                 },
             );
         }

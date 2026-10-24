@@ -36,6 +36,10 @@ pub struct ClaimType {
     /// Content words (speaker label and photo captions left out).
     #[serde(default)]
     pub content: usize,
+    /// Names something concrete: a number, or a capitalised word inside the
+    /// sentence that isn't a vocative ("Siemens", "Saturdays", "2015").
+    #[serde(default)]
+    pub concrete: bool,
 }
 
 /// Fill the text-derived fields of a type (speaker, content words): stored
@@ -44,6 +48,29 @@ pub fn annotate(t: &mut ClaimType, text: &str) {
     let (spk, b) = body(text);
     t.speaker = spk.map(|x| norm(&x));
     t.content = crate::memory_claims::content_words(&b);
+    t.concrete = concrete(&b);
+}
+
+/// A number, or a capitalised word that isn't the first of its sentence, `I`
+/// or a vocative (followed by `,` or `!`, or after a greeting).
+fn concrete(b: &str) -> bool {
+    let toks: Vec<&str> = b.split_whitespace().collect();
+    let mut start = true;
+    for (i, t) in toks.iter().enumerate() {
+        let w = t.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+        if w.chars().any(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        let cap = w.chars().next().is_some_and(|c| c.is_uppercase());
+        let vocative = t.ends_with(',') || t.ends_with('!')
+            || (i > 0 && ["hey", "hi", "hello", "thanks", "thank"].contains(&toks[i - 1].trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().as_str()));
+        let pronoun = matches!(w, "I" | "I'm" | "I've" | "I'd" | "I'll" | "I’m");
+        if cap && !start && !vocative && !pronoun {
+            return true;
+        }
+        start = t.ends_with('.') || t.ends_with('!') || t.ends_with('?') || t.ends_with(';') || t.ends_with(':') || t.ends_with('-');
+    }
+    false
 }
 
 impl ClaimType {
@@ -316,7 +343,7 @@ pub fn type_claim(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &str
 
 fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &str, vec: Option<&[f32]>) -> ClaimType {
     if smalltalk(text) {
-        return ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into(), speaker: None, content: 0 };
+        return ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into(), speaker: None, content: 0, concrete: false };
     }
     let subj = subject(text);
     let (_, b) = body(text);
@@ -339,7 +366,7 @@ fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &s
             }
         }
     }
-    let untyped = |subj: Option<String>| ClaimType { cls: "untyped".into(), subject: subj, prop: None, score: 0.0, by: "none".into(), speaker: None, content: 0 };
+    let untyped = |subj: Option<String>| ClaimType { cls: "untyped".into(), subject: subj, prop: None, score: 0.0, by: "none".into(), speaker: None, content: 0, concrete: false };
     match (protos, vec) {
         (Some(ps), Some(v)) if !ps.is_empty() => {
             let ps: Vec<(usize, Vec<f32>)> = ps.iter().filter(|(i, _)| !excluded(&act.props[*i])).cloned().collect();
@@ -355,6 +382,7 @@ fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &s
                     by: if cue[bi] > 0 { "cue+proto" } else { "proto" }.into(),
                     speaker: None,
                     content: 0,
+                    concrete: false,
                 }
             } else {
                 untyped(subj)
@@ -378,6 +406,7 @@ fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &s
                 by: "cue".into(),
                 speaker: None,
                 content: 0,
+                concrete: false,
             }
         }
     }
@@ -473,7 +502,9 @@ pub fn gate(act: &Active, c: &ClaimType, d: &ClaimType) -> Gate {
     // cue-only typing (no embedder) is sure; a cue under prototypes adds a
     // little confidence
     let sure = |t: &ClaimType| t.by == "cue" || t.by == "rule" || t.score >= conf || (t.by.contains("cue") && t.score >= conf - 0.05);
-    let thin = (c.content.min(d.content) as f64) < knob("THIN", THIN);
+    let lim = knob("THIN", THIN);
+    let thin1 = |t: &ClaimType| !t.concrete && (t.content as f64) < lim;
+    let thin = thin1(c) || thin1(d);
     let untyped = || match act.untyped.as_str() {
         "pending" => Gate::CapPending,
         "dup_only" => Gate::NoSupersede,
@@ -655,8 +686,9 @@ mod tests {
             by: "test".into(),
             speaker: None,
             content: 8,
+            concrete: true,
         };
-        let st = ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into(), speaker: None, content: 0 };
+        let st = ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into(), speaker: None, content: 0, concrete: false };
         let un = |content: usize, speaker: Option<&str>| ClaimType {
             cls: "untyped".into(),
             subject: None,
@@ -665,10 +697,20 @@ mod tests {
             by: "none".into(),
             speaker: speaker.map(|x| x.to_string()),
             content,
+            concrete: false,
         };
         assert_eq!(gate(&a, &un(8, None), &un(9, None)), Gate::Allow);
         assert_eq!(gate(&a, &un(3, None), &un(9, None)), Gate::CapPending);
         assert_eq!(gate(&a, &un(8, Some("john")), &un(9, Some("maria"))), Gate::Block);
+        let mut t = un(0, None);
+        annotate(&mut t, "I work as a software engineer at Siemens.");
+        assert!(t.concrete && t.content == 4);
+        annotate(&mut t, "Maria: Things have been tough for her lately.");
+        assert!(!t.concrete);
+        annotate(&mut t, "Nate: Hey Joanna! Sorry I haven't been around.");
+        assert!(!t.concrete);
+        annotate(&mut t, "I play tennis on Saturdays.");
+        assert!(t.concrete);
         assert_eq!(gate(&a, &f("user", "lives_in"), &f("user", "lives_in")), Gate::Allow);
         assert_eq!(gate(&a, &f("user", "likes"), &f("user", "likes")), Gate::NoSupersede);
         assert_eq!(gate(&a, &f("user", "lives_in"), &f("user", "employer")), Gate::NoSupersede);
