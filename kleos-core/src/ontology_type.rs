@@ -62,7 +62,11 @@ fn concrete(b: &str) -> bool {
             return true;
         }
         let cap = w.chars().next().is_some_and(|c| c.is_uppercase());
+        // a name addressed: "Maria, …", "… Maria!", after a greeting, or
+        // closing its sentence after a comma ("It's definitely isn't, Maria.")
+        let closes = t.ends_with('.') || t.ends_with('!') || t.ends_with('?') || i + 1 == toks.len();
         let vocative = t.ends_with(',') || t.ends_with('!')
+            || (i > 0 && closes && toks[i - 1].ends_with(','))
             || (i > 0 && ["hey", "hi", "hello", "thanks", "thank"].contains(&toks[i - 1].trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().as_str()));
         let pronoun = matches!(w, "I" | "I'm" | "I've" | "I'd" | "I'll" | "I’m");
         if cap && !start && !vocative && !pronoun {
@@ -532,6 +536,13 @@ pub fn gate(act: &Active, c: &ClaimType, d: &ClaimType) -> Gate {
     let lim = knob("THIN", THIN);
     let thin1 = |t: &ClaimType| !t.concrete && (t.content as f64) < lim;
     let thin = thin1(c) || thin1(d);
+    // a claim with nothing concrete and few content words never replaces a
+    // substantive one on its own, however the pair is typed ("It's
+    // definitely isn't, Maria." must not end "Investing in our future
+    // generations is key…")
+    if thin1(c) && !thin1(d) {
+        return Gate::CapPending;
+    }
     let untyped = || match act.untyped.as_str() {
         "pending" => Gate::CapPending,
         "dup_only" => Gate::NoSupersede,
@@ -778,6 +789,21 @@ mod tests {
         assert!(!t.concrete);
         annotate(&mut t, "I play tennis on Saturdays.");
         assert!(t.concrete);
+        // a name closing its sentence after a comma is addressed, not named
+        annotate(&mut t, "Maria: It's definitely isn't, Maria.");
+        assert!(!t.concrete && t.content < 5, "{t:?}");
+        annotate(&mut t, "I met Maria at the conference.");
+        assert!(t.concrete);
+        // a thin claim never replaces a substantive one, typed or not
+        let mut thin = un(0, Some("maria"));
+        annotate(&mut thin, "Maria: It's definitely isn't, Maria.");
+        let mut full = un(0, Some("maria"));
+        annotate(&mut full, "Maria: Investing in our future generations is key to a better world.");
+        assert_eq!(gate(&a, &thin, &full), Gate::CapPending);
+        let mut thin_typed = f("user", "lives_in");
+        thin_typed.concrete = false;
+        thin_typed.content = 2;
+        assert_eq!(gate(&a, &thin_typed, &f("user", "lives_in")), Gate::CapPending);
         assert_eq!(gate(&a, &f("user", "lives_in"), &f("user", "lives_in")), Gate::Allow);
         assert_eq!(gate(&a, &f("user", "likes"), &f("user", "likes")), Gate::NoSupersede);
         assert_eq!(gate(&a, &f("user", "lives_in"), &f("user", "employer")), Gate::NoSupersede);

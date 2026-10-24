@@ -123,6 +123,19 @@ fn small_talk_never_supersedes() {
     assert_eq!(r.types[0].cls, "fact");
 }
 
+const KEY_OLD: &str = "Maria: Investing in our future generations is key to a better world.";
+const THIN_NEW: &str = "Maria: It's definitely isn't, Maria.";
+
+#[test]
+fn thin_claim_never_replaces_a_substantive_one() {
+    let m = Models::new("thin", vec![(KEY_OLD, THIN_NEW)]);
+    // the decider says yes (p ~1): without an ontology it is applied
+    assert!(supersedes(&m.db(false), KEY_OLD, THIN_NEW).0);
+    let (sup, r) = supersedes(&m.db(true), KEY_OLD, THIN_NEW);
+    assert!(!sup, "a thin reply must not end a substantive claim: {r:?}");
+    assert!(!r.tentative.is_empty(), "capped at pending: {r:?}");
+}
+
 #[test]
 fn single_valued_property_supersedes() {
     let m = Models::new("one", vec![(BERLIN, LISBON)]);
