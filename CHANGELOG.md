@@ -10,6 +10,17 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Graph recall** (docs/specs/memory-api.md, "Graph recall"; `kleos-core/src/memory_graph.rs`).
+  - `recall {graph: 'inferred'}` pulls in memories linked to the question's nodes ("my", "my sister", names) and the top hits' subjects through the ontology's facts, inferred ones included ("Who are my relatives?" reaches the family through the new `relative_of` super-property). Hits say why (`via: "inferred: relative_of"`), in the list and the context block.
+  - `recall {graph: 'ppr', graph_weight}` re-ranks with a personalized PageRank (HippoRAG 2) over the memory / entity / ontology-node neighbourhood of the hits: the pool seeds the walk by relevance, hub entities and nodes are cut, at most 2,000 memories; it also runs the inferred expansion.
+  - Both off by default: on LoCoMo (301 QA, GLiNER entities) `ppr` was 0.764 against 0.774 and `inferred` 0.771; on LongMemEval (119) `ppr` was 0.647 against 0.605 (multi-session Rall@10 0.792 → 0.917). See docs/benchmarks/memory.md, "Graph recall and consolidation".
+- **Units of typed literals** (docs/specs/ontology.md, "Units"; `kleos-core/src/ontology_units.rs`): length, mass, temperature, duration, volume, speed and data convert to base units; currencies compare per ISO code (no exchange rates). Validation accepts convertible units, a single-valued value restated in another unit is not a change, `::ontology convert`.
+- **Consolidation** (docs/specs/consolidation.md, UPGRADE_PLAN E7; `kleos-core/src/memory_consolidate.rs`).
+  - `::memory consolidate` builds **entity profiles** (current ontology facts and cue/rule-typed claims per node, with valid-from and evidence) and **extractive session summaries** (centrality + MMR per conversation; memories of kind `summary`, role `other`, never authoritative). An OpenAI-compatible endpoint can make the summaries abstractive (off by default, `requests` feature).
+  - Rebuilt when their sources change; erased with them (`forget {mode: 'erase'}`).
+  - The context block shows the profiles of the hits' subjects and the summaries of their conversations ahead of the memories (`profiles`, `summaries` options); summary memories are hits only with `kind: 'summary'`.
+  - Automatic as the durable workflow `memory.consolidate` (built-in flow step `consolidate`): every N new memories (`every`) or on a schedule (`cron`).
+  - LoCoMo QA with summaries in the context block: 0.767 against 0.748 (multi-hop 0.673 → 0.727).
 - **Faster documents** (docs/specs/documents.md, "Speed work (wave 6)").
   - **Native kernels for Indra's nets:** the recognizers (`ocr::fastnn`, channels-last GEMMs on Accelerate/AMX, vectorized depthwise, fused HardSwish / masked squeeze-excite / residual, native top-k) and the detector and orientation model (`ocr::convnet`, a small NCHW interpreter with hand-written convolutions). Identical text to tract on the parity sets; tract stays as the reference (`KLEOS_OCR_TRACT=1`) and the fallback. Recognizer batch 500 → 70 ms, detector 194 → 54 ms, orientation 93 → 21 ms; whole scanned book 1.58× Python indra-ocr under the same load.
   - **Digital-page geometry fast path:** simple text-layer pages skip the render and the line detector (`KLEOS_DOC_FAST=0` turns it off); 9/11 Report 111 → 33 ms/page with a 0.998 mean word ratio against the full path; forms and tables keep the full path.
