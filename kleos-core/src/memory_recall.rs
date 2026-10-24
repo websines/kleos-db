@@ -172,6 +172,9 @@ pub struct RecallContext {
     pub ids: Vec<String>,
     /// Recalled memories left out because the budget was spent.
     pub omitted: Vec<String>,
+    /// Entity profiles shown ahead of the memories (memory_consolidate.rs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
 }
 
 /// One earlier value of a memory: the memory it superseded.
@@ -209,6 +212,8 @@ pub struct CtxItem {
     pub cite: Option<String>,
     pub doc_name: Option<String>,
     pub doc_page: Option<usize>,
+    /// Why graph recall included it (`inferred: relative_of`).
+    pub via: Option<String>,
 }
 
 /// Estimated tokens: characters / 4, rounded up (no tokenizer, so the
@@ -391,6 +396,9 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
             first.push(' ');
             first.push_str(c);
         }
+        if let Some(v) = &it.via {
+            first.push_str(&format!(" (via {v})"));
+        }
         if show_source {
             if let Some(s) = &it.source {
                 first.push_str(&format!(" [source: {s}]"));
@@ -511,6 +519,7 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         budget,
         ids,
         omitted,
+        profiles: vec![],
     }
 }
 

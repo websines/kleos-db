@@ -1733,6 +1733,13 @@ impl CozoDbPy {
     pub fn memory_reembed(&self, py: Python<'_>, embedder: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "reembed", vec![("embedder", json!(embedder))], opts)
     }
+    /// Consolidate a namespace (`::memory consolidate`): entity profiles and
+    /// session summaries. Options: `ns`, `profiles`, `summaries`,
+    /// `min_claims`, `max_summary`, `min_facts`, `llm`, `every`, `cron`.
+    #[pyo3(signature = (**opts))]
+    pub fn memory_consolidate(&self, py: Python<'_>, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "consolidate", vec![], opts)
+    }
     pub fn multi_transact(&self, write: bool) -> PyResult<CozoDbMulTx> {
         let db = self.db_ref()?;
         Ok(CozoDbMulTx {

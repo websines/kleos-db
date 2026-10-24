@@ -187,3 +187,42 @@ fn pdf_with_ocr_and_text_layer() {
     let hits = db.recall("quarterly report", RecallOpts { sources: Some(vec!["docs".into()]), ..Default::default() }).unwrap();
     assert!(hits[0].doc.as_ref().unwrap()["page"].as_u64().is_some());
 }
+
+#[test]
+#[ignore]
+fn pdf_streaming_ingestion_resumes() {
+    // needs KLEOS_DOCS_MULTIPAGE=<a PDF of 4+ pages> and the OCR models / pdfium.
+    // The streamed extraction is cut by a failure after the second committed
+    // batch; the retry resumes and the chunks equal a clean run's.
+    let path = std::env::var("KLEOS_DOCS_MULTIPAGE").expect("KLEOS_DOCS_MULTIPAGE");
+    let wait = |db: &DbInstance, doc: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            let g = db.doc_call("get", json!({"doc": doc})).unwrap();
+            if g["status"] == "done" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "not done: {g}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+    let opts = json!({"inline_pages": 0, "batch_pages": 1});
+    let chunks = |db: &DbInstance| -> Vec<String> {
+        let mut v: Vec<String> = rows(db, "?[id] := *kleos_doc_chunk{ns: 'default', id}").iter().map(|r| r[0].get_str().unwrap().to_string()).collect();
+        v.sort();
+        v
+    };
+    let db1 = db("stream1");
+    let r1 = db1.remember("", RememberOpts { file: Some(path.clone()), doc: Some(opts.clone()), ..Default::default() }).unwrap();
+    wait(&db1, r1.documents[0]["doc"].as_str().unwrap());
+    let clean = chunks(&db1);
+    assert!(!clean.is_empty());
+    let db2 = db("stream2");
+    kleos::docs::fail_after_batches(Some(2));
+    let r2 = db2.remember("", RememberOpts { file: Some(path), doc: Some(opts), ..Default::default() }).unwrap();
+    wait(&db2, r2.documents[0]["doc"].as_str().unwrap());
+    let resumed = chunks(&db2);
+    assert_eq!(resumed, clean, "same chunks after the resumed streaming ingestion");
+    let mems = rows(&db2, "?[count(id)] := *kleos_mem{ns: 'default', id, kind: 'doc' @ 'NOW'}")[0][0].get_int().unwrap();
+    assert_eq!(mems as usize, clean.len());
+}

@@ -30,8 +30,12 @@ struct AppArgs {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// HTTP server (add --mcp to also serve MCP at /mcp)
     Server(ServerArgs),
+    /// Interactive CozoScript REPL
     Repl(ReplArgs),
+    #[command(flatten)]
+    Cli(kleos_bin::cli::CliCmd),
 }
 
 fn main() {
@@ -43,6 +47,12 @@ fn main() {
                 .build()
                 .unwrap()
                 .block_on(server_main(args))
+        }
+        Commands::Cli(cmd) => {
+            let json_mode = cmd.json_mode();
+            if let Err(e) = kleos_bin::cli::run(cmd) {
+                exit(kleos_bin::cli::report_error(json_mode, &e));
+            }
         }
         Commands::Repl(args) => {
             if let Err(e) = repl_main(args) {

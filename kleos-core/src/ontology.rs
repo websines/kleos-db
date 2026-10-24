@@ -384,7 +384,9 @@ pub fn proto_text(p: &OntoProp) -> String {
 /// Properties that claims can be typed as: everything but derived ones
 /// (chains) and inverse-only twins without cues.
 pub fn typable(p: &OntoProp) -> bool {
-    p.chain.is_empty() && p.kind != "role" && p.name != "same_as"
+    // `relative_of` is the kinship super-property: inferred, never typed
+    // from a claim (a prototype for it would compete with sister_of & co.)
+    p.chain.is_empty() && p.kind != "role" && p.name != "same_as" && p.name != "relative_of"
 }
 
 lazy_static! {
@@ -1167,6 +1169,38 @@ impl<'s, S: Storage<'s>> Db<S> {
                 ),
                 vec![("ns", s(&ns)), ("ps", strs(&singles.iter().map(|x| x.1.clone()).unique().collect::<Vec<_>>()))],
             )?;
+            // a value restated in another unit ("5 km" for "5000 m") is the
+            // same value: the new fact takes the stored key and nothing ends
+            let lit_of = |r: &[DataValue]| -> Option<JsonValue> {
+                match &r[3] {
+                    DataValue::Json(j) => Some(j.0.clone()),
+                    _ => None,
+                }
+            };
+            let mut same: BTreeMap<(String, String, String), String> = BTreeMap::new();
+            for r in &cur.rows {
+                let (fs, fp, fo) = (cell(&r[0]), cell(&r[1]), cell(&r[2]));
+                let Some(old) = lit_of(r) else { continue };
+                for f in facts.iter() {
+                    if f.s == fs && f.p == fp && f.o.as_deref() != Some(fo.as_str()) {
+                        if let Some(new) = &f.lit {
+                            if crate::ontology_units::same_quantity(new, &old) == Some(true) {
+                                same.insert((fs.clone(), fp.clone(), f.o.clone().unwrap_or_default()), fo.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            for f in facts.iter_mut() {
+                if let Some(o) = same.get(&(f.s.clone(), f.p.clone(), f.o.clone().unwrap_or_default())) {
+                    f.o = Some(o.clone());
+                }
+            }
+            let singles: Vec<(String, String, String)> = facts
+                .iter()
+                .filter(|f| act.prop(&f.p).is_some_and(|p| p.single() && f.status.as_deref().unwrap_or("current") == "current"))
+                .map(|f| (f.s.clone(), f.p.clone(), f.o.clone().unwrap()))
+                .collect();
             for r in cur.rows {
                 let (fs, fp, fo) = (cell(&r[0]), cell(&r[1]), cell(&r[2]));
                 if singles.iter().any(|(a, b, c)| *a == fs && *b == fp && *c != fo) {
@@ -1620,10 +1654,20 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.onto_undo(&ns, &id)?
             }
             "suggest" => self.onto_suggest(&ns_of(&take(&mut m, "ns")))?,
+            // unit conversion of a value (ontology_units.rs; no exchange rates)
+            "convert" => {
+                let value = m.get("value").and_then(|v| v.as_f64()).ok_or_else(|| miette!("ontology convert needs a numeric 'value'"))?;
+                let from = take(&mut m, "from").ok_or_else(|| miette!("ontology convert needs 'from'"))?;
+                let to = take(&mut m, "to").ok_or_else(|| miette!("ontology convert needs 'to'"))?;
+                match crate::ontology_units::convert(value, &from, &to) {
+                    Some(v) => json!({"value": v, "unit": to}),
+                    None => bail!("ontology convert: cannot convert '{from}' to '{to}' (unknown unit, different dimensions, or two currencies)"),
+                }
+            }
             other => bail!(
                 "unknown ontology op '{other}': expected define, import, export, get, list, activate, deactivate, \
                  assert, retract, facts, infer, validate, type, gate, learn, maintain, proposals, approve, reject, \
-                 history, undo or suggest"
+                 history, undo, suggest or convert"
             ),
         })
     }
@@ -1788,7 +1832,9 @@ pub fn validate_facts(act: &Active, facts: &[Fact], classes: &BTreeMap<String, S
                 if let (Some(u), Some(lit)) = (&p.unit, &f.lit) {
                     if u != "currency" {
                         if let Some(got) = lit.get("unit").and_then(|x| x.as_str()) {
-                            if got != u {
+                            // another unit of the same dimension converts
+                            // ("mi" for a property in "km"; ontology_units.rs)
+                            if got != u && !crate::ontology_units::compatible(got, u) {
                                 out.push(v("unit", format!("'{}' is in {u}, got {got}", p.name)));
                             }
                         }

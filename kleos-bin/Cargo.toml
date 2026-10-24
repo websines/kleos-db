@@ -3,13 +3,23 @@ name = "kleos-bin"
 version = "0.7.6"
 edition = "2021"
 license = "MPL-2.0"
-description = "Standalone Cozo database"
+description = "kleos: standalone server, REPL, CLI and MCP server"
 authors = ["Ziyang Hu"]
 homepage = "https://github.com/websines/kleos-db"
 repository = "https://github.com/websines/kleos-db"
 documentation = "https://docs.cozodb.org"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# The CLI, MCP server and their backend are a library the binary and the
+# tests share (docs/specs/mcp-cli-skills.md).
+[lib]
+name = "kleos_bin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kleos-bin"
+path = "src/main.rs"
 
 [features]
 #! # Features

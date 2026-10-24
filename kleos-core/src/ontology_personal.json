@@ -377,7 +377,9 @@
    "symmetric": true,
    "transitive": false,
    "inverse": null,
-   "parents": [],
+   "parents": [
+    "relative_of"
+   ],
    "chain": [],
    "temporal": true,
    "unit": null,
@@ -444,7 +446,9 @@
    "symmetric": true,
    "transitive": false,
    "inverse": null,
-   "parents": [],
+   "parents": [
+    "relative_of"
+   ],
    "chain": [],
    "temporal": false,
    "unit": null,
@@ -531,7 +535,9 @@
    "symmetric": false,
    "transitive": false,
    "inverse": "child_of",
-   "parents": [],
+   "parents": [
+    "relative_of"
+   ],
    "chain": [],
    "temporal": false,
    "unit": null,
@@ -564,7 +570,9 @@
    "symmetric": false,
    "transitive": false,
    "inverse": null,
-   "parents": [],
+   "parents": [
+    "relative_of"
+   ],
    "chain": [],
    "temporal": false,
    "unit": null,
@@ -651,7 +659,9 @@
    "symmetric": false,
    "transitive": false,
    "inverse": null,
-   "parents": [],
+   "parents": [
+    "relative_of"
+   ],
    "chain": [
     "sister_of",
     "parent_of"
@@ -677,7 +687,9 @@
    "symmetric": false,
    "transitive": false,
    "inverse": null,
-   "parents": [],
+   "parents": [
+    "relative_of"
+   ],
    "chain": [
     "brother_of",
     "parent_of"
@@ -703,7 +715,9 @@
    "symmetric": false,
    "transitive": false,
    "inverse": null,
-   "parents": [],
+   "parents": [
+    "relative_of"
+   ],
    "chain": [
     "parent_of",
     "parent_of"
@@ -722,6 +736,36 @@
     "my grandfather",
     "my grandparents"
    ]
+  },
+  {
+   "name": "relative_of",
+   "kind": "object",
+   "domain": [
+    "Person"
+   ],
+   "range": [
+    "Person"
+   ],
+   "datatype": null,
+   "card": "many",
+   "symmetric": true,
+   "transitive": false,
+   "inverse": null,
+   "parents": [],
+   "chain": [],
+   "temporal": false,
+   "unit": null,
+   "label": "relative of",
+   "doc": "a family member: the super-property of the kinship relations (inferred, not typed from text)",
+   "aliases": [
+    "relative",
+    "relatives",
+    "family member",
+    "family members",
+    "kin",
+    "kinship"
+   ],
+   "cues": []
   },
   {
    "name": "children",
