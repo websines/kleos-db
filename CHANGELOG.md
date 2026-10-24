@@ -14,6 +14,7 @@ to kleos.
 - **Ontology quality (wave6/quality).** A thin claim (nothing concrete, under 5 content words) never auto-supersedes a substantive one, however the pair is typed; it is capped at pending ("It's definitely isn't, Maria." no longer ends "Investing in our future generations is key…"), and a name closing its sentence after a comma counts as a vocative. Maintenance (cardinality flips, merges, retirement) counts only cue-, rule-, learning- or extractor-backed types as evidence, never prototype-only ones. A memory branch can retract a fact it inherited (a tombstone hides the ancestor's copy from the branch's `facts` and `infer`; the parent keeps it).
 
 ### Fixed
+- **`graph: 'ppr'` sank the current value on knowledge-update questions:** the PPR re-rank replaced each pool row's relevance with the blend `(1-w)·r + w·ppr`, so an older, better-linked value could outrank the newest one (LongMemEval KU latest-first, EmbeddingGemma 2: 83% with `graph: 'off'`, 74% with `ppr`). The walk now only lifts a row (`max(r, blend)`) and rows outside the neighbourhood keep `r`; KU is back to 83% (91% hide-pending) with `ppr` on. See docs/benchmarks/memory.md, "PPR and the current value".
 - **Memory text search missed words whose stem is an English stopword** (`billing` → `bill`, `running` → `run`): the memory FTS index ran the stemmer before the built-in `'en'` stopword list, which also holds content words. The index now drops a short list of function words before stemming; stores rebuild the index on first use (memory schema v8).
 
 ### Added

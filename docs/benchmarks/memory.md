@@ -907,3 +907,28 @@ questions, QA on the usual 301. LongMemEval: the 119-question set. Results:
 - **On the merged build (FTS fix, graph PPR default):** LoCoMo R@5 v1 0.701 → 0.745, v2 0.650 → 0.673 (0.6 → 0.9). **v2 LoCoMo QA (301): 0.787 → 0.827** (0.6 → 0.9), 0.3 quota points.
 - **v2 prompts (LoCoMo R@5 at 0.9):** search-result 0.667 (default), question-answering 0.653, fact-checking 0.645, symmetric sentence-similarity 0.686 (vector-only 0.710) but −1 LongMemEval question and lower NDCG; not adopted (it changes document vectors, which stores do not record).
 - **Ontology (merge of main with PPR on):** 180-pair audit allowed v1 7 / v2 13 (unchanged); LoCoMo end to end (3 conversations, decider on) auto-supersedes v1 2 / v2 4, pending 739 / 701; life stream v1 13/0/2, v2 12/1/3; KU latest-first (hide-pending) v1 78% (87%), v2 74% (82%) — v2 is 83% (91%) with `graph: 'off'`, so the drop comes from the PPR default, not this branch; v1 is 78% with candidate search at 0.6 too (rerun after the candidate-weight fix was cut short: v1 0.783 / 0.87, v2 and life not rerun).
+
+### PPR and the current value (wave6/ku-fix, commit 0cdbcc4)
+
+*The `ppr` re-rank replaced each pool row's relevance with `0.7·r + 0.3·ppr` (rows
+outside the walk's neighbourhood got `0.7·r`), so an older, better-linked value
+could outrank the newest one; on the two KU questions that flipped, no graph row
+was added, the top two hits just swapped. Fix: the walk only lifts a row,
+`max(r, 0.7·r + 0.3·ppr)`, and rows outside the neighbourhood keep `r`. Same
+setup as above (decider on, held-out 23 KU questions, Metal).*
+
+| | KU v2 latest-first (hide-pending) | KU v1 | life stream v2 (auto-supersedes right/wrong/missed, top-1 default / hide-pending) |
+|---|---|---|---|
+| 110f92a, `graph: 'off'` | 83% (91%) | — | — |
+| 110f92a, `ppr` (default) | 74% (82%) | 78% (87%) | 12/1/3, 14 / 13 |
+| 0cdbcc4, `ppr` (default) | **83% (91%)** | 74% (87%) | 12/1/3, **15 / 15** |
+
+- KU v1 latest-first lost one question (184da446: a pending older value now ranks
+  first; hide-pending unchanged at 87%).
+- **LongMemEval multi-session retrieval (24 + 3 abstention of the 119 set, no
+  consolidation, hybrid):** Rall@10 0.917 for `off`, old `ppr` and fixed `ppr`
+  alike. Old `ppr` was ahead at the top: Rall@5 0.708 vs 0.667, T@5 0.958 vs
+  0.917, T@10 1.000 vs 0.958 (one question each); fixed `ppr` equals `off` on
+  these and has the best NDCG@10 (0.955 vs 0.939). So the fix gives back most of
+  the re-rank's small top-5 edge on this sample; LongMemEval QA was not rerun.
+  Results: `.bench-data/quality/results/{kufix,kubase}/lme-user`.
