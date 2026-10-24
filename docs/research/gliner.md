@@ -15,6 +15,14 @@
 > - **About the speaker:** it loses to a first-person regex (0.72 vs
 >   0.845).
 > - **Update keys:** the verdict on keys below stands.
+>
+> **Phase 2, 2026-10-24** ([end to end](#phase-2-end-to-end-with-the-decider-on-2026-10-24)):
+> automatic names fix the life stream's sister/user conflicts (same as
+> hand-written names) but do not move LoCoMo QA (0.797 against 0.811
+> without names, within noise) or the knowledge-update check. **No port
+> for now.** The bigger finding: with the decider on, its LoCoMo
+> auto-replacements are almost all wrong (small talk replacing small
+> talk), and names cannot fix that.
 
 ## Verdict
 
@@ -553,6 +561,189 @@ This was not fine-tuned. The verdict on keys stands.
     work.
   - A port is worth its ~13 days only if this moves QA or the
     same-subject gate.
+
+## Phase 2: end to end, with the decider on (2026-10-24)
+
+*Branch `wave5/gliner-e2e` (main a14b5de), Python only, no port. Scripts:
+`scripts/gliner/e2e_entities.py` (names per turn), `e2e_report.py`,
+`e2e_strict_gate.py`; `scripts/bench-l2/retrieval.py --entities file:<json>`;
+`KU_ENTITIES` in `scripts/memory-api/claims_ku.py`. Results:
+`.bench-data/gliner-e2e/`.*
+
+**Verdict: do not port GLiNER now.** Automatic names do what they are
+for where facts are about several people, but LoCoMo QA does not move,
+and the decider's wrong replacements there are not a names problem.
+- **Life stream: GLiNER names = hand-written names.** All 4 sister/user
+  false pending replacements that appear without names disappear
+  ("My sister Anna lives in Munich" no longer looks like it replaces "I
+  live in Berlin"), and `hide_pending` top-1 goes back from 18/20 to 19/20.
+- **Held-out knowledge-update check: unchanged** (83% latest first, 91%
+  with `hide_pending`, same 4 misses), with or without names. Almost every
+  LongMemEval message is first person, so every claim carries `user`.
+- **LoCoMo QA (301): no gain.** A 0.811, B 0.811, C 0.817, D 0.797. All
+  four are within noise of each other (D against B: 11 questions gained, 15
+  lost).
+- **The decider's automatic replacements on LoCoMo are almost all wrong,
+  with or without names.** Hand check of 20 random ones per config: B 1
+  right, 1 borderline, 18 wrong; C 0 right, 20 wrong; D 0 right, 1
+  borderline, 19 wrong. The right one is "The car project is doing well - I
+  just finished restoring it" replacing "Had a tough time with my car
+  project". The rest
+  are one speaker's small talk replacing their own small talk ("Wow, John,
+  that's rough." replaces "Wow, John, that's incredible!"). Both sides carry
+  the same speaker, so the same-subject gate cannot help.
+
+### How names were made
+
+Per LoCoMo turn (5,882 turns; GLiNER 41 ms per turn on MPS, batch 8, run
+before ingest so it is not in `remember`'s time):
+- Person, place and organization spans at the thresholds tuned in the
+  fine-tune (person 0.9, location 0.2, organization 0.7, relative 0.7),
+  with the training-label cleanup.
+- **The speaker** when the turn is first person (the regex that beat the
+  model), not counting the possessive inside a relation span ("my sister
+  Anna lives in Munich" is about Anna). In LoCoMo two people share a
+  namespace, so the speaker is their name ("Caroline"), the way kleos's
+  claims carry the "Name:" label; in single-user streams it is `user`.
+- **Relations as keys anchored on whose they are:** "my sister" said by
+  Caroline is `Caroline.sister`, "Melanie's kids" is `Melanie.kids`; "his /
+  her / their X" is skipped.
+- **Relation + name links:** "my sister Anna" gives both, and the pair is
+  remembered per conversation, so a later turn naming only one carries both.
+  Only a single relative is linked to a third person, never a group or a
+  speaker. Only 7 such pairs occur in LoCoMo.
+- **Vocatives dropped:** "Hey Deborah!", "Thanks, Melanie!" name the
+  listener. Without this, nearly every turn carried both speakers.
+
+The capital-letter guess (C) is the harness's `--entities caps`: the
+speaker on every turn plus capitalised words.
+
+### LoCoMo, 301 questions (same questions, reader and judge as the published 0.821)
+
+All on one build; context output, shipped defaults. A is the same config
+as the published number re-run on this build: 77% of its contexts are
+byte-identical, the rest differ by near-tie reorderings (score differences
+around 1e-4).
+
+| Config | QA all | multi-hop (55) | temporal (63) | open-domain (19) | single-hop (164) | R@5 | R@10 |
+|---|---|---|---|---|---|---|---|
+| A. hybrid, no decider, no names | 0.811 | 0.818 | 0.746 | 0.684 | 0.848 | 0.691 | 0.778 |
+| B. decider on, no names | 0.811 | 0.800 | 0.698 | 0.789 | 0.860 | 0.691 | 0.779 |
+| C. decider + capital-letter guess | 0.817 | 0.855 | 0.730 | 0.684 | 0.854 | 0.695 | 0.775 |
+| D. decider + fine-tuned GLiNER | 0.797 | 0.818 | 0.730 | 0.632 | 0.835 | 0.693 | 0.777 |
+
+R@k is over all 1,540 non-adversarial questions. One question is 0.0033
+of the 301; flips against A are B +7/−7, C +12/−10, D +12/−16.
+
+**What the decider did during ingest** (5,882 turns, 5,876 added):
+
+| Config | auto-replaced | pending replacements | duplicate decisions (pending) | gated checks | entities kept | merges |
+|---|---|---|---|---|---|---|
+| A | 1 (value rule) | 0 | 0 | 0 | – | – |
+| B | 180 | 1,976 | 4,581 | 0 | – | – |
+| C | 176 | 1,890 | 4,572 | 2,838 | 2,187 | 15 |
+| D | 174 | 1,857 | 4,577 | 4,389 | 455* | 36 |
+
+\* Entity counts and merges are over 9 of the 10 conversations (the first
+was ingested before the stats query was fixed).
+
+- **The gate does fire** (C 2,838, D 4,389 checks skipped): it blocks
+  cross-speaker comparisons, which were rarely auto-replaced anyway. About
+  95% of the auto-replacements are within one speaker (e.g. 13 of 14 in
+  conv-26).
+- **A stricter gate would not rescue it either.** Requiring a shared entity
+  *other than the speaker* (estimated offline from the logged decisions)
+  keeps 3 of B's 180, and those 3 are wrong too ("My mom had a big passion
+  for cooking." replacing "My mom was interested in art.").
+- **D's entities are clean, C's are not.** D's most-mentioned entities are
+  the speakers, then `Jon.students`, `John.kids`, `Nate.pets`, Rome, Max;
+  merges are sensible (`John.the_kids` → `John.kids`, `Nate.the_turtles` →
+  `Nate.turtles`; one doubtful, "Marley" → "Marley flooring"). C's include
+  "Your", "Yeah", "Keep", "Let" hundreds of times.
+- The pending decisions (one or more per turn) appear in the context block
+  as "possibly replaced by" notes; QA did not change, so the reader mostly
+  ignores them.
+
+**Why the decider misfires here.** decider-nano was tuned on LongMemEval
+user facts (`p ≥ 0.997` auto band). LoCoMo turns are mostly reactions and
+small talk, which the store filter keeps (they are declarative). Two short
+same-speaker reactions to similar topics score 0.997–0.9999 as
+"supersedes". This is a decider calibration and store-filter question, not
+a names question; see "What to do instead".
+
+### Life stream and held-out knowledge update (decider on, this build)
+
+| | names | current fact first (hide_pending) | auto-replace right / wrong | false pending replacements | gated checks |
+|---|---|---|---|---|---|
+| Life stream | hand-written (as published) | 15/20 (19/20) | 12 / 0 | 2 | 22 |
+| | none | 15/20 (18/20) | 12 / 0 | 6 | 0 |
+| | **GLiNER** | 15/20 (**19/20**) | 12 / 0 | **2** | 27 |
+| KU 23 held out | none | 83% (91%) | – | – | – |
+| | GLiNER | 83% (91%) | – | – | – |
+
+GLiNER's life-stream names match the hand-written ones except that it adds
+`user.sister`, `user.dog` and `user.partner`, and the product names
+"Inception", "2015 Volkswagen Golf", "Tesla Model 3". The two remaining
+false pending replacements (Porto vs Berlin, cat vs dog) are about the user
+on both sides.
+
+### Timing
+
+`remember` p50 per LoCoMo turn: A 145 ms; B 2.5 s; C 2.6 s; D 2.6 s (p90
+5.7 s).
+- **These overstate the decider.** B, C and D ran at the same time on one
+  Metal GPU, with A for the first hour and another agent's Rust build.
+- **The decider itself is still the cost.** B's first conversation, sharing
+  the GPU only with A, ran at 1.5 s p50 per turn. Three decider runs
+  together took 2.7–4.2 s. So roughly half of the 2.5 s is contention, and
+  the decider still adds about 1–1.5 s per chat turn here. A typical turn
+  has many similar earlier turns above the 0.6 similarity floor, each asked
+  both `supersedes` and `duplicate`.
+- GLiNER adds about 41 ms per turn (batched on MPS) on top.
+
+No clean timing rerun was made (closed early to free the machine).
+
+### What to do instead
+
+- **Keep names as an option, not a port.** The life stream shows the value
+  (sister/user conflicts gone). LoCoMo and LongMemEval do not need it. If
+  callers want automatic names, a Python-side helper around the fine-tuned
+  checkpoint is enough for now. Revisit the ~13-day port when a benchmark
+  with several people per namespace and real updates shows a gain.
+- **The finding that matters is the decider on chat.** On conversational
+  data the decider's automatic replacements are about 95–100% wrong
+  (hand check, 60 samples) and it leaves about one pending decision per
+  turn, at 1–1.5 s per turn. Before the decider is on by default for chat
+  memory:
+  - skip `supersedes` checks for small talk and reactions (a store-filter
+    or claim-type rule: exclamations, "Wow / Thanks / Sorry …", photo-share
+    turns);
+  - or require a shared non-speaker entity for chat namespaces, which would
+    have blocked 177 of 180 (all wrong) on LoCoMo;
+  - or recalibrate the auto band on conversational pairs.
+- **Benchmarks and docs:** keep the decider off for the headline LoCoMo
+  number (A = B within noise, 17× cheaper to ingest). Report decider-on
+  numbers on the life stream and knowledge-update sets, where it is right
+  (12 right, 0 wrong) and moves latest-first.
+
+**Quota:** about 0.4 points of the weekly plan (90.64% → 90.62% for A,
+92.62% → 92.23% for B/C/D after the meter regenerated; 908 reader/judge
+calls, 898 cached). No LLM calls for the KU, life stream or GLiNER parts.
+
+**Reproduce** (`.bench-data/gliner-e2e/env.sh`):
+
+```zsh
+source .bench-data/gliner-e2e/env.sh
+cd scripts/gliner && $G/../gliner-ft/venv/bin/python e2e_entities.py locomo $G/locomo_entities.json
+$G/../gliner-ft/venv/bin/python e2e_entities.py ku $G/ku_entities.json
+$G/../gliner-ft/venv/bin/python e2e_entities.py life <life_stream.json> $G/life/life_stream_gliner.json
+R=($PY $H/retrieval.py --bench locomo --configs default --context-budget 1500)
+$R --variant hybrid; $R --variant sup; $R --variant sup --entities caps; $R --variant sup --entities file:$G/locomo_entities.json
+$PY $H/qa.py --bench locomo --conditions ctx:hybrid+default,ctx:sup+default,ctx:sup+ents+default,ctx:sup+gliner+default --n 300
+KU_ENTITIES=$G/ku_entities.json $PY scripts/memory-api/claims_ku.py held $G/ku/ku_gliner.json
+target/release/examples/memory_scenario $G/life/life_stream_gliner.json $G/life/report_gliner.json embeddinggemma
+$PY scripts/gliner/e2e_report.py --sample 20; python3 scripts/gliner/e2e_strict_gate.py <results-dir> $G/locomo_entities.json <locomo10.json>
+```
 
 ## Architecture (what a port has to reproduce)
 

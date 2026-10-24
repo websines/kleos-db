@@ -20,11 +20,12 @@ docs/specs/memory-api.md.
 import json, sys, time, statistics
 from datetime import datetime, timezone
 
-import os, random  # noqa: E401
+import hashlib, os, random  # noqa: E401
 from kleos import CozoDbPy  # noqa: E402
 
 ORACLE = os.environ.get("LME_ORACLE", "/Volumes/SSD01/caches/huggingface/hub/datasets--xiaowu0162--longmemeval-cleaned/snapshots/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_oracle.json")
 SEED = 20261023  # the decider-nano data build's seed (scripts/bench-l2/common.py)
+ENTS = json.load(open(os.environ["KU_ENTITIES"]))["items"] if os.environ.get("KU_ENTITIES") else None
 
 
 def lme_ku_split(data):
@@ -67,8 +68,13 @@ def main(which, out_path, limit, extra):
             for t in sess:
                 if t["role"] != "user":
                     continue
+                kw = dict(extra)
+                if ENTS is not None:  # KU_ENTITIES: precomputed entity lists (scripts/gliner/e2e_entities.py ku)
+                    e = ENTS.get(f"{qid}/{hashlib.sha1(t['content'].encode()).hexdigest()}")
+                    if e and e["entities"]:
+                        kw["entities"] = e["entities"]
                 t0 = time.perf_counter()
-                r = db.remember(t["content"], ns=ns, at=at, source=sid, **extra)
+                r = db.remember(t["content"], ns=ns, at=at, source=sid, **kw)
                 ms = (time.perf_counter() - t0) * 1000
                 claims = r.get("claims") or [{"id": r.get("id"), "text": t["content"], "action": r["action"], "decided": True}]
                 lat.append(ms)
