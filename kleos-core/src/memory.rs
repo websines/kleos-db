@@ -1927,17 +1927,23 @@ impl<'s, S: Storage<'s>> Db<S> {
             )
         };
         let mut filters = String::new();
-        if let Some(kd) = kind {
-            match kd.strip_prefix('!') {
-                Some(not) => {
-                    filters.push_str(", kind != $kind");
-                    p.push(("kind", s(not)));
-                }
-                None => {
-                    filters.push_str(", kind == $kind");
-                    p.push(("kind", s(kd)));
-                }
+        // summary memories (memory_consolidate.rs) are searched only when
+        // asked for by kind: the context block shows them per conversation
+        let mut not_kinds: Vec<String> = vec![];
+        match kind {
+            Some(kd) if !kd.starts_with('!') => {
+                filters.push_str(", kind == $kind");
+                p.push(("kind", s(kd)));
             }
+            Some(kd) => {
+                not_kinds.push(kd[1..].to_string());
+                not_kinds.push(consolidate::SUMMARY_KIND.to_string());
+            }
+            None => not_kinds.push(consolidate::SUMMARY_KIND.to_string()),
+        }
+        if !not_kinds.is_empty() {
+            filters.push_str(", !is_in(kind, $not_kinds)");
+            p.push(("not_kinds", str_list(&not_kinds)));
         }
         if let Some(eids) = entity {
             // every row of the entity's cluster (merged names included)
@@ -3574,11 +3580,6 @@ impl<'s, S: Storage<'s>> Db<S> {
             !opts.include_archived,
             (!opts.include_expired).then_some(read_at),
         )?;
-        // summary memories are derived: hits only when asked for by kind
-        // (the context block shows them per conversation instead)
-        if opts.kind.as_deref() != Some(consolidate::SUMMARY_KIND) {
-            rows.retain(|r| r[3].get_str() != Some(consolidate::SUMMARY_KIND));
-        }
         // entity-graph expansion: other memories about the top hits' entities
         let mut expanded: BTreeSet<String> = BTreeSet::new();
         if opts.expand.unwrap_or(false) && eids.is_none() && !rows.is_empty() {
