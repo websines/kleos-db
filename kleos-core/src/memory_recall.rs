@@ -381,7 +381,7 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         if let Some(to) = it.valid_to {
             first.push_str(&format!(" (until {})", day(to)));
         }
-        if let Some(r) = it.role.as_deref().filter(|r| *r != "user") {
+        if let Some(r) = it.role.as_deref().filter(|r| *r != "user" && it.cite.is_none()) {
             first.push_str(&format!(" ({r})"));
         }
         first.push(' ');
