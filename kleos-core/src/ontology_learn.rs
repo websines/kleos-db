@@ -346,8 +346,41 @@ pub fn cluster(vecs: &[Vec<f32>], sim: f64) -> Vec<(Vec<usize>, f64)> {
             (g.into_iter().map(|x| x.0).collect(), m)
         })
         .collect();
+    // one concept phrased two ways ("the data team now has 12 engineers",
+    // "the data team grew to 14 engineers") can land in two clusters whose
+    // centroids nearly coincide: merge those
+    let merge_at = (sim + 0.15).min(0.92);
+    loop {
+        let cents: Vec<Vec<f32>> = out.iter().map(|(m, _)| centroid(vecs, m)).collect();
+        let mut best: Option<(usize, usize, f64)> = None;
+        for i in 0..out.len() {
+            for j in (i + 1)..out.len() {
+                let x = cosine(&cents[i], &cents[j]);
+                if x >= merge_at && best.map_or(true, |b| x > b.2) {
+                    best = Some((i, j, x));
+                }
+            }
+        }
+        let Some((i, j, _)) = best else { break };
+        let (mj, cj) = out.remove(j);
+        let (mi, ci) = &mut out[i];
+        let (ni, nj) = (mi.len() as f64, mj.len() as f64);
+        *ci = (*ci * ni + cj * nj) / (ni + nj);
+        mi.extend(mj);
+    }
     out.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
     out
+}
+
+fn centroid(vecs: &[Vec<f32>], members: &[usize]) -> Vec<f32> {
+    let d = vecs.first().map_or(0, |v| v.len());
+    let mut c = vec![0f32; d];
+    for &i in members {
+        for (a, b) in c.iter_mut().zip(&vecs[i]) {
+            *a += *b;
+        }
+    }
+    c
 }
 
 // ------------------------------------------------------------------ inference of a property's shape
@@ -582,7 +615,9 @@ impl<'s, S: Storage<'s>> Db<S> {
     }
 
     /// `::ontology learn`: propose (and in auto mode apply) properties from
-    /// the claims nothing typed.
+    /// the claims nothing typed. An open proposal is re-evaluated with the
+    /// current data (and applied once it is strong); a rejected or applied one
+    /// is never proposed again.
     pub fn onto_learn(&'s self, o: LearnOpts) -> Result<JsonValue> {
         let ns = o.ns.clone().filter(|x| !x.is_empty()).unwrap_or_else(|| "default".into());
         let mode = o.mode.clone().unwrap_or_else(|| "auto".into());
@@ -608,7 +643,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         };
         let rejected: BTreeSet<String> = self
             .ol_q(
-                &format!("?[id] := *{ONTO_PROPOSAL}{{ns: $ns, id, status}}, is_in(status, ['rejected', 'active', 'proposed'])"),
+                &format!("?[id] := *{ONTO_PROPOSAL}{{ns: $ns, id, status}}, is_in(status, ['rejected', 'active'])"),
                 vec![("ns", s(&ns))],
             )?
             .rows
@@ -1117,6 +1152,20 @@ mod tests {
         assert_eq!(cl.len(), 3);
         assert_eq!(cl[0].0.len(), 2);
         assert_eq!(cl[1].0.len(), 2);
+    }
+
+    #[test]
+    fn near_identical_clusters_merge() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.99, 0.12, 0.0];
+        let c = vec![0.93, 0.36, 0.0];
+        let d = vec![0.92, 0.39, 0.0];
+        let cl = cluster(&[a.clone(), b.clone(), c.clone(), d.clone()], 0.97);
+        // leader pass splits {a,b} and {c,d}; their centroids are ~0.96 apart > 0.92: merged
+        assert_eq!(cl.len(), 1, "{cl:?}");
+        let far = vec![0.0, 0.0, 1.0];
+        let cl = cluster(&[a, b, far.clone(), far], 0.9);
+        assert_eq!(cl.len(), 2);
     }
 
     #[test]
