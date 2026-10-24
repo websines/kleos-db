@@ -33,8 +33,12 @@ db.recall("What is the termination notice period?", format="context")
 (`datalab-to/indra-ocr`, revision `v1.1.0`) into the Hugging Face cache on
 first use, like the other built-in models (`HF_HUB_OFFLINE=1` forbids it;
 `KLEOS_OCR_MODEL_DIR` points at a local folder). The backend is a trait
-(`OcrBackend`) so another engine can be added; Indra is the default and the
-only one shipped.
+(`OcrBackend`: `read_page(gray, turn) -> Page`) so another engine can be
+plugged in for full-OCR pages and images (`Converter::backend`); PDF
+text-layer pages keep Indra's line detector to place the layer's
+characters. Indra is the default and the only one shipped. There is no
+licence gate at run time: enabling documents downloads the weights like the
+other built-in models (the licence is stated here and in NOTICE.md).
 
 **Licence of the weights.** The Indra code is Apache-2.0 and this port follows
 it. The model weights are under a *modified OpenRAIL-M* licence: free for
@@ -72,10 +76,12 @@ Markdown.
 | `recursive` (default) | Chonkie's RecursiveChunker levels (paragraphs, sentences, pauses, words, tokens), applied per block group; Markdown headings start a new chunk and set the heading path; code fences and tables are atomic. |
 | `semantic` | Sentences embedded with the store's embedder; a chunk ends where the similarity of adjacent windows drops below a threshold (Chonkie's SemanticChunker, simplified: no Savitzky–Golay smoothing), capped at `chunk_size`. |
 
-Tokens are counted with a pluggable counter: characters (Chonkie's default,
-used for the parity test), words, or the embedder's tokenizer. Defaults:
-`recursive`, 384 tokens by the embedder tokenizer (else ~4 characters per
-token), no overlap.
+Tokens are counted with a pluggable counter (`Tokenizer`): characters
+(Chonkie's default, used for the parity test), words (`text.split(' ')`, as
+Chonkie's word tokenizer), or an estimate of four characters per token
+(`ApproxTokenizer`, the default for documents: no tokenizer has to load and
+it matches the context block's own token estimate). Defaults: `recursive`,
+384 estimated tokens (about 1,500 characters), no overlap.
 
 Layout rules, every strategy: a `Table` block is one unit (a table longer than
 `chunk_size` becomes its own chunk, oversized rather than split mid-row); a
@@ -91,8 +97,8 @@ one) and updates `heading_path`; page headers and footers are dropped.
 - `remember({file: "path/to/x.pdf"})`, or `remember(text, attachments=["a.pdf", "b.png"])`;
 - bytes with a mime type: `attachments=[{"bytes": b"...", "mime": "application/pdf", "name": "x.pdf"}]`
   (HTTP: `{"data_b64": "...", "mime": ..., "name": ...}` in the JSON body);
-- a URL (`{"url": "https://…"}`) is fetched only with the `docs-url` feature
-  (off by default).
+- a URL (`{"url": "https://…"}`) is refused for now (no network fetch from
+  `remember`); pass the bytes or a path.
 
 The type is detected from the bytes (PDF header, image magic numbers), then
 the name: PDF, PNG/JPEG/TIFF/BMP/WebP, Markdown, HTML (tags stripped,
@@ -166,9 +172,11 @@ page, page_end, heading}`; the context output cites it:
 
 ### Admin
 
-`::doc get {ns, doc}`, `::doc list {ns}`, `::doc delete {ns, doc, mode?}`
-(retract, or erase with its chunks) and `::doc reingest {ns, doc}` inspect and
-manage documents. None of them is needed to use documents.
+`::doc get {ns, doc}`, `::doc list {ns}` and `::doc delete {ns, doc, mode?}`
+(retract, or erase with its chunks) inspect and manage documents (Rust
+`DbInstance::doc_call`, Python `doc_call`, HTTP `POST /doc/:op`). To
+re-ingest, pass the document to `remember` again under the same name. None
+of them is needed to use documents.
 
 ## Results
 

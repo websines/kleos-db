@@ -57,6 +57,10 @@ infer-metal = ["infer", "kleos/infer-metal"]
 ## ops, and `memory_init(engram=...)` to make `remember` / `forget` enqueue
 ## Engram jobs (applied by scripts/engram/engram_worker.py).
 engram = ["kleos/engram"]
+## Documents in the memory API (docs/specs/documents.md): `remember(text,
+## attachments=[...])` / `remember(file=...)` read PDFs (text layer or OCR),
+## images, Markdown, HTML and DOCX into chunk memories; `doc_call` admin ops.
+docs = ["kleos/docs"]
 ## Uses jemalloc as the global allocator, can make a difference in performance
 jemalloc = ["kleos/jemalloc"]
 ## Enables io-uring option for the RocksDB storage

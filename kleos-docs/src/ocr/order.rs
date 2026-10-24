@@ -640,6 +640,14 @@ fn item_start(t: &str) -> bool {
     RE.get_or_init(|| regex::Regex::new(r"^\s*([•\-–▪◦*·→]|\(?\d{1,3}[.)]|\(?[a-zA-Z][.)])(\s|$)").unwrap()).is_match(t)
 }
 
+/// One rendered piece of a page's Markdown: a block (its label and box) or a picture.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct MdPart {
+    pub label: String,
+    pub bbox: [f32; 4],
+    pub text: String,
+}
+
 /// Markdown for one page.  `cells` maps a line to its table cells when it holds several.
 #[allow(clippy::too_many_arguments)]
 pub fn page_markdown(
@@ -652,10 +660,31 @@ pub fn page_markdown(
     cells: &std::collections::HashMap<usize, Vec<(Bx, String)>>,
     pictures: Option<&[Bx]>,
 ) -> String {
+    page_parts(boxes, texts, order, cls, same, keep_furniture, cells, pictures)
+        .into_iter()
+        .map(|p| p.text)
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The pieces `page_markdown` joins, in order, each with its block label and box.
+#[allow(clippy::too_many_arguments)]
+pub fn page_parts(
+    boxes: &[Bx],
+    texts: &[String],
+    order: &[usize],
+    cls: &[f32],
+    same: &[f32],
+    keep_furniture: bool,
+    cells: &std::collections::HashMap<usize, Vec<(Bx, String)>>,
+    pictures: Option<&[Bx]>,
+) -> Vec<MdPart> {
     let n = boxes.len();
     let (header, footer, section, list, table) = (class_id("Page-Header"), class_id("Page-Footer"), class_id("Section-Header"), class_id("List-Group"), class_id("Table"));
     let mut parts: Vec<String> = vec![];
     let mut part_boxes: Vec<Bx> = vec![];
+    let mut part_labels: Vec<String> = vec![];
     for blk in split_blocks(order, same, n) {
         let c = block_class(cls, &blk);
         let tb: Vec<&String> = blk.iter().map(|&i| &texts[i]).collect();
@@ -705,26 +734,28 @@ pub fn page_markdown(
         };
         parts.push(part);
         part_boxes.push(union_box(blk.iter().map(|&i| boxes[i])));
+        part_labels.push(BLOCK_CLASSES[c].to_string());
     }
+    let mut out: Vec<MdPart> = parts.iter().zip(part_boxes.iter()).zip(part_labels.iter()).map(|((t, b), l)| MdPart { label: l.clone(), bbox: *b, text: t.clone() }).collect();
     if let Some(pics) = pictures.filter(|p| !p.is_empty()) {
-        let mut slots: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
+        let mut slots: std::collections::BTreeMap<usize, Vec<MdPart>> = Default::default();
         for (k, p) in pics.iter().enumerate() {
             let cy = (p[1] + p[3]) / 2.0;
             let at = part_boxes.iter().position(|b| (b[1] + b[3]) / 2.0 > cy && p[2].min(b[2]) > p[0].max(b[0])).unwrap_or(parts.len());
-            slots.entry(at).or_default().push(format!("![](picture-{k})"));
+            slots.entry(at).or_default().push(MdPart { label: "Picture".into(), bbox: *p, text: format!("![](picture-{k})") });
         }
         let mut merged = vec![];
-        for j in 0..=parts.len() {
-            if let Some(s) = slots.get(&j) {
-                merged.extend(s.iter().cloned());
+        for j in 0..=out.len() {
+            if let Some(s) = slots.remove(&j) {
+                merged.extend(s);
             }
-            if j < parts.len() {
-                merged.push(parts[j].clone());
+            if j < out.len() {
+                merged.push(out[j].clone());
             }
         }
-        parts = merged;
+        out = merged;
     }
-    parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n")
+    out
 }
 
 #[cfg(test)]

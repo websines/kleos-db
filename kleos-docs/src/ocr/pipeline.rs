@@ -77,6 +77,8 @@ pub struct Page {
     pub timings: HashMap<String, f64>,
     /// page size in pixels (as read)
     pub size: (usize, usize),
+    /// The Markdown's pieces with their block label and box (pixels).
+    pub parts: Vec<order::MdPart>,
 }
 
 impl Page {
@@ -745,6 +747,9 @@ impl Ocr {
             for b in page.blocks.iter_mut() {
                 b.bbox = unrotate_box(&b.bbox, skew, wh);
             }
+            for p in page.parts.iter_mut() {
+                p.bbox = unrotate_box(&p.bbox, skew, wh);
+            }
         }
         if vertical {
             let w = g.h as f32;
@@ -754,6 +759,9 @@ impl Ocr {
             }
             for b in page.blocks.iter_mut() {
                 b.bbox = back(b.bbox);
+            }
+            for p in page.parts.iter_mut() {
+                p.bbox = back(p.bbox);
             }
         }
         Ok(page)
@@ -822,6 +830,7 @@ impl Ocr {
             .collect();
         let mut md = None;
         let mut blocks = vec![];
+        let mut parts: Vec<order::MdPart> = vec![];
         if let Some((cls, same)) = &layout {
             let gb: Vec<Bx> = boxes.iter().map(geo).collect();
             blocks = order::page_blocks(&gb, &texts, &ord, cls, same);
@@ -835,7 +844,13 @@ impl Ocr {
                 cells.insert(i, parts.into_iter().map(|(bx, tx, _)| (geo(&bx), tx)).collect());
             }
             let pics: Option<Vec<Bx>> = pictures.filter(|p| !p.is_empty()).map(|p| p.iter().map(geo).collect());
-            md = Some(order::page_markdown(&gb, &texts, &ord, cls, same, self.furniture, &cells, pics.as_deref()));
+            let mut ps = order::page_parts(&gb, &texts, &ord, cls, same, self.furniture, &cells, pics.as_deref());
+            for p in ps.iter_mut() {
+                let g = geo(&p.bbox);
+                p.bbox = g;
+            }
+            md = Some(ps.iter().map(|p| p.text.as_str()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n"));
+            parts = ps;
             if let Some(p) = pictures.filter(|p| !p.is_empty()) {
                 for pb in p {
                     let cy = (pb[1] + pb[3]) / 2.0;
@@ -846,9 +861,15 @@ impl Ocr {
         } else if boxes.len() < 2 {
             md = Some(texts.join("\n"));
         }
+        if parts.is_empty() && !lines.is_empty() {
+            // no layout heads: the lines in reading order, one Text part
+            let b = order::union_box(lines.iter().map(|l| l.bbox));
+            let t = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+            parts.push(order::MdPart { label: "Text".into(), bbox: b, text: md.clone().unwrap_or(t) });
+        }
         // keep the borrow checker quiet about unused mutability on some paths
         let _ = (&mut boxes, &mut rec, &mut texts);
-        Ok(Page { lines, markdown: md, blocks, source: "ocr".into(), note: note.into(), timings: t, size: wh, ..Default::default() })
+        Ok(Page { lines, markdown: md, blocks, parts, source: "ocr".into(), note: note.into(), timings: t, size: wh, ..Default::default() })
     }
 
     /// Leader-only lines are dropped; a lone list marker joins its item.

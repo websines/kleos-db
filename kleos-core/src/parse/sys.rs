@@ -119,6 +119,8 @@ pub enum SysOp {
     /// kleos fork: `::flow <op> {opts}` (docs/specs/durable-workflows.md):
     /// the op and its options as JSON.
     Flow(String, serde_json::Value),
+    /// `::doc <op> [{opts}]` (kleos fork; docs/specs/documents.md).
+    Doc(String, serde_json::Value),
 }
 
 /// `::flow <op> [{opts}]`.
@@ -603,6 +605,10 @@ pub(crate) fn parse_sys(
         Rule::entity_op => SysOp::Entity(parse_entity_op(inner, param_pool)?),
         Rule::engram_op => SysOp::Engram(parse_engram_op(inner, param_pool)?),
         Rule::flow_op => parse_flow_op(inner, param_pool)?,
+        Rule::doc_op => match parse_flow_op(inner, param_pool)? {
+            SysOp::Flow(v, a) => SysOp::Doc(v, a),
+            other => other,
+        },
         Rule::compact_op => SysOp::Compact,
         Rule::warnings_op => SysOp::Warnings(inner.into_inner().next().is_some()),
         Rule::running_op => SysOp::ListRunning,

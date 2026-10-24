@@ -573,6 +573,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .route("/text-query", post(text_query))
         .route("/memory/:op", post(memory_op))
         .route("/flow/:op", post(flow_op))
+        .route("/doc/:op", post(doc_op))
         .route("/export/:relations", get(export_relations))
         .route("/import", put(import_relations))
         .route("/backup", post(backup))
@@ -879,6 +880,38 @@ async fn flow_op(
         );
     }
     let result = spawn_blocking(move || st.db.flow_call(&op, args)).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "message": err.to_string()}).into(),
+        ),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Documents (kleos fork; docs/specs/documents.md): `POST /doc/{get|list|delete}`
+/// with `{ns, doc, mode}`. Documents themselves go to `POST /memory/remember`
+/// with `attachments: [{data_b64, mime, name}]`. Needs the `docs` feature.
+async fn doc_op(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if matches!(mutability, ScriptMutability::Immutable) && !["get", "list"].contains(&op.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            json!({"ok": false, "message": format!("doc {op} needs write access")}).into(),
+        );
+    }
+    #[cfg(feature = "docs")]
+    let result = spawn_blocking(move || st.db.doc_call(&op, args)).await;
+    #[cfg(not(feature = "docs"))]
+    let result: Result<miette::Result<serde_json::Value>, tokio::task::JoinError> = {
+        let _ = (st, op, args);
+        Ok(Err(miette::miette!("documents need kleos-bin built with the `docs` feature")))
+    };
     match result {
         Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
         Ok(Err(err)) => (

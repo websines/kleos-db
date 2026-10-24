@@ -181,6 +181,8 @@ pub struct Prepared {
 
 pub struct Converter<'a> {
     pub ocr: &'a Ocr,
+    /// The engine for full-OCR pages (default: `ocr` itself, Indra).
+    pub backend: Option<&'a dyn super::OcrBackend>,
     pub dpi: f64,
     pub mode: Mode,
     pub image_ocr: bool,
@@ -188,7 +190,7 @@ pub struct Converter<'a> {
 
 impl<'a> Converter<'a> {
     pub fn new(ocr: &'a Ocr) -> Self {
-        Converter { ocr, dpi: 200.0, mode: Mode::Auto, image_ocr: true }
+        Converter { ocr, backend: None, dpi: 200.0, mode: Mode::Auto, image_ocr: true }
     }
 
     fn page_scale(&self, size: (f64, f64)) -> f64 {
@@ -271,7 +273,10 @@ impl<'a> Converter<'a> {
             let st = &tl.stats;
             turn = !(tl.reason == BROKEN_FONT_MAP && (st.rotated as f64) < 0.5 * st.chars as f64);
         }
-        let mut out = self.ocr.read(&p.gray, turn)?;
+        let mut out = match self.backend {
+            Some(b) => b.read_page(&p.gray, turn).map_err(DocError::Input)?,
+            None => self.ocr.read(&p.gray, turn)?,
+        };
         out.note = format!("{note}; {}", out.note);
         Ok(stamp(out, &p))
     }

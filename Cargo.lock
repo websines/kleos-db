@@ -3247,6 +3247,7 @@ dependencies = [
  "itertools 0.12.1",
  "jieba-rs",
  "js-sys",
+ "kleos-docs",
  "kleos-engram",
  "kleos-infer",
  "kleos-rocks",
