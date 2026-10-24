@@ -815,3 +815,23 @@ Other uses:
 - LoCoMo: `snap-research/locomo@3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376`, `data/locomo10.json` (CC BY-NC 4.0, evaluation only).
 
 **Sampling.** Samples are stratified by question type, seed 20261023 (`common.stratified_sample`).
+
+## Embedder: EmbeddingGemma 2 against v1 (2026-10-24)
+
+Same build, harness, reader and judge; only the embedder differs. Details,
+fusion check and parity in [docs/research/embeddinggemma2.md](../research/embeddinggemma2.md).
+
+| | v1 (`embeddinggemma-300m`) | v2 (`embeddinggemma-2`) |
+|---|---|---|
+| LoCoMo R@5 / R@10 | **0.693 / 0.779** | 0.629 / 0.705 |
+| LoCoMo QA (301, context) | **0.814** | 0.738 |
+| LongMemEval R@10 / Rall@10 | 1.000 / 0.966 | 1.000 / 0.958 |
+| LongMemEval QA (119, context) | 0.664 | 0.664 |
+| KU latest-first (23, decider on) | 83% (91%) | 78% (91%) |
+| Embedding ms/text, q8 Metal batch 16 | **5.6** | 9.9 |
+| Peak RSS, q8 Metal | 863 MB | **771 MB** |
+| Licence | Gemma Terms of Use, gated | **Apache-2.0** |
+
+v2's vector leg alone is 12 R@5 points behind v1's on LoCoMo, so the gap is the
+model, not the fusion weights. For v1, vector-only recall beats the default 0.6
+hybrid weight by 8 R@5 points on LoCoMo (0.775 vs 0.695).

@@ -48,7 +48,8 @@ def main(which, out_path, limit, extra):
     pool = held if which == "held" else trained
     qids = sorted(q for q in pool if q in data and not q.endswith("_abs"))[:limit]
     db = CozoDbPy("mem", "", "{}")
-    db.enable_embedder("gemma", device="metal")
+    # KLEOS_EMBED_MODEL picks the model (embeddinggemma-300m for v1); default: the engine's
+    db.enable_embedder("gemma", model=os.environ.get("KLEOS_EMBED_MODEL") or None, device="metal")
     if NODEC:
         db.memory_init(embedder="gemma")
     else:
