@@ -180,5 +180,85 @@ of them is needed to use documents.
 
 ## Results
 
-See the "Results" section filled in at the end of M3 (parity, speed, the
-big-PDF benchmark, the kill test and recall quality).
+*Measured 2026-10-24 on an M3 (4 performance + 4 efficiency cores, 16 GB)
+with the store and models on a USB 2.0 SSD; other agents were sharing the
+machine, so the load average (noted per run) was rarely below 4.*
+
+### OCR parity with Indra (Python indra-ocr 1.1.2, same models)
+
+| Set | Pages | Result |
+|---|---|---|
+| Generated fixtures (`scripts/docs/make_samples.py`: digital prose, two columns, a ruled table, Cyrillic, Greek, CJK, 8 scans, image-only PDFs, a 5-page IRS form) | 27 | **identical** lines, Markdown and block labels on every page; boxes within 0.2 px; same source (text / ocr / hybrid) chosen on all 27 |
+| Zenobia (Internet Archive scan), 20 random pages | 20 | **identical** line text on all 20 (char F1 1.000) |
+
+The parity test (`kleos-docs/tests/ocr_parity.rs`, ignored by default)
+replays the fixture set against a Python reference. It still passes after
+the speed work below.
+
+### Chunking parity with Chonkie 1.7
+
+72 cases (token, sentence and recursive chunkers; character and word
+tokenizers; two sizes; six texts from the fixtures): **identical** chunks,
+offsets and token counts (`kleos-docs/tests/chunk_parity.rs`).
+
+### OCR speed (scanned book, 500 pages)
+
+Per page, single-threaded, 20 sampled Zenobia pages (load ≈ 3):
+
+| Stage (ms/page) | Python indra-ocr | Rust, first port | Rust, now |
+|---|---|---|---|
+| text layer + ink-check render | 49 | 68 | 1 (the 72-dpi render is made only when a check needs it) |
+| page render (200 dpi) | 97 | 129 | 83 |
+| orientation (skew search + model) | 57 | 214 | 160 (66 skew + 94 model) |
+| line detection | 49 | 160 | 115 |
+| recognition | 441 | 1,486 | 759 |
+| **total** | **739** | **2,060** | **1,185** |
+
+Whole book (`convert_many` / `convert_doc_parallel`, 4 workers, one
+single-threaded OCR engine per page worker, load ≈ 5):
+
+| | pages/s | wall | peak RSS |
+|---|---|---|---|
+| Python indra-ocr, `convert_many(cores=4)` | **5.13** | 97 s | 0.95 GB |
+| Rust, first port (sequential, 4 intra-op threads) | 0.47 | — | — |
+| Rust, now (4 page workers) | **2.36** | 212 s | 2.1 GB |
+
+What changed:
+- the recognizers run a greedy graph with the LM's top-k pruned away (tract
+  spent 400 of 1,500 ms per batch on a full sort of the vocabulary); the
+  full graph runs only for a batch the LM must read, so the output is
+  unchanged;
+- each page worker opens the PDF on its own pdfium instance, a separate
+  copy of the library with its own global state, so renders and text layers
+  run in parallel instead of behind one lock;
+- the ink-check render is lazy; the OCR engine is single-threaded inside a
+  page, and pages run in parallel.
+
+What is left: the model inference itself. On the same 35-line batch, tract
+takes 492 ms where ONNX Runtime takes 180 ms. tract's own profile puts 162 ms
+in matrix products (already on Apple's AMX), 103 ms in axis moves and 66 ms in
+im2col around the 1-D convolutions. Orientation and detection show the same
+pattern on their depthwise 2-D convolutions. Rendering is about 7% of the
+per-page time, so pdfium-free image decoding (the next item in the plan) would
+gain at most that on these scans. The larger lever is a hand-written CPU path
+for these small CNNs (pointwise convolutions as Accelerate GEMMs, depthwise
+ones as shifted multiply-adds), with tract kept as the reference.
+
+### End to end (`remember` and `recall` only)
+
+`scripts/docs/docs_demo.py` (Metal embedder, load ≈ 6):
+- **Mixed folder:** six attachments to one message (two digital PDFs, a
+  scanned PDF, a Markdown file, a scanned Cyrillic image, and a 5-page form
+  that ingests in the background): 85 s for `remember`, 91 s until the
+  background document was done. The message's memory links to all six.
+- **Questions:** all six were answered from the right document, with page
+  citations.
+- **Kill test:** the child process was killed with SIGKILL after two of
+  five committed page batches. The reopened store resumed the workflow and
+  finished in 35 s, which includes the 30 s lease wait. Result: 24 chunks,
+  24 provenance rows and 24 memories, chunk numbers contiguous from 0, no
+  duplicate ids, each step recorded once.
+- **Re-ingestion:** a changed Markdown file kept 1 chunk, replaced 1 and
+  re-embedded only the new one.
+- **Peak RSS:** 0.96 GB.
+
