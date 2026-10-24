@@ -70,6 +70,27 @@ impl EntityExtractor for GlinerExtractor {
             })
             .collect())
     }
+    fn extract_labels(&self, texts: &[&str], extra: &[String]) -> Result<Vec<Vec<ExtractSpan>>> {
+        if extra.is_empty() {
+            return self.extract(texts);
+        }
+        // the trained labels first, in training order, then the extra ones
+        let mut labels: Vec<&str> = GLINER_LABELS.to_vec();
+        labels.extend(extra.iter().map(|x| x.as_str()).filter(|x| !GLINER_LABELS.contains(x)));
+        let found = self
+            .g
+            .extract_windows(texts, &labels, GLINER_FLOOR, GLINER_WINDOW.0, GLINER_WINDOW.1)
+            .map_err(|e| miette!("gliner: {e}"))?;
+        Ok(found
+            .into_iter()
+            .map(|spans| {
+                spans
+                    .into_iter()
+                    .map(|s| ExtractSpan { label: labels[s.label].to_string(), start: s.start, end: s.end, text: s.text, score: s.score })
+                    .collect()
+            })
+            .collect())
+    }
     fn is_loaded(&self) -> Option<bool> {
         Some(self.g.is_loaded())
     }

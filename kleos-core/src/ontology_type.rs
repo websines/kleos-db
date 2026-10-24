@@ -113,7 +113,18 @@ const REACTION_STARTS: &[&str] = &[
     "so sorry", "so glad", "so happy", "so cool", "how cool", "how nice", "what a", "good for you", "well done", "keep it up",
     "you got this", "you've got this", "hope you", "hope your", "i hope you", "agreed", "indeed", "ugh", "oof", "yikes", "phew",
     "look at this", "check this out", "check it out", "here's", "here is", "by the way, take a look", "take a look",
+    // courtesies and sign-offs ("No problem, John.")
+    "no problem", "no prob", "no probs", "np", "not a problem", "you're welcome", "youre welcome", "my pleasure",
+    "anytime", "any time", "sounds good", "sounds great", "sounds fun", "will do", "for sure", "got it", "gotcha", "makes sense", "fair enough", "good point", "good night", "good morning",
+    "good evening", "have a good", "have a great", "have fun", "enjoy", "cheers", "much appreciated", "appreciate it",
+    "same to you", "you too", "likewise", "happy birthday", "happy holidays", "merry christmas", "best wishes",
+    "fingers crossed", "hugs", "big hugs", "love that", "love this", "love it", "that's awesome", "that's great",
+    "talk later", "catch you later", "ttyl",
 ];
+
+/// Fillers skipped before checking for a reaction ("Okay, have a great
+/// weekend!"); a fact after them still counts ("Okay, Anna got the job.").
+const FILLERS: &[&str] = &["okay", "ok", "alright", "all right", "well", "so", "um", "hmm", "right"];
 
 /// First-person clauses that are courtesy, not facts.
 const COURTESY_FIRST: &[&str] = &[
@@ -245,7 +256,12 @@ pub fn smalltalk(text: &str) -> bool {
     if !first.is_empty() && !factual_first {
         return true;
     }
-    let reaction = REACTION_STARTS.iter().any(|p| starts_phrase(low, p));
+    let mut after_fill = low;
+    loop {
+        let Some(f) = FILLERS.iter().find(|f| starts_phrase(after_fill, f)) else { break };
+        after_fill = after_fill[f.len()..].trim_start_matches(|c: char| !c.is_alphanumeric());
+    }
+    let reaction = REACTION_STARTS.iter().any(|p| starts_phrase(low, p) || starts_phrase(after_fill, p));
     if reaction && !factual_first {
         return true;
     }
@@ -369,8 +385,10 @@ fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &s
     let untyped = |subj: Option<String>| ClaimType { cls: "untyped".into(), subject: subj, prop: None, score: 0.0, by: "none".into(), speaker: None, content: 0, concrete: false };
     match (protos, vec) {
         (Some(ps), Some(v)) if !ps.is_empty() => {
+            // the active embedder's own calibration: thresholds hold for any model
+            let orig = ps;
             let ps: Vec<(usize, Vec<f32>)> = ps.iter().filter(|(i, _)| !excluded(&act.props[*i])).cloned().collect();
-            let scored = rank(&ps, &cue, v);
+            let scored = rank(&ps, &cue, v, &|x| crate::ontology::claim_to_ref(x, orig));
             let (best, bi) = scored[0];
             let second = scored.get(1).map_or(0.0, |x| x.0);
             if best >= knob("PROTO_MIN", PROTO_MIN) && best - second >= knob("PROTO_MARGIN", PROTO_MARGIN) {
@@ -413,9 +431,14 @@ fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &s
 }
 
 /// Properties by prototype score (cosine plus the cue bonus), best first.
-fn rank(ps: &[(usize, Vec<f32>)], cue: &[usize], v: &[f32]) -> Vec<(f64, usize)> {
+/// Prototype scores on the reference scale ([`crate::ontology::to_ref`]
+/// with the prototype set's baseline `b`), plus the cue bonus.
+fn rank(ps: &[(usize, Vec<f32>)], cue: &[usize], v: &[f32], to_ref: &dyn Fn(f64) -> f64) -> Vec<(f64, usize)> {
     let bonus = knob("CUE_BONUS", CUE_BONUS);
-    let mut scored: Vec<(f64, usize)> = ps.iter().map(|(i, pv)| (cosine(v, pv) + if cue[*i] > 0 { bonus } else { 0.0 }, *i)).collect();
+    let mut scored: Vec<(f64, usize)> = ps
+        .iter()
+        .map(|(i, pv)| (to_ref(cosine(v, pv)) + if cue[*i] > 0 { bonus } else { 0.0 }, *i))
+        .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored
 }
@@ -429,7 +452,7 @@ pub fn top_props(act: &Active, protos: &[(usize, Vec<f32>)], text: &str, vec: &[
         .iter()
         .map(|p| p.cues.iter().chain(p.aliases.iter()).filter(|c| has_phrase(&low, &c.to_lowercase())).map(|c| c.len()).max().unwrap_or(0))
         .collect();
-    rank(protos, &cue, vec).into_iter().take(n).map(|(s, i)| (act.props[i].name.clone(), (s * 1000.0).round() / 1000.0)).collect()
+    rank(protos, &cue, vec, &|x| crate::ontology::claim_to_ref(x, protos)).into_iter().take(n).map(|(s, i)| (act.props[i].name.clone(), (s * 1000.0).round() / 1000.0)).collect()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -499,9 +522,13 @@ pub fn gate(act: &Active, c: &ClaimType, d: &ClaimType) -> Gate {
         }
     }
     let conf = knob("CONFIDENT", CONFIDENT);
-    // cue-only typing (no embedder) is sure; a cue under prototypes adds a
-    // little confidence
-    let sure = |t: &ClaimType| t.by == "cue" || t.by == "rule" || t.score >= conf || (t.by.contains("cue") && t.score >= conf - 0.05);
+    // sure enough to keep a pair out of `supersedes`: a rule or a cue (cue
+    // alone, without an embedder; or a cue under prototypes at a confident
+    // score). A prototype match alone types a claim but never blocks a
+    // decision: prototype rankings are noisier under some embedders
+    // (EmbeddingGemma 2 lost a true update, "my other two bikes" → "I
+    // currently have three bikes", to two prototype-only types).
+    let sure = |t: &ClaimType| t.by == "cue" || t.by == "rule" || t.by == "learn" || (t.by.contains("cue") && t.score >= conf - 0.05);
     let lim = knob("THIN", THIN);
     let thin1 = |t: &ClaimType| !t.concrete && (t.content as f64) < lim;
     let thin = thin1(c) || thin1(d);
@@ -541,6 +568,28 @@ pub struct KinFact {
     pub o: String,
     /// The name as written, when one follows the relation.
     pub label: Option<String>,
+}
+
+/// The ontology fact an extractor kinship/role edge states
+/// (`possessor -[relation]-> relative`), keyed like [`kin_facts`]: the
+/// relative is `<possessor>.<relation>` unless it has a name of its own.
+/// `None` for a relation the ontology has no property for.
+pub fn edge_fact(src_name: &str, rel: &str, dst_name: &str) -> Option<KinFact> {
+    let r = rel.trim().to_lowercase();
+    let (_, prop) = KIN.iter().find(|(w, _)| *w == r)?;
+    let kin = canon_kin(&r);
+    let me = norm(src_name);
+    let generic = format!("{src_name}'s {r}");
+    let node = if dst_name.trim().eq_ignore_ascii_case(&generic) || dst_name.trim().is_empty() {
+        format!("{me}.{kin}")
+    } else {
+        norm(dst_name)
+    };
+    let (s, o) = match *prop {
+        "parent_of" => (me, node),
+        _ => (node, me),
+    };
+    Some(KinFact { s, p: prop.to_string(), o, label: None })
 }
 
 /// First-person kinship and role facts of a claim: "my sister Anna …",
@@ -626,6 +675,11 @@ mod tests {
             "Caroline: I totally agree, Melanie.",
             "Melanie: It's great that you're helping out.",
             "Gina: Wow Jon, same here!",
+            "Melanie: No problem, John.",
+            "Jon: You're welcome, Gina!",
+            "Caroline: Sounds good, see you then!",
+            "Gina: Okay, have a great weekend!",
+            "Melanie: Anytime, Caroline.",
         ] {
             assert!(smalltalk(t), "{t}");
         }
@@ -645,9 +699,22 @@ mod tests {
             "I've been collecting postcards and now have 25 of them.",
             "Thanks to my new routine, I go to the gym four days a week.",
             "Caroline: Researching adoption agencies — it's been a dream to have a family.",
+            "Okay, I moved to Paris last month.",
+            "Enjoying my new job at Google so far, I started in May.",
         ] {
             assert!(!smalltalk(t), "{t}");
         }
+    }
+
+    #[test]
+    fn extractor_edges_as_facts() {
+        let f = edge_fact("user", "sister", "user's sister").unwrap();
+        assert_eq!((f.s.as_str(), f.p.as_str(), f.o.as_str()), ("user.sister", "sister_of", "user"));
+        let f = edge_fact("Tom", "wife", "Tom's wife").unwrap();
+        assert_eq!((f.s.as_str(), f.p.as_str(), f.o.as_str()), ("tom.wife", "partner", "tom"));
+        let f = edge_fact("Caroline", "son", "Max").unwrap();
+        assert_eq!((f.s.as_str(), f.p.as_str(), f.o.as_str()), ("caroline", "parent_of", "max"));
+        assert!(edge_fact("user", "neighbour", "user's neighbour").is_none());
     }
 
     #[test]
@@ -683,7 +750,7 @@ mod tests {
             subject: Some(subj.into()),
             prop: Some(prop.into()),
             score: 1.0,
-            by: "test".into(),
+            by: "cue+proto".into(),
             speaker: None,
             content: 8,
             concrete: true,
@@ -720,6 +787,12 @@ mod tests {
         assert_eq!(gate(&a, &f("caroline", "lives_in"), &f("melanie", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &st, &f("user", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &f("user", "birthday"), &f("user", "birthday")), Gate::CapPending);
+        // prototype-only types never keep a pair out of `supersedes`
+        let mut p1 = f("user", "vehicle");
+        p1.by = "proto".into();
+        let mut p2 = f("user", "collection");
+        p2.by = "proto".into();
+        assert_eq!(gate(&a, &p1, &p2), Gate::Allow);
     }
 
     #[test]

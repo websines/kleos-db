@@ -115,7 +115,9 @@ engram = ["dep:kleos-engram"]
 ## 1.91+ toolchain like `infer`.
 docs = ["dep:kleos-docs", "kleos-docs/download"]
 ## `infer` plus Apple-GPU (Metal) kernels.
-infer-metal = ["infer", "kleos-infer/metal"]
+# Accelerate too: Metal builds are macOS-only, and the CPU path (device
+# `cpu`, or anything Metal can't run) is 2-2.5x faster with Apple BLAS
+infer-metal = ["infer", "kleos-infer/metal", "kleos-infer/accelerate"]
 ## `infer` plus Apple Accelerate BLAS for CPU matmuls (macOS; 3-5x faster
 ## decider-nano on CPU; no f16 on CPU).
 infer-accelerate = ["infer", "kleos-infer/accelerate"]

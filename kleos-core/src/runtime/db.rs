@@ -3616,7 +3616,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             // kleos fork: ontologies run their own scripts (docs/specs/ontology.md)
             SysOp::Ontology(op, args) => {
-                let reads = ["get", "list", "export", "facts", "infer", "validate", "type", "gate"];
+                let reads = ["get", "list", "export", "facts", "infer", "validate", "type", "gate", "proposals", "history"];
                 if read_only && !reads.contains(&op.as_str()) {
                     bail!("`::ontology {op}` cannot run in read-only mode");
                 }

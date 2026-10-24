@@ -55,12 +55,14 @@ def main(which, out_path, limit, extra):
     else:
         db.enable_decider("nano", device="metal")
         db.memory_init(embedder="gemma", decider="nano")
+    if ONTOLOGY == "none":  # the store default (personal) off
+        db.memory_init(ontology="none")
     out = []
     for qi, qid in enumerate(qids):
         q = data[qid]
         dates = dict(zip(q["haystack_session_ids"], q["haystack_dates"]))
         ns = f"q{qi}"
-        if ONTOLOGY:  # docs/specs/ontology.md: activate an ontology on the question's namespace
+        if ONTOLOGY and ONTOLOGY != "none":  # docs/specs/ontology.md: activate an ontology on the question's namespace
             onto, _, untyped = ONTOLOGY.partition(":")
             db.ontology_call("activate", {"ns": ns, "ontos": onto.split("+"), "untyped": untyped or "decide"})
         lat, per_claim = [], []

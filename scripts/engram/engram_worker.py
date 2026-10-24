@@ -321,9 +321,23 @@ class EngramWorker:
                                  seconds=rec.get("seconds"), note=out.get("note"), error=rec.get("error"), **inp)),
                  flush=True)
 
-    def run_once(self):
-        """Apply every job runnable now. Returns the number of jobs finished."""
-        return sum(r.get("outcome") == "completed" for r in self.flow.drain())
+    def run_once(self, wait_retries=True, max_wait=600.0):
+        """Apply every queued job, then (with `wait_retries`) wait out the jobs parked on a retry
+        back-off and apply them too, up to `max_wait` seconds. Returns the number of jobs finished."""
+        n = 0
+        deadline = time.time() + max_wait
+        while True:
+            n += sum(r.get("outcome") == "completed" for r in self.flow.drain())
+            if not wait_retries:
+                return n
+            nd = self.db.flow_call("next_due", {"queues": self.flow.queues})
+            due = nd.get("due")
+            if due is None:
+                return n
+            wait = max(0.0, (due - nd["now"]) / 1e6)
+            if time.time() + wait > deadline:
+                return n
+            time.sleep(min(wait, 5.0) + 0.01)
 
     def run(self, poll):
         self.flow.poll = poll
@@ -446,7 +460,9 @@ def main():
     ap.add_argument("--rowfreq", required=True)
     ap.add_argument("--model", default="nano", help="registered Engram model name")
     ap.add_argument("--ns", help="only this namespace")
-    ap.add_argument("--once", action="store_true", help="apply what is queued, then exit")
+    ap.add_argument("--once", action="store_true", help="apply what is queued (waiting out retry back-offs), then exit")
+    ap.add_argument("--no-wait", action="store_true", help="with --once: exit without waiting for jobs parked on a retry")
+    ap.add_argument("--max-wait", type=float, default=600.0, help="with --once: longest wait for retries, seconds")
     ap.add_argument("--poll", type=float, default=2.0, help="seconds between queue polls")
     ap.add_argument("--lease", type=float, default=120.0, help="lease of a claim in seconds (kept alive by heartbeats)")
     ap.add_argument("--max-attempts", type=int, default=3)
@@ -462,7 +478,7 @@ def main():
     print(json.dumps(dict(event="ready", model=args.model, fingerprint=w.fp, adopted=w.adopted,
                           load_seconds=round(time.time() - t0, 2))), flush=True)
     if args.once:
-        n = w.run_once()
+        n = w.run_once(wait_retries=not args.no_wait, max_wait=args.max_wait)
         print(json.dumps(dict(event="idle", applied=n)), flush=True)
         return
     w.run(args.poll)

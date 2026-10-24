@@ -256,6 +256,7 @@ pub(crate) fn auto_entities(
     claims: &[String],
     subject: Option<&str>,
     thresholds: &BTreeMap<String, f32>,
+    extra: &[String],
 ) -> Result<AutoEntities> {
     let mut out = AutoEntities {
         claim_names: vec![vec![]; claims.len()],
@@ -271,7 +272,11 @@ pub(crate) fn auto_entities(
         return Ok(out);
     }
     let subject: Option<String> = speaker.clone().or_else(|| subject.map(str::to_string));
-    let found: Vec<ExtractSpan> = ex.extract(&[body])?.into_iter().next().unwrap_or_default();
+    // a domain ontology's classes are extra labels, read zero-shot
+    let found: Vec<ExtractSpan> = if extra.is_empty() { ex.extract(&[body])? } else { ex.extract_labels(&[body], extra)? }
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let ranges = claim_ranges(statement, claims, speaker.as_deref());
     let claim_of = |a: usize, b: usize| -> Option<usize> {
         if claims.len() == 1 {
@@ -293,7 +298,7 @@ pub(crate) fn auto_entities(
         let (a, b) = (s.start + body_at, s.end + body_at);
         let text = statement[a..b].trim().to_string();
         let low = text.to_lowercase();
-        let is_name = NAME_LABELS.contains(&s.label.as_str());
+        let is_name = NAME_LABELS.contains(&s.label.as_str()) || extra.contains(&s.label);
         let mut kept = s.score >= thr(&s.label) && !PRONOUNS.contains(&low.as_str()) && !text.is_empty();
         if kept && is_name {
             kept = if mixed {
@@ -360,7 +365,7 @@ pub(crate) fn auto_entities(
         if !s.kept {
             continue;
         }
-        if NAME_LABELS.contains(&s.label.as_str()) {
+        if NAME_LABELS.contains(&s.label.as_str()) || extra.contains(&s.label) {
             let n = out.name(&s.text);
             out.spans[i].name = Some(n);
             mention_pos.push((s.start, n, s.label == "person"));
@@ -496,7 +501,7 @@ mod tests {
 
     fn run(spans: Vec<(&'static str, &'static str, f32)>, text: &str, claims: &[&str]) -> AutoEntities {
         let claims: Vec<String> = claims.iter().map(|s| s.to_string()).collect();
-        auto_entities(&Fake(spans), text, &claims, Some("user"), &BTreeMap::new()).unwrap()
+        auto_entities(&Fake(spans), text, &claims, Some("user"), &BTreeMap::new(), &[]).unwrap()
     }
 
     fn names_of(a: &AutoEntities, ci: usize) -> Vec<String> {

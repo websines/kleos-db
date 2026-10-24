@@ -33,7 +33,7 @@ KU_PAIRS = BENCH / "gliner" / "ku_pairs.json"
 
 def main(out_path, locomo_dir=None):
     db = CozoDbPy("mem", "", "{}")
-    db.enable_embedder("gemma", device="metal")
+    db.enable_embedder("gemma", model=os.environ.get("KLEOS_EMBED_MODEL") or None, device="metal")
     db.memory_init(embedder="gemma")
     db.ontology_call("activate", {"ns": "default", "ontos": ["personal"]})
 

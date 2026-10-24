@@ -24,11 +24,13 @@ T0 = 1_767_225_600_000_000
 def main(data_path, out_path, entities=True):
     data = json.load(open(data_path))
     db = CozoDbPy("mem", "", "{}")
-    db.enable_embedder("gemma", device="metal")
+    db.enable_embedder("gemma", model=os.environ.get("KLEOS_EMBED_MODEL") or None, device="metal")
     db.enable_decider("nano", device="metal")
     db.memory_init(embedder="gemma", decider="nano")
     onto = os.environ.get("KLEOS_ONTOLOGY", "")
-    if onto:
+    if onto == "none":  # the store default (personal) off
+        db.memory_init(ontology="none")
+    elif onto:
         o, _, untyped = onto.partition(":")
         db.ontology_call("activate", {"ns": "user", "ontos": o.split("+"), "untyped": untyped or "decide"})
     turns = data["turns"]

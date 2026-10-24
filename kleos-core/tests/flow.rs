@@ -577,3 +577,83 @@ fn two_worker_processes_never_run_a_step_twice() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+/// The `http` step (feature `flow-http`) against a local server: the
+/// response is recorded once and replayed, a 4xx fails the step.
+#[cfg(feature = "flow-http")]
+#[test]
+fn http_step_calls_records_and_fails_on_4xx() {
+    use std::io::{Read, Write};
+    let srv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = srv.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h2 = hits.clone();
+    std::thread::spawn(move || {
+        for s in srv.incoming().take(2) {
+            let mut s = s.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            h2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (code, body) = if req.starts_with("POST /ok") { ("200 OK", r#"{"ok": true, "got": "a"}"#) } else { ("404 Not Found", r#"{"error": "nope"}"#) };
+            let resp = format!("HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            s.write_all(resp.as_bytes()).unwrap();
+        }
+    });
+    let db = mem();
+    let g = json!({"steps": [
+        {"name": "r", "http": {"url": format!("http://127.0.0.1:{port}/ok"), "method": "POST", "body": {"a": 1}}},
+        {"return": "$r"}
+    ]});
+    call(&db, "define", json!({"name": "h", "graph": g}));
+    call(&db, "start", json!({"workflow": "h", "id": "h1"}));
+    assert_eq!(tick(&db)["ran"][0]["status"], "completed");
+    let st = status(&db, "h1");
+    assert_eq!(st["output"]["status"], 200, "{st}");
+    assert_eq!(st["output"]["body"]["ok"], true, "{st}");
+    // a 404 fails the step; with one attempt allowed, the workflow fails
+    let g = json!({"steps": [{"name": "r", "retry": {"max_attempts": 1}, "http": {"url": format!("http://127.0.0.1:{port}/missing")}}]});
+    call(&db, "define", json!({"name": "h404", "graph": g}));
+    call(&db, "start", json!({"workflow": "h404", "id": "h2"}));
+    tick(&db);
+    assert_eq!(status(&db, "h2")["status"], "failed");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// `continue_as_new`: a long loop restarts its history with new input
+/// under the same id; the run number is kept, old events are gone.
+#[test]
+fn continue_as_new_bounds_the_history() {
+    let db = mem();
+    let g = json!({"steps": [
+        {"name": "n", "set": "$input"},
+        {"name": "w", "sleep": {"ms": 0}},
+        {"if": {"cond": "$n < 3",
+                "then": [{"continue_as_new": "=$n + 1"}],
+                "else": [{"return": "$n"}]}}
+    ]});
+    call(&db, "define", json!({"name": "c", "graph": g}));
+    call(&db, "start", json!({"workflow": "c", "id": "c1", "input": 0}));
+    for _ in 0..12 {
+        tick(&db);
+        if status(&db, "c1")["status"] == "completed" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let st = status(&db, "c1");
+    assert_eq!(st["status"], "completed", "{st}");
+    assert_eq!(st["output"], 3);
+    // the history holds the last run only (it started from input 3)
+    let started = q(&db, "?[data] := *kleos_flow_event{wf: 'c1', type: 'started', data}");
+    assert_eq!(started.len(), 1);
+    match &started[0][0] {
+        DataValue::Json(x) => assert_eq!(x.0, serde_json::json!(3)),
+        other => panic!("{other:?}"),
+    }
+    let w = q(&db, "?[meta] := *kleos_flow_wf{id: 'c1', meta}");
+    match &w[0][0] {
+        DataValue::Json(m) => assert_eq!(m.0["runs"], 4),
+        other => panic!("{other:?}"),
+    }
+}

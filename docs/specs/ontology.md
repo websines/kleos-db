@@ -1,7 +1,15 @@
 # Ontologies (`::ontology`)
 
-*2026-10-24, branch `wave5/ontology`. Status: the parts marked **built** are on
-the branch with tests and measurements (see "Results"); the rest is design.*
+*2026-10-24, branches `wave5/ontology` and `wave5/onto-auto` (zero
+maintenance). Status: the parts marked **built** are on the branch with tests
+and measurements (see "Results"); the rest is design.*
+
+**Zero maintenance** (the principle since wave5/onto-auto): nobody has to fill
+in or maintain an ontology. The personal pack is on by default; the ontology
+learns properties from what is stored, corrects itself, and every automatic
+change is versioned, explained by the memories behind it, and reversible.
+Human review is an optional mode; importing a company ontology is an optional
+head start. See "Defaults", "Learning" and "Maintenance".
 
 An ontology tells kleos what kinds of things and statements exist in a
 namespace, and their rules: which classes there are, which properties and
@@ -331,6 +339,11 @@ over inferred edges (design; not built).
 | `assert {ns, facts: [{s, p, o, lit?}], event?, validate?}`, `retract {ns, facts}` | facts |
 | `facts {ns, s?, p?, o?, at?}`, `infer {...}`, `validate {ns}` | read, derive, check |
 | `type {ns, text}` | what the typer would conclude for a text (debugging) |
+| `learn {ns, mode?: 'auto'|'review', min_support?, auto_support?, max_claims?, sim?, dry_run?}` | propose (and apply) properties from untyped claims ("Learning") |
+| `maintain {ns, dry_run?}` | correct cardinality, merge synonyms, retire unused ("Maintenance") |
+| `proposals {ns, status?}`, `approve {ns, id}`, `reject {ns, id}` | review mode |
+| `history {ns}`, `undo {ns, change}` | every automatic change, and its undo |
+| `suggest {ns}` | domain packs the namespace's texts point at (review only) |
 
 ## Import and export
 
@@ -384,7 +397,129 @@ domains, ranges, inverses and labels, but not cardinality restrictions:
 mark the single-valued properties a desk cares about with a small JSON overlay
 activated after it (`["fibo-fnd", "acme-overrides"]`).
 
-## Ontology learning (design only; follow-up)
+## Defaults (built)
+
+- **On by default.** A namespace's ontology is its own activation, else its
+  nearest branch ancestor's (memory branches inherit it), else the store
+  default: `personal`. `memory_init {ontology: 'none'}` (or `'off'`) turns the
+  default off for the store (memory-config key `onto_default`); `memory_init
+  {ontology: '<name>', ns}` activates one on a namespace as before.
+- **Learned layers on top.** The learned layers of the namespace's lineage
+  (`learned:<ns>`, ancestors first) are merged after the activated
+  ontologies, so a learned property, or a learned override of a pack property
+  (a corrected cardinality, new cues), wins by name.
+- `split: 'none'` decides every statement as before, small talk included;
+  the same words are an exact duplicate whatever their type.
+
+## Learning (built)
+
+`::ontology learn {ns, mode?, min_support?, auto_support?, max_claims?, sim?,
+dry_run?}` (`ontology_learn.rs`):
+
+1. **Points:** the namespace's current claims no property typed (stored type
+   `untyped`, or no type), declarative and not small talk, plus document
+   chunks (`kind: 'doc'`), not the assistant's; the most recent `max_claims`
+   (1,500) with their vectors.
+2. **Clusters:** leader clustering by cosine (`sim`, 0.70;
+   `KLEOS_ONTO_LEARN_SIM`) with one reassignment pass.
+3. **A proposal per cluster** of at least `min_support` (5) claims:
+   - *vocabulary* when the cluster's centroid sits on an active property's
+     prototype (cosine ≥ 0.80, `KLEOS_ONTO_VOCAB_SIM`): its distinctive words
+     become new cues and an alias of that property (a company's own words for
+     a known relation);
+   - else a *property*: label and cues from the words and word pairs that set
+     the cluster apart from the pool (share × lift), a number datatype when
+     most claims carry one, and **cardinality from the data**: single-valued
+     when the decider says later statements replace earlier ones (mean p ≥ 0.9
+     over up to 8 same-subject pairs), or, without a decider, when subjects
+     restate it and ≥ 25% of claims carry update cues ("now", "anymore",
+     "switched", "went up to"…); multi-valued otherwise (the safe side: a
+     multi-valued property never supersedes).
+4. **Modes:** `auto` (the default) applies proposals with at least
+   `auto_support` (8) claims and mean similarity ≥ 0.60
+   (`KLEOS_ONTO_AUTO_COHERENCE`) to the learned layer; a single-valued guess
+   is kept multi-valued unless the decider or ≥ 40% update cues back it.
+   `review` keeps every proposal for `::ontology approve {id}` / `reject
+   {id}`; `::ontology proposals {ns, status?}` lists them. A proposal is
+   never made twice (a rejected one stays rejected).
+5. **Retyping:** an applied proposal types its evidence claims
+   (`kleos_mem_type`, `by: learn`), so the cardinality policy uses it at once.
+6. **Automatic runs:** `remember` counts the untyped claims it adds per
+   namespace and runs `learn` (auto) and `maintain` every
+   `KLEOS_ONTO_LEARN_EVERY` (200; 0 turns it off) of them; the result is in
+   `RememberResult.ontology_learned`.
+
+## Maintenance (built)
+
+`::ontology maintain {ns, dry_run?}` (also after each automatic learn):
+
+- **Cardinality correction:** a single-valued property whose data keeps
+  holding several current values per subject (≥ 2 subjects with ≥ 3 current
+  values, most of them without update cues; `KLEOS_ONTO_FLIP_SUBJECTS`,
+  `KLEOS_ONTO_FLIP_VALUES`) becomes multi-valued in the learned layer, so
+  kleos stops replacing those values. Pack properties are corrected by a
+  learned override, never edited in place.
+- **Synonyms:** two learned properties with the same label words or nearly
+  the same prototype (cosine ≥ 0.90) merge: the one more claims use is kept,
+  the other's label and cues become its alias and cues, its claims are
+  retyped.
+- **Retirement:** a learned property no current claim uses, 30 days
+  (`KLEOS_ONTO_RETIRE_DAYS`) after it was added, is retired.
+
+**Every change** (learned, approved, corrected, merged, retired) is a row of
+`kleos_onto_change {ns, id => at, kind, onto, target, before, after,
+evidence, by, undone}` and a new valid-time version of the learned layer.
+`::ontology history {ns}` lists them, newest first; `::ontology undo {ns,
+change}` puts back the properties the change replaced (and drops those it
+added) as a new version, and marks it undone.
+
+`::ontology suggest {ns}` points a namespace's documents and claims at domain
+packs (FIBO for finance, schema.org medical, LKIF legal, schema.org software)
+as review-only `pack` proposals, with a learning dry run.
+
+## Calibration (built)
+
+Prototype typing and the learning thresholds compare cosine similarities, and
+embedders put unrelated texts at very different similarities: the mean
+pairwise cosine of the personal pack's prototypes is 0.432 under
+EmbeddingGemma v1 and 0.703 under EmbeddingGemma 2 (`examples/onto_baseline.rs`).
+Thresholds tuned under v1 therefore typed far too much under v2 (4× the
+LoCoMo claims, 14.7 candidates per KU question kept out of `supersedes`
+against 2.3).
+
+Each prototype set's own baseline *b* (its mean pairwise cosine, cached with
+the set, so it follows the active embedder and recalibrates after a model
+swap or `::memory reembed`) maps every similarity onto the reference scale
+(v1's, `BASELINE_REF` 0.432): `ref = 0.432 + (s − b) · 0.568 / (1 − b)`.
+Typing scores (and the stored `kleos_mem_type.score`) are on that scale, so
+`PROTO_MIN`, the margin and `CONFIDENT` mean the same for any embedder;
+learning's clustering, vocabulary, coherence and merge thresholds move the
+other way (`calibrated(t, b)`). The mapping is one-sided: an embedder with a
+baseline below the reference keeps the absolute thresholds, so calibration
+never types more loosely than tuned.
+
+## Extractor labels (built)
+
+The classes of the active ontology that are not the personal pack's (up to
+12, lower case) go to the extractor as extra labels after its trained ones
+(`EntityExtractor::extract_labels`; GLiNER reads them zero-shot), and their
+spans become named entities. The fine-tune was trained on the four personal
+labels; for a domain ontology, upstream GLiNER (`model: 'gliner-base'`) reads
+new labels better (docs/research/gliner-usage.md).
+
+## Branches and kinship (built)
+
+- A memory branch inherits its nearest ancestor's activation and learned
+  layer. `facts`, `infer` and `validate` read the branch's own facts and each
+  ancestor's as of the fork (`inherited_from` on inherited facts); a parent's
+  later facts stay out, a backdated parent fact before the fork shows, as for
+  memories.
+- **One source of truth for kinship:** with an ontology active, the
+  extractor's kinship and role edges become ontology facts (`by:
+  extractor:kin`, after the rule's own facts, deduplicated) and are not
+  written to `kleos_mem_link`; `RememberResult.edges` still reports them.
+
+## Ontology learning: original design (kept for reference)
 
 Propose classes and properties from a namespace's memories, with a human
 approving them before they become active:
@@ -410,9 +545,10 @@ Not built: the clustering and proposal ops. The `untyped` share per namespace
 - Schema: the ontology relations are created on first use of `::ontology`
   (or of a namespace with an activation row). No memory schema version bump;
   stores without them behave exactly as before.
-- Off by default: a namespace without `activate` is untouched. `memory_init
-  {ontology: 'personal'}` activates the default pack for the store's default
-  namespace (built).
+- **On by default since wave5/onto-auto:** a memory store's namespaces get
+  the personal pack unless the store turns it off (`memory_init {ontology:
+  'none'}`). New relations `kleos_onto_proposal` and `kleos_onto_change` are
+  created on first use with the others.
 
 ## Results
 
@@ -508,18 +644,149 @@ reasonably left untyped, though a few were typable: "prepping for my dance
 studio", "stayed up all night playing games"). Typing recall on chat is low;
 the policy is built so that an untyped claim falls back to today's decision.
 
+### Zero maintenance (wave5/onto-auto)
+
+*2026-10-24, wave5/onto-auto. Real models through the Python wheel on Metal:
+**EmbeddingGemma v1** int8 (main's default when these ran; see "With
+EmbeddingGemma 2" for v2) and decider-nano at the 0.995 supersedes
+threshold. Scripts `scripts/ontology/self_build_demo.py`,
+`scripts/ontology/learn_probe.py`, `scripts/memory-api/claims_ku.py`,
+`scripts/ontology/life_stream_py.py`, `scripts/bench-l2/retrieval.py`; data in
+`.bench-data/onto-auto/`.*
+
+**Defaults on, no regression:**
+
+| Check | Before (ontology activated by hand, 0.997) | Default on, 0.995 |
+|---|---|---|
+| 23 held-out KU questions: latest first (hide_pending) | 83% (91%) | **83% (91%)** |
+| KU auto-supersedes per question | 0.43 | 0.52 (both extra ones right) |
+| Life stream: auto-supersedes right / wrong / missed | 12 / 0 / 3 | **13 / 0 / 2** |
+| Life stream top-1 (hide_pending) | 15/20 (19/20) | **16/20 (19/20)** |
+| LoCoMo, 3 conversations, decider on: auto-supersedes | 1 (wrong) | 2 (both wrong) |
+| LoCoMo pending decisions | 693 | 686 |
+| LoCoMo QA, 385 questions, context output | 0.847 (no ontology: 0.852) | **0.862** |
+
+- The LoCoMo run had automatic learning on (every 200 untyped claims). QA
+  against the earlier ontology run: 7 questions gained, 1 lost; against no
+  ontology 13 and 9. Within noise: the policy's value stays a cleaner store,
+  not higher scores. By category: single-hop (74) 0.865, temporal (90) 0.933,
+  multi-hop (21) 0.762, open-domain (200) 0.840.
+- **The 0.995 threshold's cost:** one more wrong automatic replacement on
+  LoCoMo ("I painted this after I visited a LGBTQ center" replaced by "I
+  painted it after I visited the beach last week", p 0.9958; two different
+  paintings), against one more right one on the life stream and two more on
+  KU ("I've watched 4 MCU films" → "12 films, including 5 MCU"; "17 new
+  postcards" → "25 new postcards"). The other LoCoMo replacement (p 0.9972)
+  happens at 0.997 too.
+
+**Learning on real chat** (LoCoMo, no decider, `learn` in review mode and the
+proposals with ≥ 8 claims approved, then `maintain`):
+
+| | untyped share before | after |
+|---|---|---|
+| conv-26 | 0.562 | 0.524 |
+| conv-30 | 0.564 | 0.414 |
+
+- Learned: `adoption`, `pottery`, `pride` (conv-26); `dance` (60 claims),
+  `store` (27), `business`, `job` (conv-30). On chat, learned properties are
+  topics and all came out multi-valued: they type claims (and keep different
+  topics from superseding each other) without enabling any replacement.
+- Maintenance merged `dance_x` into `dance` (prototype cosine 0.94) and made
+  the pack's `family` multi-valued from the data (2 subjects holding ≥ 3
+  current values without update cues).
+- A first version made labels of greetings ("thanks", "hey") and put speaker
+  names in cues; greetings, evaluations and addressed names are filtered now.
+
+**A company corpus builds its own ontology** (61 notes from templates: team
+headcounts, cloud vendors, incidents, offices, chatter; decider on; automatic
+learning every 30 untyped claims; no human input):
+
+- After 33 notes, automatic learning added `engineers` (single-valued, number,
+  cues "team engineers", "team grew"; "2 of its statements were already
+  replaced by later ones"; 13 claims of evidence) and typed 12 claims with it.
+- A new note, "The data team now has 30 engineers.", was typed `engineers`
+  (cue + prototype) and superseded the data team's old count; the other teams'
+  counts stayed (pending at p ≈ 0.97, below the threshold).
+- Vendors and incidents stayed proposals (below the auto-apply support).
+- Two fixes came from this run: replaced claims (and `supersedes` links
+  inside a cluster) now count as evidence, since a value that keeps being
+  replaced vanishes from the current claims; and clusters whose centroids
+  nearly coincide merge ("the team now has 12 engineers" / "the team grew to
+  14 engineers").
+- Team names are not subjects (`subject()` finds speakers, `user`,
+  relatives and leading names), so the cardinality gate cannot keep teams
+  apart; the decider does.
+
+**With EmbeddingGemma 2** (main's default since the egemma2 merge; same
+scripts, final code: calibration plus "prototype-only types never block"):
+
+| Check | v1, final | v2 uncalibrated | v2, final | v2, ontology off |
+|---|---|---|---|---|
+| 22 true KU update pairs allowed by the policy | 22 | 20 | **22** | — |
+| KU candidates kept out of `supersedes` per question | 1.17 | 14.7 | **1.65** | 0 |
+| KU latest first (hide_pending) | 83% (91%) | 83% (91%) | **83%** (91%)¹ | 83% (91%) |
+| Life stream auto right / wrong / missed | 13 / 0 / 2 | 12 / 0 / 3 | 12 / 1 / 3 | 13 / 0 / 2 |
+| Life stream top-1 (hide_pending) | 16 (19) /20 | 14 (14) | 15 (15) | 15 (15) |
+| LoCoMo claims typed (of 2,586) | 166 | 673 | 701 | — |
+| Old decider-on LoCoMo auto-supersedes (180, all wrong) still allowed | 7 | 14² | 13 | — |
+| LoCoMo 3 conversations: auto-supersedes (all wrong) / pending | 2 / 686 | — | 3 / 666 | — |
+| LoCoMo QA, 385 questions | 0.862 | — | 0.849 | — |
+
+¹ The intermediate calibrated-only run gave 78% (87%): one true update ("my
+other two bikes, a mountain bike and a commuter bike" → "I currently have
+three bikes") was kept out of `supersedes` by two prototype-only types
+(`vehicle` 0.644, `collection` 0.588); hence the final rule.
+² With calibration only.
+
+- v2's own effect, without the ontology, is most of its life-stream top-1
+  drop (19 → 15 with hide_pending); the embedder benchmark records v2's
+  lower LoCoMo retrieval (docs/benchmarks/memory.md).
+- QA 0.849 against v1's 0.862 (23 gained, 28 lost): within noise.
+- Learning under v2: the company demo learned `engineers` (single-valued)
+  and `service_outage` (multi-valued) as separate properties (v1 merged
+  vendors into nothing and found only `engineers`); on LoCoMo chat it applied
+  nothing (two proposals below 8 claims), and maintenance made `children`,
+  `family`, `language` and, doubtfully, `reports_to` multi-valued.
+
+**GLiNER CPU and thresholds:**
+
+- Apple Accelerate (now part of `infer-metal`): GLiNER on the CPU 94–118
+  ms per claim against 249–311 ms (f32, 64 gold claims, load about 9);
+  GLiNER and decider-nano parity tests pass with it.
+- Retuning GLiNER's per-label thresholds on the 200 hand-checked claims, with
+  2-fold cross-validation over three splits, changed names F by +0.008,
+  −0.010 and −0.016 and lowered relatives: the thresholds stay (person 0.8,
+  location 0.9, organization 0.8, relative 0.5).
+
 ## Left
 
-- **Branches:** activation rows and facts don't read through a branch's
-  lineage yet; a fork starts with no ontology.
-- **Extractor labels from the ontology:** the GLiNER port (main beb1bcd) uses
-  its four trained labels. Feeding the active ontology's classes and relations
-  to it as labels, with upstream GLiNER for domain ontologies, is not wired.
-- **Two kinship stores:** the GLiNER port writes relative edges to
-  `kleos_mem_link` (`decided_by: 'gliner-rule'`); the ontology's rule writes
-  `kleos_onto_fact`. They agree on shape (person node plus typed edge,
-  possessor resolved); one should read the other.
-- **Recall over inferred edges**, ontology learning, unit conversion: designed,
-  not built.
-- **Typing recall on chat is low** (most LoCoMo claims are untyped); the
-  small-talk lexicon misses some courtesies ("No problem, John.").
+- **v2 over-typing is reduced, not gone:** under EmbeddingGemma 2, 13 of the
+  180 known-wrong LoCoMo replacements are still allowed by the policy (v1: 7),
+  4× more claims are typed than under v1, and the life stream has one wrong
+  automatic replacement (12/1/3 against 13/0/2 with the ontology off). The
+  calibration aligns averages (baseline and claim anchors); v2's per-claim
+  prototype rankings are noisier, which averages can't fix. Next: calibrate
+  on a labelled typing set, or type only with cue support under embedders
+  whose calibration-claim margins are low.
+- **A doubtful maintenance flip:** under v2, `reports_to` became multi-valued
+  from over-typed claims. Maintenance should require cue- or rule-backed
+  types as evidence, not prototype-only ones.
+- **A contentless claim superseding a substantive one:** the decider let "It's
+  definitely isn't, Maria." replace "Investing in our future generations is
+  key, giving them the right tools for success." at p 0.9999 (v1 and v2).
+  Proposed rule: a claim with no concrete content (`concrete: false` and
+  under 5 content words, the "thin" test the policy already computes) can't
+  supersede a claim that has concrete content; cap it at pending.
+- **The 0.995 threshold** adds one wrong LoCoMo replacement (two different
+  paintings, p 0.9958) for one more right on the life stream and two on KU.
+
+- ~~Branches~~, ~~extractor labels~~, ~~two kinship stores~~, ~~ontology
+  learning~~, ~~courtesies~~: built in wave5/onto-auto.
+- **Recall over inferred edges** and **unit conversion**: designed, not built.
+- **A branch cannot retract an inherited fact** (facts have no copy-up yet).
+- **Learning labels are word-based:** a cluster's label is its most
+  distinctive word pair, not a canonical relation name; it reads well on
+  topical clusters, less on mixed ones (see "Results").
+- **Domain classes reach the extractor but not the claim typer's subjects:**
+  a domain entity is a named entity; typing a claim's subject to a domain
+  class is left to the extractor's spans.

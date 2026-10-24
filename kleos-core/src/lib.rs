@@ -180,6 +180,7 @@ pub mod docs;
 pub mod ontology;
 pub mod ontology_type;
 pub(crate) mod ontology_ttl;
+pub mod ontology_learn;
 pub(crate) mod flow_builtin;
 pub(crate) mod flow_cron;
 pub(crate) mod fixed_rule;
