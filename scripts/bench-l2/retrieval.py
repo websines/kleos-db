@@ -46,7 +46,8 @@ def open_db(variant, device):
 
     db = CozoDbPy("mem", "", "{}")
     if variant in ("hybrid", "sup") and not getattr(open_db, "_models", False):
-        db.enable_embedder("gemma", device=device)
+        # KLEOS_EMBED_MODEL picks the model (e.g. embeddinggemma-300m for v1); default: the engine's
+        db.enable_embedder("gemma", model=os.environ.get("KLEOS_EMBED_MODEL") or None, device=device)
         if variant == "sup":
             db.enable_decider("nano", device=device)
         open_db._models = True
