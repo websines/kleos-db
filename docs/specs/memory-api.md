@@ -504,6 +504,17 @@ Without an active ontology, or with `policy: 'off'`, `remember` behaves exactly 
 
 Resolution is read-only while planning; its writes go in the `remember` transaction (see "Concurrency"). The entity filter of `recall` and `forget` matches every row of the named entity's cluster.
 
+### Ontology by default
+
+With no setup, a memory namespace is typed and gated by the personal ontology
+(docs/specs/ontology.md, "Defaults"): small talk is never decided, different
+subjects never supersede each other, multi-valued properties never supersede.
+`memory_init {ontology: 'none'}` turns it off for the store. The ontology
+learns and maintains itself ("Learning", "Maintenance" there); a `remember`
+that triggered an automatic learning run reports it in `ontology_learned`.
+With an ontology active, kinship and role edges from automatic entities are
+ontology facts (`::ontology facts`), not `kleos_mem_link` rows.
+
 ### Automatic entities
 
 With an entity extractor configured (`::memory init {extractor: 'gliner'}`, Python `memory_init({"extractor": "gliner"})`) and no `entities` passed, `remember` finds them itself. The extractor is enabled like an embedder or decider (`::extractor enable gliner {path: '<checkpoint>', precision: 'f16', device: 'metal'}`, `Db::enable_extractor`, Python `enable_extractor`, `::extractor list | disable`). The built-in one is GLiNER2.5 (`kleos-infer`, feature `infer`), a DeBERTa-v3-base span model ported to candle; The default checkpoint is kleos's fine-tune [`Mazino0/kleos-gliner`](https://huggingface.co/Mazino0/kleos-gliner) (Apache-2.0), downloaded on enable; `model: 'gliner-base'` selects upstream `fastino/gliner2.5-base-v1` (better for open label sets such as domain ontologies), and `$KLEOS_GLINER_MODEL` or `path` any other checkpoint. Research: [gliner.md](../research/gliner.md), [gliner-usage.md](../research/gliner-usage.md).

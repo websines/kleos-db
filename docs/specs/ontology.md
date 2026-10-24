@@ -1,7 +1,15 @@
 # Ontologies (`::ontology`)
 
-*2026-10-24, branch `wave5/ontology`. Status: the parts marked **built** are on
-the branch with tests and measurements (see "Results"); the rest is design.*
+*2026-10-24, branches `wave5/ontology` and `wave5/onto-auto` (zero
+maintenance). Status: the parts marked **built** are on the branch with tests
+and measurements (see "Results"); the rest is design.*
+
+**Zero maintenance** (the principle since wave5/onto-auto): nobody has to fill
+in or maintain an ontology. The personal pack is on by default; the ontology
+learns properties from what is stored, corrects itself, and every automatic
+change is versioned, explained by the memories behind it, and reversible.
+Human review is an optional mode; importing a company ontology is an optional
+head start. See "Defaults", "Learning" and "Maintenance".
 
 An ontology tells kleos what kinds of things and statements exist in a
 namespace, and their rules: which classes there are, which properties and
@@ -331,6 +339,11 @@ over inferred edges (design; not built).
 | `assert {ns, facts: [{s, p, o, lit?}], event?, validate?}`, `retract {ns, facts}` | facts |
 | `facts {ns, s?, p?, o?, at?}`, `infer {...}`, `validate {ns}` | read, derive, check |
 | `type {ns, text}` | what the typer would conclude for a text (debugging) |
+| `learn {ns, mode?: 'auto'|'review', min_support?, auto_support?, max_claims?, sim?, dry_run?}` | propose (and apply) properties from untyped claims ("Learning") |
+| `maintain {ns, dry_run?}` | correct cardinality, merge synonyms, retire unused ("Maintenance") |
+| `proposals {ns, status?}`, `approve {ns, id}`, `reject {ns, id}` | review mode |
+| `history {ns}`, `undo {ns, change}` | every automatic change, and its undo |
+| `suggest {ns}` | domain packs the namespace's texts point at (review only) |
 
 ## Import and export
 
@@ -384,7 +397,108 @@ domains, ranges, inverses and labels, but not cardinality restrictions:
 mark the single-valued properties a desk cares about with a small JSON overlay
 activated after it (`["fibo-fnd", "acme-overrides"]`).
 
-## Ontology learning (design only; follow-up)
+## Defaults (built)
+
+- **On by default.** A namespace's ontology is its own activation, else its
+  nearest branch ancestor's (memory branches inherit it), else the store
+  default: `personal`. `memory_init {ontology: 'none'}` (or `'off'`) turns the
+  default off for the store (memory-config key `onto_default`); `memory_init
+  {ontology: '<name>', ns}` activates one on a namespace as before.
+- **Learned layers on top.** The learned layers of the namespace's lineage
+  (`learned:<ns>`, ancestors first) are merged after the activated
+  ontologies, so a learned property, or a learned override of a pack property
+  (a corrected cardinality, new cues), wins by name.
+- `split: 'none'` decides every statement as before, small talk included;
+  the same words are an exact duplicate whatever their type.
+
+## Learning (built)
+
+`::ontology learn {ns, mode?, min_support?, auto_support?, max_claims?, sim?,
+dry_run?}` (`ontology_learn.rs`):
+
+1. **Points:** the namespace's current claims no property typed (stored type
+   `untyped`, or no type), declarative and not small talk, plus document
+   chunks (`kind: 'doc'`), not the assistant's; the most recent `max_claims`
+   (1,500) with their vectors.
+2. **Clusters:** leader clustering by cosine (`sim`, 0.70;
+   `KLEOS_ONTO_LEARN_SIM`) with one reassignment pass.
+3. **A proposal per cluster** of at least `min_support` (5) claims:
+   - *vocabulary* when the cluster's centroid sits on an active property's
+     prototype (cosine ≥ 0.80, `KLEOS_ONTO_VOCAB_SIM`): its distinctive words
+     become new cues and an alias of that property (a company's own words for
+     a known relation);
+   - else a *property*: label and cues from the words and word pairs that set
+     the cluster apart from the pool (share × lift), a number datatype when
+     most claims carry one, and **cardinality from the data**: single-valued
+     when the decider says later statements replace earlier ones (mean p ≥ 0.9
+     over up to 8 same-subject pairs), or, without a decider, when subjects
+     restate it and ≥ 25% of claims carry update cues ("now", "anymore",
+     "switched", "went up to"…); multi-valued otherwise (the safe side: a
+     multi-valued property never supersedes).
+4. **Modes:** `auto` (the default) applies proposals with at least
+   `auto_support` (8) claims and mean similarity ≥ 0.60
+   (`KLEOS_ONTO_AUTO_COHERENCE`) to the learned layer; a single-valued guess
+   is kept multi-valued unless the decider or ≥ 40% update cues back it.
+   `review` keeps every proposal for `::ontology approve {id}` / `reject
+   {id}`; `::ontology proposals {ns, status?}` lists them. A proposal is
+   never made twice (a rejected one stays rejected).
+5. **Retyping:** an applied proposal types its evidence claims
+   (`kleos_mem_type`, `by: learn`), so the cardinality policy uses it at once.
+6. **Automatic runs:** `remember` counts the untyped claims it adds per
+   namespace and runs `learn` (auto) and `maintain` every
+   `KLEOS_ONTO_LEARN_EVERY` (200; 0 turns it off) of them; the result is in
+   `RememberResult.ontology_learned`.
+
+## Maintenance (built)
+
+`::ontology maintain {ns, dry_run?}` (also after each automatic learn):
+
+- **Cardinality correction:** a single-valued property whose data keeps
+  holding several current values per subject (≥ 2 subjects with ≥ 3 current
+  values, most of them without update cues; `KLEOS_ONTO_FLIP_SUBJECTS`,
+  `KLEOS_ONTO_FLIP_VALUES`) becomes multi-valued in the learned layer, so
+  kleos stops replacing those values. Pack properties are corrected by a
+  learned override, never edited in place.
+- **Synonyms:** two learned properties with the same label words or nearly
+  the same prototype (cosine ≥ 0.90) merge: the one more claims use is kept,
+  the other's label and cues become its alias and cues, its claims are
+  retyped.
+- **Retirement:** a learned property no current claim uses, 30 days
+  (`KLEOS_ONTO_RETIRE_DAYS`) after it was added, is retired.
+
+**Every change** (learned, approved, corrected, merged, retired) is a row of
+`kleos_onto_change {ns, id => at, kind, onto, target, before, after,
+evidence, by, undone}` and a new valid-time version of the learned layer.
+`::ontology history {ns}` lists them, newest first; `::ontology undo {ns,
+change}` puts back the properties the change replaced (and drops those it
+added) as a new version, and marks it undone.
+
+`::ontology suggest {ns}` points a namespace's documents and claims at domain
+packs (FIBO for finance, schema.org medical, LKIF legal, schema.org software)
+as review-only `pack` proposals, with a learning dry run.
+
+## Extractor labels (built)
+
+The classes of the active ontology that are not the personal pack's (up to
+12, lower case) go to the extractor as extra labels after its trained ones
+(`EntityExtractor::extract_labels`; GLiNER reads them zero-shot), and their
+spans become named entities. The fine-tune was trained on the four personal
+labels; for a domain ontology, upstream GLiNER (`model: 'gliner-base'`) reads
+new labels better (docs/research/gliner-usage.md).
+
+## Branches and kinship (built)
+
+- A memory branch inherits its nearest ancestor's activation and learned
+  layer. `facts`, `infer` and `validate` read the branch's own facts and each
+  ancestor's as of the fork (`inherited_from` on inherited facts); a parent's
+  later facts stay out, a backdated parent fact before the fork shows, as for
+  memories.
+- **One source of truth for kinship:** with an ontology active, the
+  extractor's kinship and role edges become ontology facts (`by:
+  extractor:kin`, after the rule's own facts, deduplicated) and are not
+  written to `kleos_mem_link`; `RememberResult.edges` still reports them.
+
+## Ontology learning: original design (kept for reference)
 
 Propose classes and properties from a namespace's memories, with a human
 approving them before they become active:
@@ -410,9 +524,10 @@ Not built: the clustering and proposal ops. The `untyped` share per namespace
 - Schema: the ontology relations are created on first use of `::ontology`
   (or of a namespace with an activation row). No memory schema version bump;
   stores without them behave exactly as before.
-- Off by default: a namespace without `activate` is untouched. `memory_init
-  {ontology: 'personal'}` activates the default pack for the store's default
-  namespace (built).
+- **On by default since wave5/onto-auto:** a memory store's namespaces get
+  the personal pack unless the store turns it off (`memory_init {ontology:
+  'none'}`). New relations `kleos_onto_proposal` and `kleos_onto_change` are
+  created on first use with the others.
 
 ## Results
 
@@ -510,16 +625,13 @@ the policy is built so that an untyped claim falls back to today's decision.
 
 ## Left
 
-- **Branches:** activation rows and facts don't read through a branch's
-  lineage yet; a fork starts with no ontology.
-- **Extractor labels from the ontology:** the GLiNER port (main beb1bcd) uses
-  its four trained labels. Feeding the active ontology's classes and relations
-  to it as labels, with upstream GLiNER for domain ontologies, is not wired.
-- **Two kinship stores:** the GLiNER port writes relative edges to
-  `kleos_mem_link` (`decided_by: 'gliner-rule'`); the ontology's rule writes
-  `kleos_onto_fact`. They agree on shape (person node plus typed edge,
-  possessor resolved); one should read the other.
-- **Recall over inferred edges**, ontology learning, unit conversion: designed,
-  not built.
-- **Typing recall on chat is low** (most LoCoMo claims are untyped); the
-  small-talk lexicon misses some courtesies ("No problem, John.").
+- ~~Branches~~, ~~extractor labels~~, ~~two kinship stores~~, ~~ontology
+  learning~~, ~~courtesies~~: built in wave5/onto-auto.
+- **Recall over inferred edges** and **unit conversion**: designed, not built.
+- **A branch cannot retract an inherited fact** (facts have no copy-up yet).
+- **Learning labels are word-based:** a cluster's label is its most
+  distinctive word pair, not a canonical relation name; it reads well on
+  topical clusters, less on mixed ones (see "Results").
+- **Domain classes reach the extractor but not the claim typer's subjects:**
+  a domain entity is a named entity; typing a claim's subject to a domain
+  class is left to the extractor's spans.

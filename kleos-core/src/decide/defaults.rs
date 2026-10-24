@@ -49,7 +49,12 @@ pub const NANO_TUNE_V1: &str = "nano-tune-v1";
 fn nano_tune_v1(t: Template) -> Calibration {
     const SRC: &str = "adapt-60 nano-tune-v1";
     match t {
-        Template::Supersedes => cal(&[], 0.997, 0.997, SRC),
+        // `KLEOS_SUPERSEDES_TAU` overrides the fitted value (an experiment
+        // knob; docs/benchmarks/memory.md, "Supersedes threshold")
+        Template::Supersedes => {
+            let tau = std::env::var("KLEOS_SUPERSEDES_TAU").ok().and_then(|v| v.parse().ok()).unwrap_or(0.997);
+            cal(&[], tau, tau, SRC)
+        }
         Template::Contradicts => cal(&[], 0.954, 0.954, SRC),
         Template::Duplicate => cal(&[], 0.091, 1.01, SRC),
         Template::Relation => cal(&[0.0, 0.0, -0.25], 0.000, 1.000, SRC),
