@@ -65,7 +65,7 @@ struct Nli {
 }
 
 /// Pairs the fake decider is unsure about: P(contradiction) ≈ 0.9, below
-/// the tuned threshold (0.997) but above the review cut (0.5).
+/// the tuned threshold (0.995) but above the review cut (0.5).
 const UNSURE: [(&str, &str); 1] = [("I work at Siemens.", "I joined Spotify.")];
 
 impl Decider for Nli {
@@ -253,7 +253,7 @@ fn unsure_supersede_is_pending_and_flagged() {
     assert_eq!(r.tentative.len(), 1, "{r:?}");
     let t = &r.tentative[0];
     assert_eq!((t.template.as_str(), t.band.as_str(), t.candidate.as_str()), ("supersedes", "none", old.as_str()));
-    assert!(t.p > 0.5 && t.p < 0.997, "{t:?}");
+    assert!(t.p > 0.5 && t.p < 0.995, "{t:?}");
     // reads choose: flagged by default, hidden on request
     let q = |hide| {
         db.recall("where do I work", RecallOpts { ns: ns("u"), hide_pending: hide, ..Default::default() })

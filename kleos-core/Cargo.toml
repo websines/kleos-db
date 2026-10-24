@@ -109,6 +109,11 @@ infer = ["dep:kleos-infer", "kleos-infer/download", "kleos-infer/gliner"]
 ## time, provenance per fact, export as safetensors. Pulls in `kleos-engram`
 ## (Engram addressing; `tokenizers`, no ML runtime). Off by default.
 engram = ["dep:kleos-engram"]
+## Documents in the memory API (docs/specs/documents.md): `remember` reads
+## PDFs (text layer or OCR), images, Markdown, HTML and DOCX into chunk
+## memories. Pulls in `kleos-docs` (tract, pdfium at run time); needs the
+## 1.91+ toolchain like `infer`.
+docs = ["dep:kleos-docs", "kleos-docs/download"]
 ## `infer` plus Apple-GPU (Metal) kernels.
 # Accelerate too: Metal builds are macOS-only, and the CPU path (device
 # `cpu`, or anything Metal can't run) is 2-2.5x faster with Apple BLAS
@@ -222,6 +227,7 @@ half = "2.4.1"
 sha2 = "0.10.8"
 kleos-infer = { path = "../kleos-infer", version = "0.1.0", optional = true, default-features = false }
 kleos-engram = { path = "../kleos-engram", version = "0.1.0", optional = true }
+kleos-docs = { path = "../kleos-docs", version = "0.1.0", optional = true, default-features = false, features = ["ocr", "pdf"] }
 rustc-hash = "1.1.0"
 twox-hash = "1.6.3"
 quadrature = "0.1.2"
