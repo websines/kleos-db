@@ -717,6 +717,37 @@ learning every 30 untyped claims; no human input):
   relatives and leading names), so the cardinality gate cannot keep teams
   apart; the decider does.
 
+**With EmbeddingGemma 2** (main's default since the egemma2 merge; same
+scripts, final code: calibration plus "prototype-only types never block"):
+
+| Check | v1, final | v2 uncalibrated | v2, final | v2, ontology off |
+|---|---|---|---|---|
+| 22 true KU update pairs allowed by the policy | 22 | 20 | **22** | — |
+| KU candidates kept out of `supersedes` per question | 1.17 | 14.7 | **1.65** | 0 |
+| KU latest first (hide_pending) | 83% (91%) | 83% (91%) | **83%** (91%)¹ | 83% (91%) |
+| Life stream auto right / wrong / missed | 13 / 0 / 2 | 12 / 0 / 3 | 12 / 1 / 3 | 13 / 0 / 2 |
+| Life stream top-1 (hide_pending) | 16 (19) /20 | 14 (14) | 15 (15) | 15 (15) |
+| LoCoMo claims typed (of 2,586) | 166 | 673 | 701 | — |
+| Old decider-on LoCoMo auto-supersedes (180, all wrong) still allowed | 7 | 14² | 13 | — |
+| LoCoMo 3 conversations: auto-supersedes (all wrong) / pending | 2 / 686 | — | 3 / 666 | — |
+| LoCoMo QA, 385 questions | 0.862 | — | 0.849 | — |
+
+¹ The intermediate calibrated-only run gave 78% (87%): one true update ("my
+other two bikes, a mountain bike and a commuter bike" → "I currently have
+three bikes") was kept out of `supersedes` by two prototype-only types
+(`vehicle` 0.644, `collection` 0.588); hence the final rule.
+² With calibration only.
+
+- v2's own effect, without the ontology, is most of its life-stream top-1
+  drop (19 → 15 with hide_pending); the embedder benchmark records v2's
+  lower LoCoMo retrieval (docs/benchmarks/memory.md).
+- QA 0.849 against v1's 0.862 (23 gained, 28 lost): within noise.
+- Learning under v2: the company demo learned `engineers` (single-valued)
+  and `service_outage` (multi-valued) as separate properties (v1 merged
+  vendors into nothing and found only `engineers`); on LoCoMo chat it applied
+  nothing (two proposals below 8 claims), and maintenance made `children`,
+  `family`, `language` and, doubtfully, `reports_to` multi-valued.
+
 **GLiNER CPU and thresholds:**
 
 - Apple Accelerate (now part of `infer-metal`): GLiNER on the CPU 94–118
@@ -728,6 +759,26 @@ learning every 30 untyped claims; no human input):
   location 0.9, organization 0.8, relative 0.5).
 
 ## Left
+
+- **v2 over-typing is reduced, not gone:** under EmbeddingGemma 2, 13 of the
+  180 known-wrong LoCoMo replacements are still allowed by the policy (v1: 7),
+  4× more claims are typed than under v1, and the life stream has one wrong
+  automatic replacement (12/1/3 against 13/0/2 with the ontology off). The
+  calibration aligns averages (baseline and claim anchors); v2's per-claim
+  prototype rankings are noisier, which averages can't fix. Next: calibrate
+  on a labelled typing set, or type only with cue support under embedders
+  whose calibration-claim margins are low.
+- **A doubtful maintenance flip:** under v2, `reports_to` became multi-valued
+  from over-typed claims. Maintenance should require cue- or rule-backed
+  types as evidence, not prototype-only ones.
+- **A contentless claim superseding a substantive one:** the decider let "It's
+  definitely isn't, Maria." replace "Investing in our future generations is
+  key, giving them the right tools for success." at p 0.9999 (v1 and v2).
+  Proposed rule: a claim with no concrete content (`concrete: false` and
+  under 5 content words, the "thin" test the policy already computes) can't
+  supersede a claim that has concrete content; cap it at pending.
+- **The 0.995 threshold** adds one wrong LoCoMo replacement (two different
+  paintings, p 0.9958) for one more right on the life stream and two on KU.
 
 - ~~Branches~~, ~~extractor labels~~, ~~two kinship stores~~, ~~ontology
   learning~~, ~~courtesies~~: built in wave5/onto-auto.
