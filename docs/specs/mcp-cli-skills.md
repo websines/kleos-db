@@ -230,3 +230,42 @@ installs no hooks.
 - `scripts/mcp/e2e.py`: a stdio MCP client and the CLI against one store;
   `scripts/mcp/token_cost.py`: context cost of the tool list against the
   skills.
+
+## 6. Results (2026-10-25)
+
+- **Tests** (all passing): `tests/mcp.rs` 9, `tests/mcp_http.rs` 2 (against
+  the real binary over HTTP, with and without auth), `tests/cli.rs` 3 (CLI end
+  to end, config errors, MCP over stdio), plus 4 unit tests in `mcp.rs`
+  (HMAC, base64 sentinel, argument digest, percent-encoding).
+- **End to end** — `scripts/mcp/e2e.py <kleos> <dir>`: an MCP stdio client
+  and the CLI on one SQLite store, both directions visible, fork in the CLI and
+  diff over MCP, `forget` confirmed through MRTR: 10/10 checks.
+- **Context cost** — `scripts/mcp/token_cost.py <kleos> .` (characters / 4):
+
+  | Surface | ~tokens | In context |
+  |---|---|---|
+  | MCP tool list, 9 tools | 1,517 | every turn |
+  | MCP tool list with `query` | 1,592 | every turn |
+  | 4 skills: names + descriptions | 311 | every turn |
+  | 4 skill bodies together | 1,487 | only when opened |
+
+  Per tool: remember 241, branch 222, recall 220, flow 178, doc_add 174,
+  forget 166, reflect 117, entity_profile 104, doc_status 95. A coding agent
+  using the CLI through the skills carries about a fifth of the MCP cost until it
+  actually needs kleos.
+- **Plugin** — `claude plugin validate .` passes.
+- **Not run:** the official MCP inspector (`npx @modelcontextprotocol/inspector
+  --cli kleos mcp --db <path> --method tools/list`) — fetching it was not
+  permitted in this session; the inspector's client is also likely to use the
+  legacy `initialize` path, which the dual-era server serves.
+
+### Left
+
+- `subscriptions/listen` (server-pushed list or resource changes) and
+  `notifications/progress` streaming (SSE responses) — every response is a
+  single JSON object today.
+- OAuth 2 / Client ID Metadata Documents for HTTP auth (bearer tokens only).
+- Tasks for other long calls (`::memory reembed`, consolidation) — only
+  background document ingestion returns a task now.
+- An ontology tool over MCP (the skill points at the CLI).
+- `x-mcp-header` mirroring of tool parameters is not used by any kleos tool.
