@@ -1272,6 +1272,55 @@ impl CozoDbPy {
         }
         Ok(out.into())
     }
+    /// Turn an entity extractor on under `name` (process-wide) for automatic
+    /// entities (`memory_init(extractor=...)`). `model` is `gliner` (default)
+    /// or a repo id, `path` a local GLiNER2.5 checkpoint directory,
+    /// `precision` `f16` (default) / `f32` / `q8`, `device` `auto` / `cpu` /
+    /// `metal`. Needs the `infer` feature.
+    #[pyo3(signature = (name, model=None, precision=None, device=None, path=None))]
+    pub fn enable_extractor(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        model: Option<String>,
+        precision: Option<String>,
+        device: Option<String>,
+        path: Option<String>,
+    ) -> PyResult<()> {
+        self.db_ref()?;
+        let spec = ::kleos::extract::ExtractorSpec {
+            model,
+            path,
+            precision,
+            device,
+        };
+        py.allow_threads(|| ::kleos::extract::enable_extractor(name, spec))
+            .map_err(report2py)
+    }
+    /// Turn the extractor `name` off and unload it. Returns `False` when it
+    /// was already off. Process-wide.
+    pub fn disable_extractor(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
+        self.db_ref()?;
+        py.allow_threads(|| ::kleos::extract::disable_extractor(name))
+            .map_err(report2py)
+    }
+    /// Every enabled and disabled extractor as a dict
+    /// `{name, model, version, labels, enabled, loaded}`.
+    pub fn extractors(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.db_ref()?;
+        let out = PyList::empty(py);
+        for e in ::kleos::extract::extractors() {
+            let d = PyDict::new(py);
+            d.set_item("name", e.name)?;
+            d.set_item("model", e.model)?;
+            d.set_item("version", e.version)?;
+            d.set_item("labels", e.labels)?;
+            d.set_item("enabled", e.enabled)?;
+            d.set_item("loaded", e.loaded)?;
+            out.append(d)?;
+        }
+        Ok(out.into())
+    }
     /// Decide with a fixed template (`supersedes`, `same_entity`,
     /// `duplicate`, `contradicts`, `relation`, `important`). Returns a dict
     /// `{label, p, probs, band, confident, model, template, template_version,

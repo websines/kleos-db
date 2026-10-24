@@ -504,6 +504,32 @@ Without an active ontology, or with `policy: 'off'`, `remember` behaves exactly 
 
 Resolution is read-only while planning; its writes go in the `remember` transaction (see "Concurrency"). The entity filter of `recall` and `forget` matches every row of the named entity's cluster.
 
+### Automatic entities
+
+With an entity extractor configured (`::memory init {extractor: 'gliner'}`, Python `memory_init({"extractor": "gliner"})`) and no `entities` passed, `remember` finds them itself. The extractor is enabled like an embedder or decider (`::extractor enable gliner {path: '<checkpoint>', precision: 'f16', device: 'metal'}`, `Db::enable_extractor`, Python `enable_extractor`, `::extractor list | disable`). The built-in one is GLiNER2.5 (`kleos-infer`, feature `infer`), a DeBERTa-v3-base span model ported to candle; The default checkpoint is kleos's fine-tune [`Mazino0/kleos-gliner`](https://huggingface.co/Mazino0/kleos-gliner) (Apache-2.0), downloaded on enable; `model: 'gliner-base'` selects upstream `fastino/gliner2.5-base-v1` (better for open label sets such as domain ontologies), and `$KLEOS_GLINER_MODEL` or `path` any other checkpoint. Research: [gliner.md](../research/gliner.md), [gliner-usage.md](../research/gliner-usage.md).
+
+Options of `remember`: `extract` (default on; `false` off for the call, `true` requires an extractor), `extractor` (name for the call), `extract_granularity` (`statement`, the default, or `claim`), `extract_thresholds` (per label).
+
+**The prompt matches training.** The four bare labels `person`, `location`, `organization`, `relative`, in that order, no descriptions; gliner2's word splitter; the text lowercased by the model (offsets index the original). Texts over 384 words are read in 384-word windows overlapping by 64; a span seen in two windows is kept once.
+
+**Once per statement.** The extractor runs on the whole statement and each span goes to the claim whose byte range holds it (`extract_granularity: 'claim'` runs once per claim instead). On the 200-claim gold set, statement granularity scored names F 0.907 against 0.898 per claim (location 0.957 vs 0.917; the other labels equal).
+
+**Policy** (`memory_extract.rs`):
+- A `Name:` speaker prefix is stripped before extraction. First-person words then mean that speaker; without a prefix they mean `user` in the user's own statements (`role` unset or `user`), and nobody otherwise.
+- Per-label thresholds on the raw score: person 0.8, location 0.9, organization 0.8, relative 0.5 (tuned on the fine-tune's validation split with this prompt). gliner2 lowercases its input, so case comes from the original text: in a statement with mixed case a person, location or organization must contain a capital letter and not be a pronoun; in an all-lowercase statement it needs a score of at least 0.9 instead. `relative` is exempt from the case rule.
+- **Relatives are nodes.** A relative ("my sister", "Mom") becomes a person entity named `<possessor>'s <relation>` (`user's sister`, `Caroline's mother`), plus a typed edge `possessor -[relation]-> node` in `kleos_mem_link` (`decided_by: gliner-rule`, p = the span's score). The relation is one lower-case word (the head noun, with `Mom` → `mother`, `best friend` → `bestfriend`, …). Only first-person forms ("my", "our", a bare "Mom" or "Dad") belong to the speaker; "his/her/their X" belongs to the nearest person named before it in the statement and is skipped when there is none; "your X" is skipped.
+- **A name with its relative is the same person.** "my sister Anna", "my sister, Anna", "my sister (Anna)", "Anna, my sister": the name is merged into the node (`kleos_entity_merge`, `decided_by: gliner-rule`). The side this statement created folds into the other's canonical entity; two existing, different entities get a review link instead.
+- **The subject** (`user` or the speaker) is a claim's entity when the claim has a first-person subject word ("I", "we", "me", …) or a first-person possessive that is not part of a relative ("my car" counts, "my sister" does not). So "My sister moved to Berlin" (entities `user's sister`, `Berlin`) and "I live in Paris" (`user`, `Paris`) share no entity, and the same-subject gate keeps the first from superseding the second.
+- **Pronouns.** A claim with no person or relative of its own and a third-person pronoun ("She moved to Lisbon.") inherits the nearest person or relative mentioned before it in the same statement. No coreference model and no cross-turn resolution: a later bare "my sister" finds the node by name.
+- Kinship and role edges are written as found; they never supersede one another (two sisters are both true). Role edges (boss, partner) change over time: deciding which one is current is left to typed-edge handling (the ontology work), which can read the edges below.
+- General relations from GLiNER (works_at, lives_in) are not written: zero-shot relation F1 is about 0.2–0.37 (gliner-usage.md §4).
+
+**Stored.** Every span the extractor returned for a memory, kept or not, goes to `kleos_mem_extract {ns, id, n => label, start, end, text, score, kept, eid, extractor, at}` (schema v7): the raw score and the extractor version (`gliner2.5:<model>:<precision>`), so thresholds can be retuned and memories re-extracted later without guessing what produced a mention. Erase, branch copy-up and discard handle the rows like the other per-memory relations. The result of `remember` reports `extractor` (the version) and `edges`.
+
+**Edge output shape** (for typed-edge consumers): `kleos_mem_link {ns, src, rel, dst => created, p, decided_by}` with `src` and `dst` entity ids of `kleos_mem_entity` (resolve canonical ids through `kleos_entity_merge`), `rel` the relation word, `decided_by = 'gliner-rule'`; and in `RememberResult.edges`: `{src, src_name, rel, dst, dst_name, p}`. Relative nodes are ordinary `kleos_mem_entity` rows whose name has the `<possessor>'s <relation>` form; they are linked from the memories that mention them (`kleos_mem_mention`) like any entity.
+
+**Precision.** f16 is the default; f32 and q8 (weight-only) are options. On the gold set every precision gives the same spans at the thresholds above (zero label flips, Rust vs gliner2 at f32 identical). LayerNorm, relative positions and the span head always run in f32.
+
 ## Surfaces
 
 The same options everywhere: one JSON object per op, handled by `Db::memory_call(op, args)`.

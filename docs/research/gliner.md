@@ -15,6 +15,12 @@
 > - **About the speaker:** it loses to a first-person regex (0.72 vs
 >   0.845).
 > - **Update keys:** the verdict on keys below stands.
+>
+> **Port, 2026-10-24:** GLiNER is in kleos (the user's decision, ahead of the
+> phase-2 end-to-end run). The entity path is ported to candle
+> (`kleos-infer/src/gliner.rs`) and wired into `remember` as automatic
+> entities. See [Port](#port-2026-10-24) and "Automatic entities" in
+> `docs/specs/memory-api.md`.
 
 ## Verdict
 
@@ -553,6 +559,100 @@ This was not fine-tuned. The verdict on keys stands.
     work.
   - A port is worth its ~13 days only if this moves QA or the
     same-subject gate.
+
+## Port (2026-10-24)
+
+*Branch `wave5/gliner-port`. The port plan below, carried out for entities
+only.*
+
+**What runs in Rust.** `kleos_infer::Gliner`:
+- the DeBERTa-v3 encoder hand-ported on `linear.rs` (f32 / f16 / q8 weights,
+  f32 activations, mmap-staged token table, relative-position projections
+  precomputed once at load, gather-based c2p/p2c in a heads-first layout);
+- gliner2's word splitter, schema encoding (`( [P] entities ( [E] l … ) )
+  [SEP_TEXT] words`) and text normalisation;
+- the boundary encoder, query head, shared candidate pool (top-32 × top-32,
+  8 reserved per label, dedup to 192), FiLM pool scorer and abstention, on
+  the CPU in f32;
+- gliner2's `flat` overlap resolution (weighted interval scheduling with its
+  tie rules) and the 384/64-word long-text windows.
+
+Relations, records, structures and classification are not ported.
+
+**Parity** (`kleos-infer/tests/gliner_parity.rs`, fixture from
+`tests/fixtures/gliner_ref.py`, 12 texts including Unicode, URLs, e-mails, a
+190-token text and an empty one; max |Δ| against gliner2 2.1.0 on PyTorch CPU
+f32):
+
+| | CPU f32 | Metal f32 |
+|---|---|---|
+| encoder states (16 dims × every token) | 2.7e-6 | 2.0e-6 |
+| boundary states | 2.9e-6 | 2.7e-6 |
+| start/end marginals | 7.6e-6 | 8.3e-6 |
+| pool compat | 1.0e-5 | 8.8e-6 |
+| pair logits | 2.9e-5 | 4.3e-5 |
+| input ids, word/marker positions, candidate pool, spans | identical | identical |
+
+The log-bucketed relative positions match transformers' for every distance
+up to 699. On the fixture, q8 moves scores by at most 0.011 and f16 by 0.006,
+with no span at or above 0.5 changing.
+
+**Gold set (200 hand-checked claims), entity-only prompt, F per label at the
+validation-tuned thresholds (person 0.8, location 0.9, organization 0.8,
+relative 0.5):**
+
+| | person | location | organization | relative | names P / R / F | flips vs Rust f32 |
+|---|---|---|---|---|---|---|
+| gliner2 (Python) f32 CPU, per claim | 1.00 | 0.917 | 0.789 | 0.865 | 0.846 / 0.957 / 0.898 | 0 |
+| Rust f32 CPU, per claim | 1.00 | 0.917 | 0.789 | 0.865 | 0.846 / 0.957 / 0.898 | — |
+| Rust f32 Metal, per claim | same | | | | | 0 |
+| Rust f16 Metal, per claim | same | | | | | 0 |
+| Rust q8 CPU / Metal, per claim | same | | | | | 0 |
+| **Rust f16 Metal, per statement** (message read whole, spans kept inside the claim) | 1.00 | **0.957** | 0.789 | 0.865 | 0.863 / 0.957 / **0.907** | — |
+
+- **Entity-only prompt vs the joint prompt the fine-tune was trained with**
+  (entities + kind + about-speaker): names F 0.898 vs 0.89 and relatives
+  0.865 vs 0.86, so kleos prompts entities only (shorter, and nothing it
+  doesn't use).
+- **Statement granularity** doesn't hurt the claim-trained model; it helps
+  location (more context), so it is the default.
+- **Precision:** every precision gives the same spans at these thresholds,
+  so q8 is allowed; f16 is the default as the reference-faithful choice.
+  (Thresholds re-tuned on q8's own validation predictions would move
+  organization to 0.4 because of near-ties; with the shared thresholds there
+  are no flips.)
+
+**Weights in memory:** f32 777 MB, f16 411 MB, q8 239 MB (including 38 MB of
+precomputed relative-position projections in f32).
+
+**Speed:** see the table below; measured while other agents' builds kept the
+machine at load 70–110, so treat as upper bounds.
+
+Same 64 gold claims, warm, ms per claim; Python is gliner2 2.1.0 (PyTorch,
+f32) measured in the same window:
+
+| | batch 1 | batch 8 |
+|---|---|---|
+| Rust Metal f16 | 98 | 87 |
+| Rust Metal q8 | 96 | 69 |
+| Python MPS f32 | 617 | 115 |
+| Rust CPU f32 (8 threads / `RAYON_NUM_THREADS=4`) | 1013 / 408 | 253 / 219 |
+| Python CPU f32 | 205 | 93 |
+
+The fine-tune agent's quieter-machine figure for Python MPS was 24.5 ms at
+batch 8, so everything here is inflated several times by the load (another
+agent's LoCoMo run shared the GPU). Two findings hold anyway:
+- on Metal the port is at least as fast as PyTorch MPS;
+- on the CPU it is slower: the profile is dominated by candle's GEMM thread
+  pool spinning and waking for many small matrices (per-head attention
+  products), which a loaded 8-core machine makes much worse; four threads
+  instead of eight cut batch 1 from 1013 to 408 ms. Fusing the per-head
+  products or a smaller thread pool for short inputs is the follow-up. The
+  Metal path is the default on a Mac.
+
+**Effort:** about one agent-day, against the 13–14 estimated: the
+architecture notes below were accurate, and the parity fixture caught
+everything on the first pass.
 
 ## Architecture (what a port has to reproduce)
 

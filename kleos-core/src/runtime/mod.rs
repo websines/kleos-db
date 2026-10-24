@@ -13,6 +13,7 @@ pub(crate) mod db;
 pub(crate) mod decider;
 pub(crate) mod diagnostics;
 pub(crate) mod embedder;
+pub(crate) mod extractor;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod governed_transaction;
 pub(crate) mod graph_projection;

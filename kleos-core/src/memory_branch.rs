@@ -558,6 +558,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                    :put {MEM_EVENT} {{ns, id, n => start, end, granularity, kind, expr}}}}\
                  {{?[ns, id, expires, archived] := id in ${i}, *{MEM_LIFE}{{ns: ${o}, id, expires, archived}}, ns = $ns \
                    :put {MEM_LIFE} {{ns, id => expires, archived}}}}\
+                 {{?[ns, id, n, label, start, end, text, score, kept, eid, extractor, at] := id in ${i}, \
+                    *{MEM_EXTRACT}{{ns: ${o}, id, n, label, start, end, text, score, kept, eid, extractor, at}}, ns = $ns \
+                   :put {MEM_EXTRACT} {{ns, id, n => label, start, end, text, score, kept, eid, extractor, at}}}}\
                  {{?[ns, id, from, at] := id in ${i}, ns = $ns, from = ${o}, at = {now} :put {MEM_COPIED} {{ns, id => from, at}}}}"
             ));
             copied.extend(group);
@@ -1116,6 +1119,7 @@ impl<'s, S: Storage<'s>> Db<S> {
              {{?[ns, id] := *{MEM_LIFE}{{ns, id}}, ns = $ns :rm {MEM_LIFE} {{ns, id}}}}\
              {{?[ns, id] := *{MEM_ROLE}{{ns, id}}, ns = $ns :rm {MEM_ROLE} {{ns, id}}}}\
              {{?[ns, id, n] := *{MEM_EVENT}{{ns, id, n}}, ns = $ns :rm {MEM_EVENT} {{ns, id, n}}}}\
+             {{?[ns, id, n] := *{MEM_EXTRACT}{{ns, id, n}}, ns = $ns :rm {MEM_EXTRACT} {{ns, id, n}}}}\
              {{?[ns, eid] := *{MEM_ENTITY}{{ns, eid}}, ns = $ns :rm {MEM_ENTITY} {{ns, eid}}}}\
              {{?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, is_in(from, $eids) || is_in(into, $eids) \
                :rm {ENTITY_MERGES} {{relation, from, vt}}}}\
