@@ -40,6 +40,7 @@ def arg(k, d=None, cast=str):
 DEVICE = arg("--device", "metal")
 THREADS = arg("--threads", 4, int)
 BATCH = arg("--batch", 8, int)
+EMBEDDER = arg("--embedder", "gemma")
 
 
 def rss_mb(pid=None) -> float:
@@ -62,8 +63,8 @@ def open_db(store: Path, fresh: bool):
         store.unlink()
     db = CozoDbPy("sqlite", str(store), "{}")
     t1 = time.time()
-    db.enable_embedder("gemma", device=DEVICE)
-    db.memory_init(embedder="gemma")
+    db.enable_embedder(EMBEDDER, device=DEVICE)
+    db.memory_init(embedder=EMBEDDER)
     t2 = time.time()
     return db, {"open_s": round(t1 - t0, 2), "embedder_load_s": round(t2 - t1, 2)}
 

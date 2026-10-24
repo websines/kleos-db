@@ -392,6 +392,37 @@ fn extract_pages(src: &Source, kind: Kind, from: usize, to: usize, o: &DocOpts, 
     }
 }
 
+/// A page from the streaming extraction: (index, blocks, timings).
+type PageMsg = (usize, Vec<DocBlock>, BTreeMap<String, f64>);
+
+/// Extract a PDF's pages `[from, to)` in one streaming pass (page workers on
+/// their own pdfium instances) into `tx`, in page order; stops early when
+/// `cancel` is set or the receiver is gone.
+fn stream_pdf_pages(src: &Source, from: usize, to: usize, o: &DocOpts, cancel: &AtomicBool, tx: &std::sync::mpsc::SyncSender<PageMsg>) -> Result<()> {
+    ensure_pdf()?;
+    let ocr = ocr_engine()?;
+    let mut conv = Converter::new(&ocr);
+    conv.mode = converter_mode(o)?;
+    if let Some(d) = o.dpi {
+        conv.dpi = d;
+    }
+    let doc = match src {
+        Source::Path(p) => kleos_docs::pdf::Doc::open(p, None),
+        Source::Bytes(b) => kleos_docs::pdf::Doc::from_bytes(b.to_vec(), None),
+    }
+    .map_err(|e| miette!("{e}"))?;
+    let px = conv.dpi / 72.0;
+    let mut sink = |i: usize, p: kleos_docs::ocr::Page| {
+        let mut tm: BTreeMap<String, f64> = p.timings.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        *tm.entry(format!("pages_{}", p.source)).or_insert(0.0) += 1.0;
+        if tx.send((i, page_to_blocks(&p, i, Some(px)), tm)).is_err() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    };
+    conv.convert_doc_streaming(&doc, from, to, threads_of(o), cancel, &mut sink);
+    Ok(())
+}
+
 /// The chunks of some pages, as memory rows to write.
 struct ChunkRow {
     id: String,
@@ -943,74 +974,143 @@ impl<'s, S: Storage<'s>> Db<S> {
         let hb = |id: &str| {
             let _ = self.flow_call("heartbeat", json!({"id": id, "token": token, "lease_ms": LEASE_MS}));
         };
-        for from in (0..input.pages).step_by(batch) {
-            let key = format!("pages:{from}");
-            if let Some(v) = recorded.get(&key) {
-                // replayed: the batch committed before (with its chunks)
-                for x in v.get("ids").and_then(|x| x.as_array()).into_iter().flatten() {
-                    if let Some(s) = x.as_str() {
-                        all_ids.push(s.to_string());
+        let batches: Vec<(usize, usize)> = (0..input.pages).step_by(batch).map(|f| (f, (f + batch).min(input.pages))).collect();
+        // Pages flow continuously through OCR, chunking, embedding and the
+        // commit: a PDF's pages come from one streaming extraction (page
+        // workers never wait at a batch edge, and embedding a batch overlaps
+        // the OCR of the next), while each batch still commits as its own
+        // durable step, so resume and replay are unchanged.
+        let stream_from = batches.iter().position(|(f, _)| !recorded.contains_key(&format!("pages:{f}")));
+        let streaming = input.kind == Kind::Pdf && stream_from.is_some();
+        let cancel = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<PageMsg>(2 * batch);
+        let run = std::thread::scope(|sc| -> Result<()> {
+            let producer = if streaming {
+                let start_page = batches[stream_from.unwrap()].0;
+                let (src, cancel) = (&src, &cancel);
+                let tx = tx.clone();
+                Some(sc.spawn(move || -> Result<()> {
+                    let r = stream_pdf_pages(src, start_page, input.pages, o, cancel, &tx);
+                    drop(tx);
+                    r
+                }))
+            } else {
+                None
+            };
+            drop(tx);
+            let mut consume = || -> Result<()> {
+                let mut last_hb = Instant::now();
+                for (bi, &(from, to)) in batches.iter().enumerate() {
+                    let key = format!("pages:{from}");
+                    let replay = recorded.get(&key);
+                    let t0 = Instant::now();
+                    let (pb, timings) = if streaming && Some(bi) >= stream_from {
+                        let mut pb: Vec<PageBlocks> = Vec::with_capacity(to - from);
+                        let mut tsum: BTreeMap<String, f64> = BTreeMap::new();
+                        while pb.len() < to - from {
+                            let (i, blocks, tm) = rx.recv().map_err(|_| miette!("page extraction stopped before page {}", from + pb.len()))?;
+                            if let Some(st) = state {
+                                st.pages_done.fetch_add(1, Ordering::Relaxed);
+                            }
+                            if last_hb.elapsed().as_millis() as i64 > LEASE_MS / 4 {
+                                hb(id);
+                                last_hb = Instant::now();
+                            }
+                            for (k, v) in tm {
+                                *tsum.entry(k).or_insert(0.0) += v;
+                            }
+                            pb.push((i, blocks));
+                        }
+                        (pb, tsum)
+                    } else if replay.is_some() {
+                        (vec![], BTreeMap::new())
+                    } else {
+                        hb(id);
+                        let id_s = id.to_string();
+                        let last = Mutex::new(Instant::now());
+                        let on_page = |_: usize| {
+                            if let Some(st) = state {
+                                st.pages_done.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let mut l = last.lock().unwrap();
+                            if l.elapsed().as_millis() as i64 > LEASE_MS / 4 {
+                                hb(&id_s);
+                                *l = Instant::now();
+                            }
+                        };
+                        extract_pages(&src, input.kind, from, to, o, &on_page)?
+                    };
+                    if let Some(v) = replay {
+                        // replayed: the batch committed before (with its chunks)
+                        for x in v.get("ids").and_then(|x| x.as_array()).into_iter().flatten() {
+                            if let Some(s) = x.as_str() {
+                                all_ids.push(s.to_string());
+                            }
+                        }
+                        n0 = v.get("n_end").and_then(|x| x.as_i64()).unwrap_or(n0);
+                        for (h, c) in v.get("seen").and_then(|x| x.as_object()).into_iter().flatten() {
+                            seen.insert(h.clone(), c.as_u64().unwrap_or(1) as usize);
+                        }
+                        continue;
+                    }
+                    let extract_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    let t1 = Instant::now();
+                    let mut seen_b = seen.clone();
+                    let rows = chunk_pages(&input.doc, &pb, &copts, n0, &mut seen_b);
+                    let chunk_ms = t1.elapsed().as_secs_f64() * 1000.0;
+                    let new_rows: Vec<ChunkRow> = rows.iter().filter(|r| !prev.contains(r.id.as_str())).map(clone_row).collect();
+                    let t2 = Instant::now();
+                    let vecs = self.embed_chunks(&new_rows)?;
+                    let embed_ms = t2.elapsed().as_secs_f64() * 1000.0;
+                    let t3 = Instant::now();
+                    let at = now_us();
+                    let scripts = self.chunk_scripts(&input.ns, &input.doc, &new_rows, &vecs, at);
+                    let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+                    let n_end = n0 + rows.len() as i64;
+                    let mut stage = timings.clone();
+                    // with streaming, extract_ms is the wait for this batch's
+                    // pages beyond the embedding of the previous one
+                    stage.insert("extract_ms".into(), extract_ms);
+                    stage.insert("chunk_ms".into(), chunk_ms);
+                    stage.insert("embed_ms".into(), embed_ms);
+                    let result = json!({"ids": ids, "n_end": n_end, "new": new_rows.len(), "seen": seen_b, "pages": [from, to], "ms": stage});
+                    self.flow_commit_scripts(id, token, &key, "pages", &scripts, &result)?;
+                    let store_ms = t3.elapsed().as_secs_f64() * 1000.0;
+                    for (k, v) in stage {
+                        *totals.entry(k).or_insert(0.0) += v;
+                    }
+                    *totals.entry("store_ms".into()).or_insert(0.0) += store_ms;
+                    all_ids.extend(ids);
+                    n0 = n_end;
+                    seen = seen_b;
+                    let left = FAIL_AFTER.load(Ordering::SeqCst);
+                    if left >= 0 {
+                        if left <= 1 {
+                            FAIL_AFTER.store(-1, Ordering::SeqCst);
+                            bail!("injected failure after a committed batch");
+                        }
+                        FAIL_AFTER.store(left - 1, Ordering::SeqCst);
                     }
                 }
-                n0 = v.get("n_end").and_then(|x| x.as_i64()).unwrap_or(n0);
-                for (h, c) in v.get("seen").and_then(|x| x.as_object()).into_iter().flatten() {
-                    seen.insert(h.clone(), c.as_u64().unwrap_or(1) as usize);
-                }
-                continue;
-            }
-            hb(id);
-            let to = (from + batch).min(input.pages);
-            let t0 = Instant::now();
-            let id_s = id.to_string();
-            let last_hb = Mutex::new(Instant::now());
-            let on_page = |_: usize| {
-                if let Some(st) = state {
-                    st.pages_done.fetch_add(1, Ordering::Relaxed);
-                }
-                let mut l = last_hb.lock().unwrap();
-                if l.elapsed().as_millis() as i64 > LEASE_MS / 4 {
-                    hb(&id_s);
-                    *l = Instant::now();
-                }
+                Ok(())
             };
-            let (pb, timings) = extract_pages(&src, input.kind, from, to, o, &on_page)?;
-            let extract_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            let t1 = Instant::now();
-            let mut seen_b = seen.clone();
-            let rows = chunk_pages(&input.doc, &pb, &copts, n0, &mut seen_b);
-            let chunk_ms = t1.elapsed().as_secs_f64() * 1000.0;
-            let new_rows: Vec<ChunkRow> = rows.iter().filter(|r| !prev.contains(r.id.as_str())).map(clone_row).collect();
-            let t2 = Instant::now();
-            let vecs = self.embed_chunks(&new_rows)?;
-            let embed_ms = t2.elapsed().as_secs_f64() * 1000.0;
-            let t3 = Instant::now();
-            let at = now_us();
-            let scripts = self.chunk_scripts(&input.ns, &input.doc, &new_rows, &vecs, at);
-            let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
-            let n_end = n0 + rows.len() as i64;
-            let mut stage = timings.clone();
-            stage.insert("extract_ms".into(), extract_ms);
-            stage.insert("chunk_ms".into(), chunk_ms);
-            stage.insert("embed_ms".into(), embed_ms);
-            let result = json!({"ids": ids, "n_end": n_end, "new": new_rows.len(), "seen": seen_b, "pages": [from, to], "ms": stage});
-            self.flow_commit_scripts(id, token, &key, "pages", &scripts, &result)?;
-            let store_ms = t3.elapsed().as_secs_f64() * 1000.0;
-            for (k, v) in stage {
-                *totals.entry(k).or_insert(0.0) += v;
+            let r = consume();
+            if r.is_err() {
+                cancel.store(true, Ordering::Relaxed);
             }
-            *totals.entry("store_ms".into()).or_insert(0.0) += store_ms;
-            all_ids.extend(ids);
-            n0 = n_end;
-            seen = seen_b;
-            let left = FAIL_AFTER.load(Ordering::SeqCst);
-            if left >= 0 {
-                if left <= 1 {
-                    FAIL_AFTER.store(-1, Ordering::SeqCst);
-                    bail!("injected failure after a committed batch");
-                }
-                FAIL_AFTER.store(left - 1, Ordering::SeqCst);
+            drop(rx);
+            let pr = match producer {
+                Some(h) => h.join().map_err(|_| miette!("page extraction panicked"))?,
+                None => Ok(()),
+            };
+            // a consumer error that only says the stream ended defers to the producer's
+            match (r, pr) {
+                (Err(e), Err(p)) if e.to_string().starts_with("page extraction stopped") => Err(p),
+                (Err(e), _) => Err(e),
+                (Ok(()), p) => p,
             }
-        }
+        });
+        run?;
         // finish: the old version's chunks that did not come back end; the
         // document row is done; the blob goes
         let at = now_us();

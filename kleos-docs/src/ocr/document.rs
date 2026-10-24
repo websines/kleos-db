@@ -144,6 +144,68 @@ fn assign_runs(runs: &[TextLine], boxes: &[[f32; 4]], k: f64) -> (Vec<Vec<Tok>>,
     (toks, lost)
 }
 
+/// A piece of a text-layer run on one visual line: (run, char range, box in points).
+type Seg = (usize, std::ops::Range<usize>, [f64; 4]);
+
+/// Runs cut where their characters leave the current line (a run can carry a
+/// hyphenated word across a line break), then merged into visual lines:
+/// (segments left to right, union box in points), top to bottom.  Segments
+/// join a line when they share most of its vertical band.
+fn merge_runs(runs: &[TextLine]) -> Vec<(Vec<Seg>, [f64; 4])> {
+    let mut segs: Vec<Seg> = vec![];
+    for (ri, run) in runs.iter().enumerate() {
+        let mut cur: Option<(usize, [f64; 4])> = None;
+        for (ci, (c, b)) in run.chars.iter().enumerate() {
+            if text::is_space(*c) {
+                continue;
+            }
+            match &mut cur {
+                Some((st, bb)) => {
+                    let (h, cy) = (bb[3] - bb[1], (b[1] + b[3]) / 2.0);
+                    let back = b[0] < bb[2] - 2.0 * h.max(1.0);
+                    if cy < bb[1] || cy > bb[3] || back {
+                        segs.push((ri, *st..ci, *bb));
+                        cur = Some((ci, *b));
+                    } else {
+                        *bb = [bb[0].min(b[0]), bb[1].min(b[1]), bb[2].max(b[2]), bb[3].max(b[3])];
+                    }
+                }
+                None => cur = Some((ci, *b)),
+            }
+        }
+        if let Some((st, bb)) = cur {
+            segs.push((ri, st..run.chars.len(), bb));
+        }
+    }
+    segs.sort_by(|a, b| {
+        let (ya, yb) = ((a.2[1] + a.2[3]) / 2.0, (b.2[1] + b.2[3]) / 2.0);
+        ya.partial_cmp(&yb).unwrap().then(a.2[0].partial_cmp(&b.2[0]).unwrap())
+    });
+    let mut lines: Vec<(Vec<Seg>, [f64; 4])> = vec![];
+    for sg in segs {
+        let b = sg.2;
+        let h = b[3] - b[1];
+        let cy = (b[1] + b[3]) / 2.0;
+        let joined = lines.iter_mut().rev().take(3).find(|(_, lb)| {
+            let lh = lb[3] - lb[1];
+            let ov = lb[3].min(b[3]) - lb[1].max(b[1]);
+            // a small mark (comma, quote, footnote) joins the band it touches
+            ov > 0.6 * h.min(lh) || (h < 0.6 * lh && cy >= lb[1] - 0.3 * lh && cy <= lb[3] + 0.3 * lh)
+        });
+        match joined {
+            Some((ids, lb)) => {
+                *lb = [lb[0].min(b[0]), lb[1].min(b[1]), lb[2].max(b[2]), lb[3].max(b[3])];
+                ids.push(sg);
+            }
+            None => lines.push((vec![sg.clone()], b)),
+        }
+    }
+    for (ids, _) in lines.iter_mut() {
+        ids.sort_by(|a, b| a.2[0].partial_cmp(&b.2[0]).unwrap());
+    }
+    lines
+}
+
 /// Read an image file as grayscale (OpenCV's RGB weights).
 #[cfg(feature = "ocr")]
 pub fn read_image(bytes: &[u8]) -> Result<Gray, DocError> {
@@ -177,7 +239,15 @@ pub struct Prepared {
     pub gray: Gray,
     pub text_ms: f64,
     pub render_ms: f64,
+    /// a simple digital page read from its text layer's geometry alone (no
+    /// render, no detector): see `Converter::simple_page`
+    pub fast: bool,
 }
+
+/// Fast-path limits: a page with more vector drawing or image area than this
+/// goes through the detector (tables, figures, mixed pages).
+const FAST_MAX_PATHS: usize = 40;
+const FAST_MAX_IMAGE_SHARE: f64 = 0.01;
 
 pub struct Converter<'a> {
     pub ocr: &'a Ocr,
@@ -186,11 +256,15 @@ pub struct Converter<'a> {
     pub dpi: f64,
     pub mode: Mode,
     pub image_ocr: bool,
+    /// Read simple digital pages from the text layer's geometry, skipping the
+    /// render and the line detector (`KLEOS_DOC_FAST=0` turns it off).
+    pub fast_digital: bool,
 }
 
 impl<'a> Converter<'a> {
     pub fn new(ocr: &'a Ocr) -> Self {
-        Converter { ocr, backend: None, dpi: 200.0, mode: Mode::Auto, image_ocr: true }
+        let fast_digital = std::env::var("KLEOS_DOC_FAST").map(|v| v != "0").unwrap_or(true);
+        Converter { ocr, backend: None, dpi: 200.0, mode: Mode::Auto, image_ocr: true, fast_digital }
     }
 
     fn page_scale(&self, size: (f64, f64)) -> f64 {
@@ -204,7 +278,7 @@ impl<'a> Converter<'a> {
         Ok(doc.with_page(index, |page| {
             let size = page.size();
             let k = self.page_scale(size);
-            let mut p = Prepared { size, scale: k, upright: None, layer: None, gray: Gray::new(1, 1, 255), text_ms: 0.0, render_ms: 0.0 };
+            let mut p = Prepared { size, scale: k, upright: None, layer: None, gray: Gray::new(1, 1, 255), text_ms: 0.0, render_ms: 0.0, fast: false };
             if self.mode != Mode::Ocr {
                 let t0 = std::time::Instant::now();
                 let s = CHECK_DPI / 72.0;
@@ -232,6 +306,11 @@ impl<'a> Converter<'a> {
                     tl.stats.vertical = true;
                 }
                 p.text_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                if self.fast_digital && self.mode == Mode::Auto && p.upright.is_none() && self.simple_page(&tl, size, &page.census()) {
+                    p.layer = Some(tl);
+                    p.fast = true;
+                    return p;
+                }
                 p.layer = Some(tl);
             }
             let t0 = std::time::Instant::now();
@@ -258,6 +337,11 @@ impl<'a> Converter<'a> {
             out.timings.insert("total_ms".into(), total);
             out
         };
+        if p.fast {
+            if let Some(tl) = &p.layer {
+                return Ok(stamp(self.geometry_page(tl, p.size, p.scale)?, &p));
+            }
+        }
         if let Some((tl0, g0, k0)) = &p.upright {
             if let Some(out) = self.text_page(tl0, g0.clone(), *k0, self.mode == Mode::Auto)? {
                 return Ok(stamp(out, &p));
@@ -281,6 +365,106 @@ impl<'a> Converter<'a> {
         };
         out.note = format!("{note}; {}", out.note);
         Ok(stamp(out, &p))
+    }
+
+    /// Whether a digital page can be read from its text layer's geometry alone:
+    /// a trusted, upright, horizontal, Latin, readable layer; next to no images
+    /// or vector drawing (tables, figures); and one column (no two lines side
+    /// by side on the same band).
+    fn simple_page(&self, tl: &TextLayer, size: (f64, f64), census: &crate::pdf::Census) -> bool {
+        let st = &tl.stats;
+        if !tl.trusted || tl.lines.is_empty() || st.turn != 0 || st.frame != 0 || st.vertical || !tl.rotated.is_empty() {
+            return false;
+        }
+        if census.paths > FAST_MAX_PATHS || census.shadings > 0 || census.image_area > FAST_MAX_IMAGE_SHARE * size.0 * size.1 {
+            return false;
+        }
+        let all: String = tl.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" ");
+        if latin_share(&all) < LATIN_CODES || !readable(self.ocr, &tl.lines) {
+            return false;
+        }
+        let lines = merge_runs(&tl.lines);
+        // prose: most lines share the left margin and run most of the width
+        // (forms, tables and lists do not)
+        let n = lines.len();
+        let mut hs: Vec<f64> = lines.iter().map(|(_, b)| b[3] - b[1]).collect();
+        hs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mh = hs[n / 2].max(1.0);
+        let left = lines.iter().map(|(_, a)| lines.iter().filter(|(_, b)| (a[0] - b[0]).abs() < mh).count()).max().unwrap_or(0);
+        let maxw = lines.iter().map(|(_, b)| b[2] - b[0]).fold(0.0, f64::max);
+        let wide = lines.iter().filter(|(_, b)| b[2] - b[0] >= 0.5 * maxw).count();
+        if n < 4 || (left as f64) < 0.6 * n as f64 || (wide as f64) < 0.6 * n as f64 {
+            return false;
+        }
+        // a wide gap inside a band: columns or table cells
+        for (ids, lb) in &lines {
+            let hgt = lb[3] - lb[1];
+            for pair in ids.windows(2) {
+                if pair[1].2[0] - pair[0].2[2] > 2.0 * hgt {
+                    return false;
+                }
+            }
+        }
+        for (i, a) in lines.iter().enumerate() {
+            for b in lines.iter().skip(i + 1) {
+                let (ha, hb) = (a.1[3] - a.1[1], b.1[3] - b.1[1]);
+                let ov = a.1[3].min(b.1[3]) - a.1[1].max(b.1[1]);
+                if ov > 0.3 * ha.min(hb) && (a.1[2] <= b.1[0] || b.1[2] <= a.1[0]) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// A simple digital page from its text layer: lines are the layer's runs
+    /// merged per baseline band, in the same token form the detector path
+    /// builds, then the usual order, layout and Markdown.
+    fn geometry_page(&self, tl: &TextLayer, size: (f64, f64), k: f64) -> Result<Page, DocError> {
+        let mut t = std::collections::HashMap::new();
+        t.insert("det_ms".to_string(), 0.0);
+        let (w, h) = (((size.0 * k).ceil() as usize).max(1), ((size.1 * k).ceil() as usize).max(1));
+        let mut kb: Vec<[f32; 4]> = vec![];
+        let mut kr: Vec<Rec> = vec![];
+        for (segs, bb) in merge_runs(&tl.lines) {
+            let mut tk: Vec<Tok> = vec![];
+            let mut last_idx: Option<i64> = None;
+            for (ri, range, _) in &segs {
+                let run = &tl.lines[*ri];
+                let idx = run.seq.unwrap_or(*ri as i64);
+                // as the detector path: pieces of one content object join
+                // without a space; a space separates different objects
+                let mut started = last_idx == Some(idx);
+                last_idx = Some(idx);
+                for (c, b) in &run.chars[range.clone()] {
+                    if text::is_space(*c) {
+                        if started {
+                            let x = tk.last().map(|t| t.x).unwrap_or(0.0);
+                            tk.push(Tok { v: TokV::Ch(c.to_string()), x, seq: Some(idx) });
+                        }
+                        continue;
+                    }
+                    if !started && !tk.is_empty() {
+                        let x = tk.last().unwrap().x;
+                        tk.push(Tok { v: TokV::Ch(" ".into()), x, seq: Some(idx) });
+                    }
+                    started = true;
+                    tk.push(Tok { v: TokV::Ch(c.to_string()), x: (b[0] + b[2]) / 2.0 * k, seq: Some(idx) });
+                }
+            }
+            let txt = if tk.is_empty() { String::new() } else { self.ocr.decode_toks(&tk, false) };
+            if txt.trim().is_empty() {
+                continue;
+            }
+            kb.push([(bb[0] * k) as f32, (bb[1] * k) as f32, (bb[2] * k) as f32, (bb[3] * k) as f32]);
+            kr.push((txt, 1.0, tk));
+        }
+        let mut out = self.ocr.assemble((w, h), kb, kr, t, false, None)?;
+        out.source = "text".into();
+        out.rotation = 0;
+        out.size = (w, h);
+        out.note += "; geometry fast path";
+        Ok(out)
     }
 
     /// The page from its text layer (None: the layer does not match the page, OCR it).
@@ -403,12 +587,19 @@ impl<'a> Converter<'a> {
     /// Pages [from, end) on `threads` workers: pdfium reads run one at a
     /// time (its lock), OCR in parallel.  `each` is called in page order.
     pub fn convert_doc_parallel(&self, doc: &Doc, from: usize, end: usize, threads: usize, each: &mut (dyn FnMut(usize, Page) + Send)) -> usize {
+        self.convert_doc_streaming(doc, from, end, threads, &std::sync::atomic::AtomicBool::new(false), each)
+    }
+
+    /// As `convert_doc_parallel`, for a long stream: workers stop taking pages
+    /// once `cancel` is set, and they wait (bounded queue) while `each` is busy,
+    /// so a slow consumer holds the workers back instead of buffering the book.
+    pub fn convert_doc_streaming(&self, doc: &Doc, from: usize, end: usize, threads: usize, cancel: &std::sync::atomic::AtomicBool, each: &mut (dyn FnMut(usize, Page) + Send)) -> usize {
         let end = end.min(doc.pages);
         if end <= from {
             return 0;
         }
         let next = std::sync::atomic::AtomicUsize::new(from);
-        let (tx, rx) = std::sync::mpsc::channel::<(usize, Page)>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Page)>(2 * threads.max(1));
         std::thread::scope(|s| {
             for wi in 0..threads.max(1) {
                 let tx = tx.clone();
@@ -421,6 +612,9 @@ impl<'a> Converter<'a> {
                     let own = if w == 0 { None } else { doc.reopen_on(w).ok() };
                     let d = own.as_ref().unwrap_or(doc);
                     loop {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         if i >= end {
                             break;
@@ -436,6 +630,9 @@ impl<'a> Converter<'a> {
             let mut pending: BTreeMap<usize, Page> = BTreeMap::new();
             let mut want = from;
             for (i, p) in rx {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue; // drain so the workers can finish
+                }
                 pending.insert(i, p);
                 while let Some(p) = pending.remove(&want) {
                     each(want, p);

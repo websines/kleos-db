@@ -15,7 +15,10 @@ fn same_lines_as_python() {
     let (dir, refp) = spec.split_once(':').unwrap();
     let models = PathBuf::from(std::env::var("KLEOS_OCR_MODEL_DIR").expect("KLEOS_OCR_MODEL_DIR"));
     let ocr = Ocr::load(&models, 4).unwrap();
-    let conv = Converter::new(&ocr);
+    // Indra parity: the full (render + detector) path; the digital fast path
+    // is checked against it separately (examples/fastpath_cmp.rs)
+    let mut conv = Converter::new(&ocr);
+    conv.fast_digital = false;
     let reference: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(refp).unwrap()).unwrap();
     let mut pages = 0;
     for (file, r) in reference.as_object().unwrap() {
