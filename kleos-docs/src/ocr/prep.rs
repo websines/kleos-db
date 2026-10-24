@@ -90,15 +90,6 @@ pub fn decode(out: &[f32], h: usize, w: usize) -> Vec<DetBox> {
     boxes
 }
 
-fn percentiles(b: &Gray) -> (f64, f64, f64) {
-    let mut hist = [0u64; 256];
-    for &v in &b.data {
-        hist[v as usize] += 1;
-    }
-    let n = b.data.len() as u64;
-    (cv::percentile_u8(&hist, n, 0.02), cv::percentile_u8(&hist, n, 0.5), cv::percentile_u8(&hist, n, 0.98))
-}
-
 /// Light text on a dark ground (read inverted).
 pub fn is_dark_line(gray: &Gray, b: &[f32]) -> bool {
     let (x0, y0, x1, y1) = (b[0], b[1], b[2], b[3]);
@@ -112,8 +103,15 @@ pub fn is_dark_line(gray: &Gray, b: &[f32]) -> bool {
     if ye <= ys || xe <= xs {
         return false;
     }
-    let c = gray.crop(xs, ys, xe, ye);
-    let (lo, med, hi) = percentiles(&c);
+    // the histogram of the box, read in place (no crop copy)
+    let mut hist = [0u64; 256];
+    for y in ys..ye {
+        for &v in &gray.data[y * gray.w + xs..y * gray.w + xe] {
+            hist[v as usize] += 1;
+        }
+    }
+    let n = ((ye - ys) * (xe - xs)) as u64;
+    let (lo, med, hi) = (cv::percentile_u8(&hist, n, 0.02), cv::percentile_u8(&hist, n, 0.5), cv::percentile_u8(&hist, n, 0.98));
     hi - med > 2.0 * (med - lo) + 8.0
 }
 

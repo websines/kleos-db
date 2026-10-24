@@ -13,6 +13,7 @@ to kleos.
 - **Memory text search missed words whose stem is an English stopword** (`billing` → `bill`, `running` → `run`): the memory FTS index ran the stemmer before the built-in `'en'` stopword list, which also holds content words. The index now drops a short list of function words before stemming; stores rebuild the index on first use (memory schema v8).
 
 ### Added
+- **Scanned-page preprocessing:** the skew search's rotated row sums skip the area outside the ink's bounding box and read interior pixels directly (about 20% faster), the area resize streams one source row at a time (about 15% faster, one row of memory instead of the whole intermediate image), and the dark-line check reads its histogram in place; results are bit-identical (equality tests against the original kernels, OCR parity unchanged).
 - **TypeScript SDK:** `hybridSearch`, `decide`, `exportRelations`/`importRelations`, `backup`/`restore`/`importFromBackup` (native `admin_call`; remote maps export/import/backup to the server routes).
 - **Documents by URL** (feature `docs-url`, off by default): `remember` attachments accept `http(s)` URLs, with public-address checks on every redirect hop, a 100 MB cap, timeouts and a document content-type check; the URL is kept in the document's metadata.
 - **Documents:** with an extractor configured, document chunks get entities (mentions, resolution, merges) in their batch's transaction; no kinship edges from documents.
