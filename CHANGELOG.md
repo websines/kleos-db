@@ -13,6 +13,16 @@ to kleos.
 - **EmbeddingGemma 2 is the default embedder.** `model: 'embeddinggemma'` (also `gemma`) is now `google/embeddinggemma-2` (Apache-2.0, not gated: auto-download needs no token). `kleos-infer::Egemma2Embedder` ports its text path (Gemma 4 encoder, 24 layers at d 512, per-layer embeddings, 512 → 768 projection, mean pooling, Matryoshka output) and loads only the text tensors (~271M of the checkpoint's 740M). EmbeddingGemma v1 stays selectable as `embeddinggemma-300m` / `gemma-v1`.
   - **Stores never mix models.** The memory store records the model behind its vectors (`embedder_model`); an enabled embedder of another model is refused with the fix in the error.
   - **`::memory reembed {embedder}`** moves a store's vectors to another model as a durable workflow: batches into a shadow relation, resumable after a crash, catch-up and switch in one transaction.
+- **Documents in the memory API** (docs/specs/documents.md, feature `docs`). `remember(text, attachments=[...])` / `remember(file=...)` read PDFs, images, Markdown, HTML and DOCX into chunk memories (`kind: 'doc'`, role `other`) with page-level provenance; `recall` searches them by default and cites them (`[name p. 14, § Heading]`); `sources` filters; `::doc get/list/delete`, Python `doc_call`, HTTP `POST /doc/:op`.
+  - **OCR:** `kleos-docs`, a Rust port of Indra OCR (code Apache-2.0; weights modified OpenRAIL-M, downloaded at run time) on tract; identical output to indra-ocr 1.1.2 on 27 fixture pages and 20 scanned-book pages. PDF text layers and renders through pdfium (downloaded pinned build, one library copy per page worker). Pluggable `OcrBackend`.
+  - **Chunking:** Chonkie-style token, sentence, recursive and semantic chunkers (identical to Chonkie 1.7 on 72 cases) applied over layout blocks: tables whole, headings attached, provenance per chunk.
+  - **Durable ingestion:** large documents run as the `doc.ingest` workflow; each page batch commits its chunks with its checkpoint, so a killed process resumes with no duplicate or missing chunk; re-ingesting the same bytes is a no-op, changed bytes keep unchanged chunks; ingestion runs at bulk priority.
+  - **Results:** 585-page digital report 1.38 pages/s end to end, 500-page scanned book 0.85 pages/s, peak RSS ≤ 2.8 GB, recall hit@5 10/10 on both (see the spec's Results).
+
+### Fixed
+- **A full bounded change subscription no longer blocks writers** (`runtime/callback.rs`): delivery uses `try_send`; the subscription misses changes and a one-time `callback.lagged` diagnostic is emitted. The document and flow workers' own wake-up subscriptions could deadlock their writes.
+
+### Added (earlier)
 - **Memory-bounded concurrent inference** (docs/specs/memory-api.md, "Concurrency and memory budget").
   - **One budget for all built-in models.** `KLEOS_MEMORY_BUDGET` covers weights plus activations; `KLEOS_ACTIVATION_CAP` caps one forward pass, and every model sizes its batches to fit it.
   - **Model slots.** Lazy weights, LRU eviction under the budget, and idle unload (`KLEOS_MODEL_IDLE_SECS`).

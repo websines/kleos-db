@@ -42,6 +42,8 @@ jemalloc = ["kleos/jemalloc"]
 io-uring = ["kleos/io-uring"]
 ## Built-in embedders for `--embedder` / `::embedder enable` (needs rustc >= 1.99)
 infer = ["kleos/infer"]
+## Documents in the memory API (`POST /memory/remember` with attachments, `POST /doc/:op`).
+docs = ["kleos/docs"]
 ## `infer` plus Apple-GPU (Metal) kernels; macOS only
 infer-metal = ["infer", "kleos/infer-metal"]
 ## Enables the [Sled](https://github.com/spacejam/sled) backend

@@ -239,3 +239,40 @@ The Mem0 head-to-head (`scripts/bench-l2/mem0_adapter.py`) imports the
 open-source [`mem0ai`](https://pypi.org/project/mem0ai/) 2.2.1 package
 (Apache-2.0) at run time from a separate virtual environment under
 `.bench-data/mem0-h2h/`. No Mem0 code is vendored or redistributed.
+
+### Indra OCR (code Apache-2.0, ported; model weights modified OpenRAIL-M, downloaded at run time)
+
+`kleos-docs/src/ocr/` is a Rust port of the OCR pipeline of
+[Indra OCR](https://github.com/datalab-to/indra) (`indra-ocr` 1.1.2 on PyPI)
+by Datalab, licensed **Apache-2.0**: line detection decoding, line crops,
+CTC decoding, the n-gram LM beam search, script routing, right-to-left
+handling, reading order, layout blocks, Markdown and tables, the PDF
+text-layer checks and the text-layer/OCR document logic. The port follows the
+Python code closely (constants, rules and comments); the copyright in that
+logic is Datalab's.
+
+The model weights it runs ([`datalab-to/indra-ocr`](https://huggingface.co/datalab-to/indra-ocr),
+revision `v1.1.0`) are **not** Apache-2.0: they are under a *modified
+OpenRAIL-M* licence that Datalab summarizes as "free for research, personal
+use, and startups under $20M funding/revenue, cannot be used competitively
+with our API"; other use needs a licence from Datalab. kleos never bundles or
+redistributes the weights: they are downloaded from Hugging Face into the
+user's cache when OCR is first used. The OCR backend is a trait, so another
+engine can replace Indra.
+
+### pdfium, tract, Chonkie
+
+- **pdfium** (BSD-3-Clause / Apache-2.0, the Chromium PDF library) is loaded
+  at run time as a shared library through
+  [`pdfium-render`](https://github.com/ajrcarey/pdfium-render) (MIT OR
+  Apache-2.0); the prebuilt library comes from
+  [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) (MIT
+  packaging), downloaded into the kleos cache, never vendored.
+- **tract** ([sonos/tract](https://github.com/sonos/tract), MIT OR
+  Apache-2.0) runs the ONNX graphs.
+- **Chonkie** ([chonkie-inc/chonkie](https://github.com/chonkie-inc/chonkie),
+  MIT): `kleos-docs/src/chunk.rs` reimplements its token, sentence, recursive
+  and semantic chunking rules (the delimiter split and short-split merge of
+  `chonkie-core`, the greedy merge indices, the recursive levels). No Chonkie
+  code is vendored; the parity test compares against the Python package at
+  run time.

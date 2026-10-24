@@ -175,6 +175,8 @@ pub mod memory_engram;
 pub mod entity;
 pub mod engram;
 pub mod flow;
+#[cfg(feature = "docs")]
+pub mod docs;
 pub mod ontology;
 pub mod ontology_type;
 pub(crate) mod ontology_ttl;
@@ -1381,14 +1383,90 @@ impl DbInstance {
     pub fn memory_init(&self, opts: memory::InitOpts) -> Result<memory::MemConfig> {
         dispatch_db!(self, db => db.memory_init(opts))
     }
-    /// Dispatcher method. See [crate::Db::remember].
+    /// Dispatcher method. See [crate::Db::remember]. Documents that ingest
+    /// in the background start this store's document worker.
     pub fn remember(&self, text: &str, opts: memory::RememberOpts) -> Result<memory::RememberResult> {
-        dispatch_db!(self, db => db.remember(text, opts))
+        self.docs_kick(false);
+        let r = dispatch_db!(self, db => db.remember(text, opts))?;
+        if r.documents.iter().any(|d| d.get("status").and_then(|x| x.as_str()) == Some("running")) {
+            self.docs_kick(true);
+        }
+        Ok(r)
     }
     /// Dispatcher method. See [crate::Db::recall].
     pub fn recall(&self, query: &str, opts: memory::RecallOpts) -> Result<Vec<memory::RecallHit>> {
+        self.docs_kick(false);
         dispatch_db!(self, db => db.recall(query, opts))
     }
+    /// `::doc` admin ops (docs/specs/documents.md). See [crate::Db::doc_call].
+    #[cfg(feature = "docs")]
+    pub fn doc_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
+        dispatch_db!(self, db => db.doc_call(op, args))
+    }
+    /// Start the background document worker when document ingestions wait
+    /// (`force`: start it without looking). The first call of a process
+    /// looks once, so a restarted process resumes interrupted ingestions.
+    #[cfg(all(feature = "docs", not(target_arch = "wasm32")))]
+    pub fn docs_kick(&self, force: bool) {
+        use std::sync::atomic::Ordering;
+        let state = dispatch_db!(self, db => db.docs_state.clone());
+        if state.running.load(Ordering::SeqCst) {
+            return;
+        }
+        if !force {
+            if state.checked.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !dispatch_db!(self, db => db.docs_pending()).unwrap_or(false) {
+                return;
+            }
+        }
+        if state.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let db = self.clone();
+        let st = state.clone();
+        let _ = std::thread::Builder::new().name("kleos-docs-worker".to_string()).spawn(move || {
+            // the flag clears however the thread ends (a panic included), so
+            // the next call can start a new worker
+            struct Clear(Arc<docs::DocsState>);
+            impl Drop for Clear {
+                fn drop(&mut self) {
+                    self.0.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _clear = Clear(st.clone());
+            let worker = format!("docs-{}", std::process::id());
+            let (cb, changes) = db.register_callback(flow::FLOW_TASK, Some(64));
+            let mut idle_since = std::time::Instant::now();
+            while !st.stop.load(Ordering::SeqCst) {
+                match dispatch_db!(&db, d => d.docs_work_once(&worker, Some(&st))) {
+                    Ok(true) => {
+                        idle_since = std::time::Instant::now();
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("kleos docs worker: {e}"),
+                }
+                // nothing claimable now: a leased workflow of a dead process
+                // becomes claimable when its lease ends, so keep looking while
+                // any document workflow is pending
+                let pending = dispatch_db!(&db, d => d.docs_pending()).unwrap_or(false);
+                if !pending && idle_since.elapsed() > std::time::Duration::from_secs(30) {
+                    break;
+                }
+                crossbeam::select! {
+                    recv(changes) -> _ => {}
+                    default(std::time::Duration::from_millis(500)) => {}
+                }
+            }
+            db.unregister_callback(cb);
+            st.running.store(false, Ordering::SeqCst);
+        });
+    }
+    #[cfg(not(all(feature = "docs", not(target_arch = "wasm32"))))]
+    #[inline]
+    pub fn docs_kick(&self, _force: bool) {}
     /// Dispatcher method. See [crate::Db::recall_context].
     pub fn recall_context(&self, query: &str, opts: memory::RecallOpts) -> Result<memory_recall::RecallContext> {
         dispatch_db!(self, db => db.recall_context(query, opts))
@@ -1439,7 +1517,18 @@ impl DbInstance {
     }
     /// Dispatcher method. See [crate::Db::memory_call].
     pub fn memory_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
-        dispatch_db!(self, db => db.memory_call(op, args))
+        self.docs_kick(false);
+        let r = dispatch_db!(self, db => db.memory_call(op, args))?;
+        if op == "remember" {
+            let running = r
+                .get("documents")
+                .and_then(|d| d.as_array())
+                .is_some_and(|d| d.iter().any(|x| x.get("status").and_then(|s| s.as_str()) == Some("running")));
+            if running {
+                self.docs_kick(true);
+            }
+        }
+        Ok(r)
     }
     /// Ontologies (docs/specs/ontology.md). See [crate::Db::ontology_call].
     pub fn ontology_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {

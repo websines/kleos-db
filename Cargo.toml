@@ -7,6 +7,7 @@ members = [
     "kleos-core-examples",
     "kleos-infer",
     "kleos-engram",
+    "kleos-docs",
 ]
 # kleos-infer (ML inference, UPGRADE_PLAN D2) and kleos-engram (Engram
 # addressing; docs/specs/engram-overlay.md) are opt-in: a bare `cargo build`

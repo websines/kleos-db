@@ -1,0 +1,2438 @@
+[
+{
+"text": "## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+"tokenizer": "character",
+"size": 200,
+"token": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained wi",
+0,
+200,
+200
+],
+[
+"d oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the fir",
+180,
+380,
+200
+],
+[
+"es effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe ",
+360,
+560,
+200
+],
+[
+"roach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the ",
+540,
+740,
+200
+],
+[
+"er traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the hi",
+720,
+920,
+200
+],
+[
+"0 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continu",
+900,
+1100,
+200
+],
+[
+"l monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the t",
+1080,
+1280,
+200
+],
+[
+"exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirec",
+1260,
+1460,
+200
+],
+[
+"sels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks fro",
+1440,
+1640,
+200
+],
+[
+"se for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1620,
+1694,
+74
+]
+],
+"sentence": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. ",
+0,
+120,
+120
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+120,
+307,
+187
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+307,
+392,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n",
+392,
+556,
+164
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+556,
+621,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+621,
+757,
+136
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. ",
+757,
+869,
+112
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+869,
+1068,
+199
+],
+[
+"Environmental monitoring continued at all six stations. ",
+1068,
+1124,
+56
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+1124,
+1311,
+187
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. ",
+1311,
+1381,
+70
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n",
+1381,
+1563,
+182
+],
+[
+"• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1563,
+1694,
+131
+]
+],
+"recursive": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\n",
+0,
+64,
+64
+],
+[
+"Environmental monitoring continued at all six stations. ",
+64,
+120,
+56
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+120,
+307,
+187
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+307,
+392,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n",
+392,
+556,
+164
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+556,
+621,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+621,
+757,
+136
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\n",
+757,
+831,
+74
+],
+[
+"Passenger numbers recovered strongly. ",
+831,
+869,
+38
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+869,
+1068,
+199
+],
+[
+"Environmental monitoring continued at all six stations. ",
+1068,
+1124,
+56
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+1124,
+1311,
+187
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. ",
+1311,
+1381,
+70
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n",
+1381,
+1563,
+182
+],
+[
+"• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1563,
+1694,
+131
+]
+]
+},
+{
+"text": "## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+"tokenizer": "character",
+"size": 600,
+"token": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterl",
+0,
+600,
+600
+],
+[
+"roach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water te",
+540,
+1140,
+600
+],
+[
+"l monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule sta",
+1080,
+1680,
+600
+],
+[
+"se for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1620,
+1694,
+74
+]
+],
+"sentence": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n",
+0,
+556,
+556
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. ",
+556,
+1124,
+568
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1124,
+1694,
+570
+]
+],
+"recursive": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n",
+0,
+556,
+556
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+556,
+1068,
+512
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n",
+1068,
+1649,
+581
+],
+[
+"• A revised tariff schedule starts on 1 July.",
+1649,
+1694,
+45
+]
+]
+},
+{
+"text": "## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+"tokenizer": "word",
+"size": 40,
+"token": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were",
+0,
+295,
+40
+],
+[
+"the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the",
+271,
+510,
+40
+],
+[
+"percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes.",
+491,
+756,
+40
+],
+[
+"from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with",
+731,
+1013,
+40
+],
+[
+"Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the",
+985,
+1278,
+40
+],
+[
+"no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two",
+1257,
+1498,
+40
+],
+[
+"western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1471,
+1694,
+36
+]
+],
+"sentence": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. ",
+0,
+120,
+16
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+120,
+307,
+26
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+307,
+392,
+16
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. ",
+392,
+621,
+36
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. ",
+621,
+869,
+38
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. ",
+869,
+1124,
+36
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. ",
+1124,
+1381,
+37
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n",
+1381,
+1600,
+36
+],
+[
+"• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1600,
+1694,
+19
+]
+],
+"recursive": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\n",
+0,
+64,
+9
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+64,
+307,
+33
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+307,
+392,
+16
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n",
+392,
+556,
+27
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+556,
+757,
+33
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\n",
+757,
+831,
+12
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+831,
+1068,
+33
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+1068,
+1311,
+33
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. ",
+1311,
+1381,
+12
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n",
+1381,
+1563,
+30
+],
+[
+"• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1563,
+1694,
+27
+]
+]
+},
+{
+"text": "## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+"tokenizer": "word",
+"size": 120,
+"token": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a",
+0,
+802,
+120
+],
+[
+"from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n•",
+731,
+1564,
+120
+],
+[
+"western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1471,
+1694,
+36
+]
+],
+"sentence": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+0,
+757,
+113
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+757,
+1548,
+114
+],
+[
+"## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1548,
+1694,
+27
+]
+],
+"recursive": [
+[
+"## Quarterly Report of the Harbour Authority\n\n## 1. Operations\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n",
+0,
+556,
+84
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n## 2. Finance\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+556,
+1311,
+109
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n## Key points\n\n• Cargo volumes rose by 4.2 percent.\n• Berths 7 and 8 close for six weeks from March.\n• A revised tariff schedule starts on 1 July.",
+1311,
+1694,
+68
+]
+]
+},
+{
+"text": "## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+"tokenizer": "character",
+"size": 200,
+"token": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven",
+0,
+200,
+200
+],
+[
+"od last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in Mar",
+180,
+380,
+200
+],
+[
+"uled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger",
+360,
+560,
+200
+],
+[
+" January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commut",
+540,
+740,
+200
+],
+[
+" popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remaine",
+720,
+920,
+200
+],
+[
+"olved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the",
+900,
+1100,
+200
+],
+[
+" takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n",
+1080,
+1280,
+200
+],
+[
+" approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container",
+1260,
+1460,
+200
+],
+[
+" mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will c",
+1440,
+1640,
+200
+],
+[
+"rch. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered ",
+1620,
+1820,
+200
+],
+[
+"r numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously ",
+1800,
+2000,
+200
+],
+[
+"ters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permit",
+1980,
+2180,
+200
+],
+[
+"ed within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues",
+2160,
+2360,
+200
+],
+[
+" first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe ha",
+2340,
+2540,
+200
+],
+[
+"## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the no",
+2520,
+2720,
+200
+],
+[
+" traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 f",
+2700,
+2900,
+200
+],
+[
+"ose berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry servi",
+2880,
+3080,
+200
+],
+[
+"trongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal",
+3060,
+3260,
+200
+],
+[
+"elied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout ",
+3240,
+3440,
+200
+],
+[
+"ed range throughout the quarter, and no",
+3420,
+3459,
+39
+]
+],
+"sentence": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. ",
+0,
+119,
+119
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+119,
+314,
+195
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. ",
+314,
+384,
+70
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+384,
+551,
+167
+],
+[
+"Passenger numbers recovered strongly. ",
+551,
+589,
+38
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+589,
+788,
+199
+],
+[
+"Environmental monitoring continued at all six stations. ",
+788,
+844,
+56
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+844,
+1031,
+187
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+1031,
+1116,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\n",
+1116,
+1294,
+178
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+1294,
+1359,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+1359,
+1554,
+195
+],
+[
+"Maintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\n",
+1554,
+1646,
+92
+],
+[
+"berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. ",
+1646,
+1830,
+184
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+1830,
+2029,
+199
+],
+[
+"Environmental monitoring continued at all six stations. ",
+2029,
+2085,
+56
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. ",
+2085,
+2271,
+186
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+2271,
+2356,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\n",
+2356,
+2534,
+178
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+2534,
+2599,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+2599,
+2794,
+195
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. ",
+2794,
+2864,
+70
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+2864,
+3031,
+167
+],
+[
+"Passenger numbers recovered strongly. ",
+3031,
+3069,
+38
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+3069,
+3268,
+199
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+3268,
+3459,
+191
+]
+],
+"recursive": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\n",
+0,
+54,
+54
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+54,
+119,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+119,
+314,
+195
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. ",
+314,
+384,
+70
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+384,
+551,
+167
+],
+[
+"Passenger numbers recovered strongly. ",
+551,
+589,
+38
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+589,
+788,
+199
+],
+[
+"Environmental monitoring continued at all six stations. ",
+788,
+844,
+56
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+844,
+1031,
+187
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+1031,
+1116,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\n",
+1116,
+1294,
+178
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+1294,
+1359,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+1359,
+1554,
+195
+],
+[
+"Maintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\n",
+1554,
+1646,
+92
+],
+[
+"berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. ",
+1646,
+1830,
+184
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+1830,
+2029,
+199
+],
+[
+"Environmental monitoring continued at all six stations. ",
+2029,
+2085,
+56
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. ",
+2085,
+2271,
+186
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+2271,
+2356,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\n",
+2356,
+2534,
+178
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+2534,
+2599,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+2599,
+2794,
+195
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. ",
+2794,
+2864,
+70
+],
+[
+"The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+2864,
+3031,
+167
+],
+[
+"Passenger numbers recovered strongly. ",
+3031,
+3069,
+38
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+3069,
+3268,
+199
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+3268,
+3459,
+191
+]
+]
+},
+{
+"text": "## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+"tokenizer": "character",
+"size": 600,
+"token": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry servi",
+0,
+600,
+600
+],
+[
+" January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5",
+540,
+1140,
+600
+],
+[
+" takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks",
+1080,
+1680,
+600
+],
+[
+"rch. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+1620,
+2220,
+600
+],
+[
+"ed within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain f",
+2160,
+2760,
+600
+],
+[
+" traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continu",
+2700,
+3300,
+600
+],
+[
+"elied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+3240,
+3459,
+219
+]
+],
+"sentence": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. ",
+0,
+589,
+589
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. ",
+589,
+1116,
+527
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\n",
+1116,
+1646,
+530
+],
+[
+"berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. ",
+1646,
+2085,
+439
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. ",
+2085,
+2599,
+514
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. ",
+2599,
+3069,
+470
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+3069,
+3459,
+390
+]
+],
+"recursive": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+0,
+551,
+551
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+551,
+1031,
+480
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\n",
+1031,
+1596,
+565
+],
+[
+"scheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+1596,
+2029,
+433
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\n",
+2029,
+2534,
+505
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+2534,
+3031,
+497
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+3031,
+3459,
+428
+]
+]
+},
+{
+"text": "## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+"tokenizer": "word",
+"size": 40,
+"token": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments",
+0,
+269,
+40
+],
+[
+"northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the",
+238,
+473,
+40
+],
+[
+"be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who",
+453,
+747,
+40
+],
+[
+"popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit",
+721,
+1014,
+40
+],
+[
+"of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund",
+992,
+1230,
+40
+],
+[
+"1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from",
+1211,
+1473,
+40
+],
+[
+"by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be",
+1448,
+1697,
+40
+],
+[
+"weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved",
+1675,
+1961,
+40
+],
+[
+"sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances",
+1935,
+2232,
+40
+],
+[
+"quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge",
+2205,
+2447,
+40
+],
+[
+"ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven",
+2426,
+2680,
+40
+],
+[
+"period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8",
+2656,
+2898,
+40
+],
+[
+"berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the",
+2884,
+3161,
+40
+],
+[
+"records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range",
+3139,
+3428,
+40
+],
+[
+"within the permitted range throughout the quarter, and no",
+3402,
+3459,
+9
+]
+],
+"sentence": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. ",
+0,
+119,
+17
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+119,
+314,
+32
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+314,
+551,
+39
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+551,
+788,
+33
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+788,
+1031,
+33
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+1031,
+1116,
+16
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. ",
+1116,
+1359,
+38
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\n",
+1359,
+1596,
+37
+],
+[
+"scheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. ",
+1596,
+1830,
+37
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. ",
+1830,
+2085,
+36
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. ",
+2085,
+2271,
+27
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+2271,
+2356,
+16
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. ",
+2356,
+2599,
+38
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+2599,
+2794,
+32
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+2794,
+3031,
+39
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+3031,
+3268,
+33
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+3268,
+3459,
+26
+]
+],
+"recursive": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\n",
+0,
+54,
+8
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+54,
+255,
+33
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n",
+255,
+314,
+10
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+314,
+551,
+39
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+551,
+788,
+33
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\n",
+788,
+1031,
+33
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+1031,
+1116,
+16
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\n",
+1116,
+1294,
+29
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+1294,
+1495,
+33
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n",
+1495,
+1554,
+10
+],
+[
+"Maintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\n",
+1554,
+1646,
+15
+],
+[
+"berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. ",
+1646,
+1830,
+30
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+1830,
+2029,
+29
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. ",
+2029,
+2271,
+35
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+2271,
+2356,
+16
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\n",
+2356,
+2534,
+29
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+2534,
+2735,
+33
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n",
+2735,
+2794,
+10
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+2794,
+3031,
+39
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+3031,
+3268,
+33
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+3268,
+3459,
+26
+]
+]
+},
+{
+"text": "## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+"tokenizer": "word",
+"size": 120,
+"token": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued",
+0,
+822,
+120
+],
+[
+"popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell",
+721,
+1523,
+120
+],
+[
+"by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board",
+1448,
+2280,
+120
+],
+[
+"quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected",
+2205,
+2946,
+120
+],
+[
+"berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+2884,
+3459,
+81
+]
+],
+"sentence": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. ",
+0,
+589,
+90
+],
+[
+"Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\nThe harbour authority published its quarterly report on Tuesday. ",
+589,
+1359,
+113
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. ",
+1359,
+2085,
+108
+],
+[
+"Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+2085,
+2794,
+110
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+2794,
+3459,
+96
+]
+],
+"recursive": [
+[
+"## Notes on Coastal Sediment Transport\n\n## Section 1\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\n",
+0,
+551,
+88
+],
+[
+"Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded.\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 2\n\n",
+551,
+1294,
+110
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\nMaintenance of the eastern breakwater is\n\nscheduled to begin in March. The work will close\n\nberths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January. Passenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\n",
+1294,
+2029,
+113
+],
+[
+"Environmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no exceedances of the turbidity limit were recorded. The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.\n\n## Section 3\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n",
+2029,
+2794,
+118
+],
+[
+"Maintenance of the eastern breakwater is scheduled to begin in March. The work will close berths 7 and 8 for about six weeks; vessels will be redirected to the western terminal, where two additional cranes were commissioned in January.\n\nPassenger numbers recovered strongly. Ferry services carried 1,284,000 passengers, the highest figure since records began, and the new evening sailing to Westport proved popular with commuters who previously relied on the coastal road.\n\nEnvironmental monitoring continued at all six stations. Average water temperature was 14.8 degrees Celsius; dissolved oxygen remained within the permitted range throughout the quarter, and no",
+2794,
+3459,
+98
+]
+]
+},
+{
+"text": "## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+"tokenizer": "character",
+"size": 200,
+"token": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic f",
+0,
+200,
+200
+],
+[
+" container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</",
+180,
+380,
+200
+],
+[
+"EU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</",
+360,
+560,
+200
+],
+[
+"<td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</t",
+540,
+740,
+200
+],
+[
+">6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n",
+720,
+920,
+200
+],
+[
+"<td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues fo",
+900,
+1100,
+200
+],
+[
+"rst of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1080,
+1255,
+175
+]
+],
+"sentence": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. ",
+0,
+89,
+89
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+89,
+225,
+136
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n",
+225,
+389,
+164
+],
+[
+"<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n",
+389,
+536,
+147
+],
+[
+"<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n",
+536,
+682,
+146
+],
+[
+"<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n",
+682,
+841,
+159
+],
+[
+"<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\n",
+841,
+1008,
+167
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+1008,
+1093,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1093,
+1255,
+162
+]
+],
+"recursive": [
+[
+"## Terminal statistics\n\n",
+0,
+24,
+24
+],
+[
+"The harbour authority published its quarterly report on Tuesday. ",
+24,
+89,
+65
+],
+[
+"Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+89,
+225,
+136
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n",
+225,
+292,
+67
+],
+[
+"<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n",
+292,
+463,
+171
+],
+[
+"<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n",
+463,
+609,
+146
+],
+[
+"<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n",
+609,
+762,
+153
+],
+[
+"<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n",
+762,
+920,
+158
+],
+[
+"<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\n",
+920,
+1008,
+88
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+1008,
+1093,
+85
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1093,
+1255,
+162
+]
+]
+},
+{
+"text": "## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+"tokenizer": "character",
+"size": 600,
+"token": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</",
+0,
+600,
+600
+],
+[
+"<td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are u",
+540,
+1140,
+600
+],
+[
+"rst of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1080,
+1255,
+175
+]
+],
+"sentence": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n",
+0,
+536,
+536
+],
+[
+"<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. ",
+536,
+1093,
+557
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1093,
+1255,
+162
+]
+],
+"recursive": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n",
+0,
+536,
+536
+],
+[
+"<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\n",
+536,
+1008,
+472
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1008,
+1255,
+247
+]
+]
+},
+{
+"text": "## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+"tokenizer": "word",
+"size": 40,
+"token": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after",
+0,
+268,
+40
+],
+[
+"grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a",
+243,
+1174,
+40
+],
+[
+"larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1156,
+1255,
+17
+]
+],
+"sentence": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+0,
+225,
+34
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. ",
+225,
+1093,
+30
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1093,
+1255,
+27
+]
+],
+"recursive": [
+[
+"## Terminal statistics\n\n",
+0,
+24,
+3
+],
+[
+"The harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. ",
+24,
+225,
+33
+],
+[
+"Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n",
+225,
+292,
+10
+],
+[
+"<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\n",
+292,
+1008,
+14
+],
+[
+"The board approved a revised tariff schedule that takes effect on the first of July. ",
+1008,
+1093,
+16
+],
+[
+"Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+1093,
+1255,
+27
+]
+]
+},
+{
+"text": "## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+"tokenizer": "word",
+"size": 120,
+"token": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+0,
+1255,
+89
+]
+],
+"sentence": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+0,
+1255,
+89
+]
+],
+"recursive": [
+[
+"## Terminal statistics\n\nThe harbour authority published its quarterly report on Tuesday. Cargo volumes rose by 4.2 percent compared with the same period last year, driven mainly by container traffic from the northern routes. Bulk shipments of grain fell slightly after a dry summer.\n\n<table>\n<tr><th>Terminal</th><th>Berths</th><th>Cranes</th><th>Throughput (TEU)</th><th>Change</th></tr>\n<tr><td>North</td><td>7</td><td>2</td><td>414,000</td><td>+2.7%</td></tr>\n<tr><td>East</td><td>3</td><td>8</td><td>106,000</td><td>-2.4%</td></tr>\n<tr><td>West</td><td>2</td><td>8</td><td>229,000</td><td>-8.3%</td></tr>\n<tr><td>South</td><td>8</td><td>6</td><td>81,000</td><td>-4.7%</td></tr>\n<tr><td>Inner Basin</td><td>10</td><td>6</td><td>70,000</td><td>+5.9%</td></tr>\n<tr><td>Ferry Quay</td><td>3</td><td>3</td><td>655,000</td><td>+2.3%</td></tr>\n<tr><td>Grain Pier</td><td>2</td><td>9</td><td>609,000</td><td>-1.9%</td></tr>\n<tr><td>Oil Jetty</td><td>5</td><td>0</td><td>580,000</td><td>+6.5%</td></tr>\n</table>\n\nThe board approved a revised tariff schedule that takes effect on the first of July. Dues for vessels under 5,000 gross tonnes are unchanged, while larger ships pay a surcharge of 1.5 percent to fund the dredging programme in the approach channel.",
+0,
+1255,
+100
+]
+]
+},
+{
+"text": "## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+"tokenizer": "character",
+"size": 200,
+"token": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季",
+0,
+200,
+200
+],
+[
+"关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+180,
+366,
+186
+]
+],
+"sentence": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n",
+0,
+190,
+190
+],
+[
+"港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+190,
+366,
+176
+]
+],
+"recursive": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n",
+0,
+190,
+190
+],
+[
+"港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+190,
+366,
+176
+]
+]
+},
+{
+"text": "## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+"tokenizer": "character",
+"size": 600,
+"token": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+366
+]
+],
+"sentence": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+366
+]
+],
+"recursive": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+366
+]
+]
+},
+{
+"text": "## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+"tokenizer": "word",
+"size": 40,
+"token": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+2
+]
+],
+"sentence": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+2
+]
+],
+"recursive": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+6
+]
+]
+},
+{
+"text": "## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+"tokenizer": "word",
+"size": 120,
+"token": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+2
+]
+],
+"sentence": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+2
+]
+],
+"recursive": [
+[
+"## 港务局季度报告\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。\n\n港务局星期二发布了季度报告。与去年同期相比，货物吞吐量增长了百分之四点二，主要来自北方航线的集装箱运输。东防波堤的维修工程计划于三月开始，届时七号和八号泊位将关闭约六个星期。",
+0,
+366,
+6
+]
+]
+},
+{
+"text": "## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+"tokenizer": "character",
+"size": 200,
+"token": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n",
+0,
+200,
+200
+],
+[
+"а начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в ма",
+180,
+380,
+200
+],
+[
+"нолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся",
+360,
+560,
+200
+],
+[
+"о волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома нач",
+540,
+740,
+200
+],
+[
+"очного волнолома начнётся в марте.",
+720,
+754,
+34
+]
+],
+"sentence": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. ",
+0,
+154,
+154
+],
+[
+"Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. ",
+154,
+339,
+185
+],
+[
+"Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. ",
+339,
+524,
+185
+],
+[
+"Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. ",
+524,
+709,
+185
+],
+[
+"Ремонт восточного волнолома начнётся в марте.",
+709,
+754,
+45
+]
+],
+"recursive": [
+[
+"## Отчёт порта\n\n",
+0,
+16,
+16
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+16,
+201,
+185
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+201,
+386,
+185
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+386,
+571,
+185
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+571,
+754,
+183
+]
+]
+},
+{
+"text": "## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+"tokenizer": "character",
+"size": 600,
+"token": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за",
+0,
+600,
+600
+],
+[
+"о волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+540,
+754,
+214
+]
+],
+"sentence": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+0,
+571,
+571
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+571,
+754,
+183
+]
+],
+"recursive": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+0,
+571,
+571
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+571,
+754,
+183
+]
+]
+},
+{
+"text": "## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+"tokenizer": "word",
+"size": 40,
+"token": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента,",
+0,
+295,
+40
+],
+[
+"вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о",
+270,
+578,
+40
+],
+[
+"начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+552,
+754,
+27
+]
+],
+"sentence": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. ",
+0,
+247,
+34
+],
+[
+"Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. ",
+247,
+524,
+37
+],
+[
+"Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+524,
+754,
+30
+]
+],
+"recursive": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+0,
+201,
+28
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+201,
+386,
+25
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\n",
+386,
+571,
+25
+],
+[
+"Отчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+571,
+754,
+25
+]
+]
+},
+{
+"text": "## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+"tokenizer": "word",
+"size": 120,
+"token": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+0,
+754,
+99
+]
+],
+"sentence": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+0,
+754,
+99
+]
+],
+"recursive": [
+[
+"## Отчёт порта\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.\n\nОтчёт о деятельности порта за третий квартал. Объём перевалки грузов вырос на четыре процента, а пассажиропоток достиг рекордного уровня. Ремонт восточного волнолома начнётся в марте.",
+0,
+754,
+103
+]
+]
+},
+{
+"text": "# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+"tokenizer": "character",
+"size": 200,
+"token": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force spl",
+0,
+200,
+200
+],
+[
+"a while to force splits.\n",
+180,
+205,
+25
+]
+],
+"sentence": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\n",
+0,
+130,
+130
+],
+[
+"A last paragraph (with brackets) that runs on for a while to force splits.\n",
+130,
+205,
+75
+]
+],
+"recursive": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\n",
+0,
+130,
+130
+],
+[
+"A last paragraph (with brackets) that runs on for a while to force splits.\n",
+130,
+205,
+75
+]
+]
+},
+{
+"text": "# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+"tokenizer": "character",
+"size": 600,
+"token": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+205
+]
+],
+"sentence": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+205
+]
+],
+"recursive": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+205
+]
+]
+},
+{
+"text": "# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+"tokenizer": "word",
+"size": 40,
+"token": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+35
+]
+],
+"sentence": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+35
+]
+],
+"recursive": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+37
+]
+]
+},
+{
+"text": "# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+"tokenizer": "word",
+"size": 120,
+"token": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+35
+]
+],
+"sentence": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+35
+]
+],
+"recursive": [
+[
+"# Title\n\nSome intro, with commas; and pauses: here.\n\n```python\ndef f(x):\n    return x + 1\n```\n\n- item one\n- item two... and more\n\nA last paragraph (with brackets) that runs on for a while to force splits.\n",
+0,
+205,
+37
+]
+]
+}
+]

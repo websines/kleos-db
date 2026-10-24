@@ -109,6 +109,34 @@ const SCHEMA_VERSION: i64 = 7;
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
+/// The kind of a document chunk memory (docs/specs/documents.md).
+pub const DOC_KIND: &str = "doc";
+
+/// A chunk hit's `doc` reference, for its citation.
+#[derive(Debug, Clone, Deserialize)]
+struct DocCite {
+    name: String,
+    page: Option<usize>,
+    page_end: Option<usize>,
+    heading: Option<String>,
+}
+
+impl DocCite {
+    /// `[name p. 14, § Heading]`.
+    fn cite(&self) -> String {
+        let mut s = format!("[{}", self.name);
+        match (self.page, self.page_end) {
+            (Some(a), Some(b)) if b > a => s.push_str(&format!(" pp. {}–{}", a + 1, b + 1)),
+            (Some(a), _) => s.push_str(&format!(" p. {}", a + 1)),
+            _ => {}
+        }
+        if let Some(h) = self.heading.as_ref().filter(|h| !h.is_empty()) {
+            s.push_str(&format!(", § {h}"));
+        }
+        s.push(']');
+        s
+    }
+}
 /// Candidates scored per `remember`.
 const DEFAULT_K: usize = 5;
 /// Vector-leg weight of the hybrid fusion (the SciFact-tuned 0.6, CHANGELOG).
@@ -447,7 +475,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 
 /// A write that lost to a concurrent transaction (storage-level conflict or
 /// lock), as opposed to a real error.
-fn is_contention(e: &miette::Report) -> bool {
+pub(crate) fn is_contention(e: &miette::Report) -> bool {
     let m = format!("{e:?}").to_ascii_lowercase();
     ["busy", "locked", "conflict", "try again"].iter().any(|k| m.contains(k))
 }
@@ -624,6 +652,17 @@ pub struct RememberOpts {
     /// never take part in supersede / duplicate decisions: what the
     /// assistant said does not replace what the user said.
     pub role: Option<String>,
+    /// A document to read and store (docs/specs/documents.md): a path.
+    /// Same as one entry of `attachments`.
+    pub file: Option<String>,
+    /// Documents that come with the text: paths, or objects `{path | bytes |
+    /// data_b64, mime?, name?}`. Each is read (text layer or OCR), chunked,
+    /// embedded and stored as `kind: 'doc'` memories; the memories of the
+    /// text link to them (`attached`). Needs the `docs` feature.
+    pub attachments: Vec<JsonValue>,
+    /// How documents are read and chunked (`DocOpts`: chunker, ocr,
+    /// inline_pages, batch_pages, sync, threads, dpi).
+    pub doc: Option<JsonValue>,
     /// Automatic entities (docs/specs/memory-api.md, "Automatic entities"):
     /// with no `entities` passed and an extractor configured (`extractor`
     /// here, else the store's), the extractor finds them. Default on; false
@@ -743,6 +782,9 @@ pub struct RecallOpts {
     /// The time the query's dates are resolved against (µs); default
     /// `as_of`, else now.
     pub query_at: Option<i64>,
+    /// What to search: `memory` and/or `docs` (document chunks); default
+    /// both. `kind` overrides it.
+    pub sources: Option<Vec<String>>,
 }
 
 /// Options of [`Db::memory_set`]: change a memory's importance, expiry or
@@ -951,6 +993,9 @@ pub struct RememberResult {
     /// statement id: `forget` of it covers every claim).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<ClaimResult>,
+    /// One status per document passed with `file` / `attachments`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<JsonValue>,
     /// With an active ontology: each claim's type (docs/specs/ontology.md),
     /// and the candidates the cardinality policy kept out of `supersedes`
     /// (`ontology_gated`) or out of every decision (`ontology_blocked`).
@@ -1030,6 +1075,10 @@ pub struct RecallHit {
     /// ("yesterday", "last summer") resolved against when it was said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<MemEvent>,
+    /// For a document chunk (`kind: 'doc'`): `{doc, name, page, page_end,
+    /// heading}` (docs/specs/documents.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<JsonValue>,
 }
 
 impl RecallHit {
@@ -1346,6 +1395,10 @@ impl<'s, S: Storage<'s>> Db<S> {
             .first()
             .and_then(|r| r[0].get_int())
             .unwrap_or(0))
+    }
+
+    pub(crate) fn memory_config(&'s self) -> Result<Option<MemConfig>> {
+        self.mem_config()
     }
 
     /// The store's memory embedder, if any.
@@ -1839,8 +1892,16 @@ impl<'s, S: Storage<'s>> Db<S> {
         };
         let mut filters = String::new();
         if let Some(kd) = kind {
-            filters.push_str(", kind == $kind");
-            p.push(("kind", s(kd)));
+            match kd.strip_prefix('!') {
+                Some(not) => {
+                    filters.push_str(", kind != $kind");
+                    p.push(("kind", s(not)));
+                }
+                None => {
+                    filters.push_str(", kind == $kind");
+                    p.push(("kind", s(kd)));
+                }
+            }
         }
         if let Some(eids) = entity {
             // every row of the entity's cluster (merged names included)
@@ -2355,6 +2416,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect();
         let onto_on = onto.as_ref().is_some_and(|a| a.policy != "off");
         let mut rows_per: Vec<Vec<Vec<DataValue>>> = Vec::with_capacity(claims.len());
+        // document chunks are never decision candidates
+        let not_docs_s = format!("!{DOC_KIND}");
+        let not_docs = if self.has_docs() { Some(not_docs_s.as_str()) } else { None };
         for (ci, (_, text, vec)) in claims.iter().enumerate() {
             if !decided[ci] {
                 rows_per.push(vec![]);
@@ -2369,7 +2433,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 k,
                 window,
                 None,
-                None,
+                not_docs,
                 None,
                 DEFAULT_VECTOR_WEIGHT,
                 false,
@@ -2722,8 +2786,53 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// inserts. Every claim of one call is written in one transaction. Never
     /// deletes. Without a decider it uses the exact-text and value rules
     /// only; without an embedder, FTS candidates only.
-    pub fn remember(&'s self, text: &str, opts: RememberOpts) -> Result<RememberResult> {
-        self.remember_with(text, opts, None)
+    pub fn remember(&'s self, text: &str, mut opts: RememberOpts) -> Result<RememberResult> {
+        let mut atts = std::mem::take(&mut opts.attachments);
+        if let Some(f) = opts.file.take() {
+            atts.insert(0, JsonValue::String(f));
+        }
+        if atts.is_empty() {
+            return self.remember_with(text, opts, None);
+        }
+        self.remember_documents(text, opts, atts)
+    }
+
+    #[cfg(not(feature = "docs"))]
+    fn remember_documents(&'s self, _text: &str, _opts: RememberOpts, _atts: Vec<JsonValue>) -> Result<RememberResult> {
+        bail!("documents (`file`, `attachments`) need kleos built with the `docs` feature")
+    }
+
+    /// `remember` with documents: the text as usual, then each document
+    /// (docs/specs/documents.md); the text's memories link to the documents.
+    #[cfg(feature = "docs")]
+    fn remember_documents(&'s self, text: &str, mut opts: RememberOpts, atts: Vec<JsonValue>) -> Result<RememberResult> {
+        let ns = ns_of(&opts.ns);
+        let dopts: crate::docs::DocOpts = match opts.doc.take() {
+            None | Some(JsonValue::Null) => Default::default(),
+            Some(v) => serde_json::from_value(v).map_err(|e| miette::miette!("`remember` option doc: {e}"))?,
+        };
+        let specs: Vec<crate::docs::AttachmentSpec> = atts
+            .into_iter()
+            .map(|a| serde_json::from_value(a).map_err(|e| miette::miette!("`remember` attachment: {e}")))
+            .collect::<Result<_>>()?;
+        let mut res = if text.trim().is_empty() {
+            RememberResult { ns: ns.clone(), action: "documents".into(), ..Default::default() }
+        } else {
+            self.remember_with(text, opts, None)?
+        };
+        let statuses = self.docs_remember(&ns, specs, &dopts)?;
+        let mut mems: Vec<String> = res.id.iter().cloned().collect();
+        mems.extend(res.claims.iter().filter_map(|c| c.id.clone()));
+        let docs: Vec<String> = statuses.iter().filter(|d| !d.doc.is_empty()).map(|d| d.doc.clone()).collect();
+        self.link_attached(&ns, &mems, &docs)?;
+        res.documents = statuses.into_iter().map(|d| serde_json::to_value(d).unwrap_or(JsonValue::Null)).collect();
+        Ok(res)
+    }
+
+    /// Whether this store holds documents (their chunks then stay out of
+    /// `remember`'s decision candidates).
+    fn has_docs(&'s self) -> bool {
+        self.transact().map(|tx| tx.get_relation("kleos_doc_chunk", false).is_ok()).unwrap_or(false)
     }
 
     /// [`Db::remember`] whose commit also runs the script blocks `extra`
@@ -3261,7 +3370,22 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     /// `recall` before the list text is chosen: hits with the claim as
     /// `text`.
-    fn recall_hits(&'s self, query: &str, opts: RecallOpts) -> Result<Vec<RecallHit>> {
+    fn recall_hits(&'s self, query: &str, mut opts: RecallOpts) -> Result<Vec<RecallHit>> {
+        // `sources`: memories, document chunks, or both (a kind filter)
+        if opts.kind.is_none() {
+            if let Some(src) = &opts.sources {
+                let m = src.iter().any(|x| x == "memory" || x == "memories");
+                let d = src.iter().any(|x| x == "docs" || x == "documents" || x == "doc");
+                if let Some(bad) = src.iter().find(|x| !matches!(x.as_str(), "memory" | "memories" | "docs" | "documents" | "doc")) {
+                    bail!("`recall` option sources takes 'memory' and/or 'docs', got '{bad}'");
+                }
+                opts.kind = match (m, d) {
+                    (true, false) => Some(format!("!{DOC_KIND}")),
+                    (false, true) => Some(DOC_KIND.to_string()),
+                    _ => None,
+                };
+            }
+        }
         let _prio = crate::sched::scope(opts.priority.as_deref())?;
         let cfg = match self.mem_config()? {
             Some(c) => self.reembed_finish_if_done(c)?,
@@ -3554,6 +3678,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                     expanded: is_exp,
                     claim: None,
                     events: sev.get(&id).cloned().unwrap_or_default(),
+                    doc: None,
                     id,
                 })
             })
@@ -3585,6 +3710,16 @@ impl<'s, S: Storage<'s>> Db<S> {
             hits = pick.into_iter().filter_map(|i| slots[i].take()).collect();
         }
         hits.truncate(k);
+        #[cfg(feature = "docs")]
+        if hits.iter().any(|h| h.kind == DOC_KIND) {
+            let ids: Vec<String> = hits.iter().filter(|h| h.kind == DOC_KIND).map(|h| h.id.clone()).collect();
+            let refs = self.doc_refs(&sc.names(), &ids)?;
+            for h in hits.iter_mut() {
+                if let Some(r) = refs.get(&h.id) {
+                    h.doc = serde_json::to_value(r).ok();
+                }
+            }
+        }
         if opts.record_access.unwrap_or(true) && !hits.is_empty() {
             let got: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
             if self.mem_access.add(&ns, &got, now_micros()) {
@@ -3693,8 +3828,16 @@ impl<'s, S: Storage<'s>> Db<S> {
             };
             let mut filters = String::new();
             if let Some(kd) = kind {
-                filters.push_str(", kind == $kind");
-                p.push(("kind", s(kd)));
+                match kd.strip_prefix('!') {
+                    Some(not) => {
+                        filters.push_str(", kind != $kind");
+                        p.push(("kind", s(not)));
+                    }
+                    None => {
+                        filters.push_str(", kind == $kind");
+                        p.push(("kind", s(kd)));
+                    }
+                }
             }
             out.extend(
                 self.mem_q(
@@ -3819,6 +3962,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                     .iter()
                     .filter_map(|n| newer_v.get(n).map(|v| (v.text.clone(), v.from)))
                     .collect(),
+                cite: h.doc.as_ref().and_then(|d| serde_json::from_value::<DocCite>(d.clone()).ok()).map(|d| d.cite()),
+                doc_name: h.doc.as_ref().and_then(|d| d.get("name")).and_then(|x| x.as_str()).map(|x| x.to_string()),
+                doc_page: h.doc.as_ref().and_then(|d| d.get("page")).and_then(|x| x.as_u64()).map(|x| x as usize),
                 id: h.id,
                 text: h.text,
                 valid_from: h.valid_from,
