@@ -9,6 +9,9 @@ to kleos.
 
 ## Unreleased
 
+### Changed
+- **Ontology quality (wave6/quality).** A thin claim (nothing concrete, under 5 content words) never auto-supersedes a substantive one, however the pair is typed; it is capped at pending ("It's definitely isn't, Maria." no longer ends "Investing in our future generations is key…"), and a name closing its sentence after a comma counts as a vocative. Maintenance (cardinality flips, merges, retirement) counts only cue-, rule-, learning- or extractor-backed types as evidence, never prototype-only ones. A memory branch can retract a fact it inherited (a tombstone hides the ancestor's copy from the branch's `facts` and `infer`; the parent keeps it).
+
 ### Added
 - **Zero-maintenance ontologies** (docs/specs/ontology.md, "Defaults", "Learning", "Maintenance").
   - **On by default:** every memory namespace gets the personal pack unless the store turns it off (`memory_init {ontology: 'none'}`); memory branches inherit their ancestor's ontology and read facts and inference through the lineage as of the fork.

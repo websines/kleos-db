@@ -259,6 +259,7 @@ labels to the active ontology is not built yet (see "Left"). GLiNER is open-labe
 | Case | Supersede | Duplicate |
 |---|---|---|
 | *c* or *d* is small talk | not asked | not asked |
+| *c* is thin and *d* is not (a contentless reply against a substantive claim), however typed | capped at pending | asked |
 | subjects certainly different (two speakers' first persons, a speaker and their own relative, two relatives) | not asked | not asked |
 | different speaker labels ("Caroline:" vs "Melanie:") | not asked | not asked |
 | both typed, same property, `card: one`, `temporal: true` | asked (normal bands) | asked |
@@ -276,7 +277,11 @@ an auto answer is capped at pending) or `dup_only` (not asked). Under `decide`,
 a **thin** pair is still capped at pending: a side with nothing concrete and
 fewer than five content words ("Nah, I haven't.", "It was super peaceful and
 refreshing."). Short concrete facts ("I play tennis on Saturdays.", "I drive a
-2015 Volkswagen Golf.") are not thin.
+2015 Volkswagen Golf.") are not thin. Independently of typing, a thin new
+claim never auto-replaces a claim that is not thin: the decider gave "It's
+definitely isn't, Maria." p 0.9999 against "Investing in our future
+generations is key…". A name closing its sentence after a comma ("…, Maria.")
+is a vocative, not something concrete.
 
 **The default is `decide`.** `pending` cut the remaining wrong LoCoMo
 replacements further but dropped knowledge-update latest-first from 83% to 70%
@@ -465,6 +470,10 @@ dry_run?}` (`ontology_learn.rs`):
   retyped.
 - **Retirement:** a learned property no current claim uses, 30 days
   (`KLEOS_ONTO_RETIRE_DAYS`) after it was added, is retired.
+- **Evidence:** all three count only claims whose type a cue, a rule,
+  learning or an extractor backs (`by` other than `proto`). A prototype match
+  alone is too noisy under some embedders: under EmbeddingGemma 2,
+  prototype-only types once made `reports_to` multi-valued.
 
 **Every change** (learned, approved, corrected, merged, retired) is a row of
 `kleos_onto_change {ns, id => at, kind, onto, target, before, after,
@@ -514,6 +523,11 @@ new labels better (docs/research/gliner-usage.md).
   ancestor's as of the fork (`inherited_from` on inherited facts); a parent's
   later facts stay out, a backdated parent fact before the fork shows, as for
   memories.
+- **Retracting an inherited fact:** `::ontology retract` on a branch for a
+  fact it only inherits writes a tombstone (`status: 'retracted'`, `by:
+  retract`) in the branch. `facts` and `infer` on the branch skip the
+  ancestor's copy; the parent still has it. The result reports
+  `inherited_hidden`.
 - **One source of truth for kinship:** with an ontology active, the
   extractor's kinship and role edges become ontology facts (`by:
   extractor:kin`, after the rule's own facts, deduplicated) and are not
@@ -783,7 +797,7 @@ three bikes") was kept out of `supersedes` by two prototype-only types
 - ~~Branches~~, ~~extractor labels~~, ~~two kinship stores~~, ~~ontology
   learning~~, ~~courtesies~~: built in wave5/onto-auto.
 - **Recall over inferred edges** and **unit conversion**: designed, not built.
-- **A branch cannot retract an inherited fact** (facts have no copy-up yet).
+- ~~A branch cannot retract an inherited fact~~: built in wave6/quality (tombstones).
 - **Learning labels are word-based:** a cluster's label is its most
   distinctive word pair, not a canonical relation name; it reads well on
   topical clusters, less on mixed ones (see "Results").
