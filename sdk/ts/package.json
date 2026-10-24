@@ -1,0 +1,39 @@
+{
+  "name": "kleos",
+  "version": "0.18.0",
+  "description": "TypeScript SDK for kleos, the agent memory engine: embedded (native) or remote (HTTP / MCP), one API",
+  "private": true,
+  "license": "MPL-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "import": "./dist/remote.js"
+    }
+  },
+  "files": ["dist", "native/*.node", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:native": "node scripts/build-native.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "docs:api": "typedoc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/websines/kleos-db.git",
+    "directory": "sdk/ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

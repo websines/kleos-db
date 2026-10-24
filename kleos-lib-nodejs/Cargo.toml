@@ -1,53 +1,41 @@
 [package]
 name = "kleos-node"
-version = "0.7.6"
-description = "Cozo database for NodeJS"
-authors = ["Ziyang Hu"]
+version = "0.18.0"
+description = "Native Node.js binding for kleos (napi-rs); used by the `kleos` TypeScript SDK in sdk/ts"
+authors = ["Ziyang Hu", "kleos contributors"]
 license = "MPL-2.0"
 homepage = "https://github.com/websines/kleos-db"
 repository = "https://github.com/websines/kleos-db"
-documentation = "https://docs.cozodb.org"
 edition = "2021"
-exclude = ["index.node"]
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [features]
-#! # Features
-
-## Enables the `minimal`, `requests` and `graph-algo` features
-compact = ["minimal", "requests", "graph-algo"]
-## Enables the `storage-sqlite` and `graph-algo` features
-mobile = ["storage-sqlite", "graph-algo"]
-## Enables the `minimal`, `requests` and `graph-algo` features in single threaded mode
-compact-single-threaded = ["minimal", "requests", "graph-algo"]
-## Enables the `storage-sqlite` feature
-minimal = ["storage-sqlite"]
-## Enables the [Sqlite](https://www.sqlite.org/index.html) backend, also allows backup and restore with Sqlite data files.
-storage-sqlite = ["kleos/storage-sqlite"]
-## Enables the [RocksDB](http://rocksdb.org/) backend
+default = ["compact"]
+## SQLite storage, web requests and graph algorithms (the default build)
+compact = ["kleos/compact"]
+## RocksDB storage backend
 storage-rocksdb = ["kleos/storage-rocksdb"]
-## Enables the graph algorithms
-graph-algo = ["kleos/graph-algo"]
-## Allows the utilities to make web requests to fetch data
-requests = ["kleos/requests"]
-## Uses jemalloc as the global allocator, can make a difference in performance
-jemalloc = ["kleos/jemalloc"]
-## Enables io-uring option for the RocksDB storage
-io-uring = ["kleos/io-uring"]
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+## Built-in models (embedders, decider, GLiNER), CPU
+infer = ["kleos/infer"]
+## Built-in models with Metal and Accelerate (Apple silicon)
+infer-metal = ["kleos/infer-metal"]
+## Documents through remember (OCR, chunking)
+docs = ["kleos/docs"]
+## Engram overlays
+engram = ["kleos/engram"]
 
 [dependencies]
 kleos = { version = "0.18.0", path = "../kleos-core", default-features = false }
-lazy_static = "1.4.0"
-crossbeam = "0.8.4"
 miette = "5.10.0"
 serde_json = "1.0.116"
-rayon = "1.10.0"
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
 
-[dependencies.neon]
-version = "0.10"
-default-features = false
-features = ["napi-6", "channel-api"]
+[build-dependencies]
+napi-build = "2"
+
+[patch.crates-io]
+candle-metal-kernels = { path = "../third_party/candle-metal-kernels" }
