@@ -156,13 +156,25 @@ fn register_gemma(
     dim: Option<usize>,
     spec: EmbedderSpec,
 ) -> Result<()> {
+    // one model object per (repo, engine) in the process: several stores or
+    // enables share its weights, gate and batcher
+    let key = format!(
+        "{}|{repo}|{}|{:?}|{}|{}",
+        if is_v2(repo) { "gemma2" } else { "gemma" },
+        engine.precision.name(),
+        engine.device,
+        engine.max_seq_len,
+        engine.max_batch_tokens
+    );
     let (doc, query, kind): (Arc<dyn Embedder>, Arc<dyn Embedder>, &'static str) = if is_v2(repo) {
-        let model = Egemma2Model::new(repo, engine.clone()).map_err(|e| miette!("{e}"))?;
+        let model = kleos_infer::budget::shared(&key, || Egemma2Model::new(repo, engine.clone()))
+            .map_err(|e| miette!("{e}"))?;
         let doc = model.embedder(EGEMMA2_DOCUMENT_PROMPT, dim).map_err(|e| miette!("{e}"))?;
         let query = model.embedder(EGEMMA2_QUERY_PROMPT, dim).map_err(|e| miette!("{e}"))?;
         (Arc::new(Gemma2Adapter(doc)), Arc::new(Gemma2Adapter(query)), "gemma2")
     } else {
-        let model = GemmaModel::new(repo, engine.clone()).map_err(|e| miette!("{e}"))?;
+        let model = kleos_infer::budget::shared(&key, || GemmaModel::new(repo, engine.clone()))
+            .map_err(|e| miette!("{e}"))?;
         let doc = model.embedder(GEMMA_DOCUMENT_PROMPT, dim).map_err(|e| miette!("{e}"))?;
         let query = model.embedder(GEMMA_QUERY_PROMPT, dim).map_err(|e| miette!("{e}"))?;
         (Arc::new(GemmaAdapter(doc)), Arc::new(GemmaAdapter(query)), "gemma")

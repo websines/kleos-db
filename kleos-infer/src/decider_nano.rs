@@ -36,7 +36,9 @@
 //! Inputs are never truncated: a request whose state + question + longest
 //! option exceeds 8 192 tokens is an error, as in the reference.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use crate::budget::{self, ModelSlot};
 
 use candle_core::{DType, Device, Tensor, D};
 use serde::Deserialize;
@@ -69,6 +71,9 @@ struct RopeParams {
 #[derive(Debug, Clone, Deserialize)]
 struct Config {
     hidden_size: usize,
+    /// MLP width (only sizes the activation estimate).
+    #[serde(default)]
+    intermediate_size: usize,
     num_hidden_layers: usize,
     num_attention_heads: usize,
     #[serde(default = "default_eps")]
@@ -152,8 +157,8 @@ pub struct DeciderNano {
     weights_version: String,
     cfg: Config,
     engine: EngineConfig,
-    weights: Mutex<Option<Arc<Weights>>>,
-    run: Mutex<()>,
+    /// Weights, device gate and budget bookkeeping.
+    weights: ModelSlot<Weights>,
 }
 
 /// One input row of the encoder: one tokenised request, or several packed
@@ -228,18 +233,13 @@ impl DeciderNano {
             weights_version,
             cfg,
             engine,
-            weights: Mutex::new(None),
-            run: Mutex::new(()),
+            weights: ModelSlot::new(format!("decider:{repo}")),
         })
     }
 
     /// `(device, bytes of weights)` once loaded.
     pub fn loaded_info(&self) -> Option<(&'static str, usize)> {
-        self.weights
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|w| (device_name(&w.device), w.bytes))
+        self.weights.peek().map(|w| (device_name(&w.device), w.bytes))
     }
 
     /// The device the weights live on, once loaded.
@@ -260,13 +260,14 @@ impl DeciderNano {
     }
 
     fn weights(&self) -> Result<Arc<Weights>> {
-        let mut g = self.weights.lock().unwrap();
-        if let Some(w) = g.as_ref() {
-            return Ok(w.clone());
-        }
-        let w = Arc::new(self.load()?);
-        *g = Some(w.clone());
-        Ok(w)
+        self.weights.get_or_load(|| self.load(), |w| w.bytes)
+    }
+
+    /// Activation bytes of one forward pass over `n` rows of padded length `l`.
+    fn act_bytes(&self, n: usize, l: usize, dt: DType) -> usize {
+        let c = &self.cfg;
+        let inter = if c.intermediate_size > 0 { c.intermediate_size } else { 4 * c.hidden_size };
+        budget::encoder_activation_bytes(n, l, c.hidden_size, inter, c.num_attention_heads, dt.size_in_bytes(), 3)
     }
 
     fn load(&self) -> Result<Weights> {
@@ -422,19 +423,23 @@ impl DeciderNano {
         lines.sort_by_key(|(r, _)| r.ids.len());
         let mut out: Vec<Option<DecideAnswer>> = vec![None; rows.len()];
         let budget = self.batch_tokens();
-        let _run = self.run.lock().unwrap();
+        let dt = w.dtype;
+        let rows_cap = |l: usize| budget::rows_for(l, budget, |l| self.act_bytes(1, l, dt));
         let mut i = 0;
         while i < lines.len() {
             let mut j = i + 1;
             while j < lines.len() {
                 let l = lines[j].0.ids.len();
                 let n = j - i + 1;
-                if n * l > budget || n * l * l > MAX_MASK_ELEMS {
+                if n * l > budget || n * l * l > MAX_MASK_ELEMS || n > rows_cap(l) {
                     break;
                 }
                 j += 1;
             }
             let batch: Vec<&Row> = lines[i..j].iter().map(|(r, _)| r).collect();
+            let l = batch.iter().map(|r| r.ids.len()).max().unwrap_or(1);
+            // the device, at this thread's priority, with the pass's activations reserved
+            let _run = self.weights.run(self.act_bytes(batch.len(), l, dt));
             let answers = self.forward(&w, &batch, with_features)?;
             let idx = lines[i..j].iter().flat_map(|(_, idx)| idx.iter().copied());
             for (k, a) in idx.zip(answers) {
@@ -629,9 +634,9 @@ impl Decider for DeciderNano {
         with_pool(|| self.decide_inner(reqs, with_features))
     }
     fn is_loaded(&self) -> bool {
-        self.weights.lock().unwrap().is_some()
+        self.weights.is_loaded()
     }
     fn unload(&self) {
-        with_pool(|| *self.weights.lock().unwrap() = None);
+        self.weights.unload();
     }
 }

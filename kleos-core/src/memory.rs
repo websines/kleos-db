@@ -638,6 +638,9 @@ pub struct RememberOpts {
     /// Per-label score thresholds overriding the defaults
     /// (`memory_extract::DEFAULT_THRESHOLDS`).
     pub extract_thresholds: Option<BTreeMap<String, f32>>,
+    /// Model scheduling: `interactive` (default) or `bulk` (background
+    /// ingestion; queued behind interactive calls, never starved).
+    pub priority: Option<String>,
 }
 
 /// Options of [`Db::recall`].
@@ -710,6 +713,8 @@ pub struct RecallOpts {
     pub from: Option<i64>,
     /// Only memories whose validity starts before this time (µs).
     pub to: Option<i64>,
+    /// Model scheduling: `interactive` (default) or `bulk`.
+    pub priority: Option<String>,
     /// `list` (the default: hits) or `context` (a token-budgeted text
     /// block for an LLM reader, [`Db::recall_context`]).
     pub format: Option<String>,
@@ -2731,6 +2736,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         opts: RememberOpts,
         extra: Option<&dyn Fn(&RememberResult) -> (String, Vec<(&'static str, DataValue)>)>,
     ) -> Result<RememberResult> {
+        let _prio = crate::sched::scope(opts.priority.as_deref())?;
         let text = text.trim();
         if text.is_empty() {
             bail!("`remember` needs a non-empty text");
@@ -3256,6 +3262,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// `recall` before the list text is chosen: hits with the claim as
     /// `text`.
     fn recall_hits(&'s self, query: &str, opts: RecallOpts) -> Result<Vec<RecallHit>> {
+        let _prio = crate::sched::scope(opts.priority.as_deref())?;
         let cfg = match self.mem_config()? {
             Some(c) => self.reembed_finish_if_done(c)?,
             None => return Ok(Default::default()),

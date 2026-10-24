@@ -42,6 +42,7 @@
 //! * [`DeciderNano`]: `Mazino0/kleos-decider-nano` (150M ModernBERT
 //!   joint cross-encoder; one logit per option, tree-attention shared state).
 
+pub mod budget;
 mod decide;
 mod decider_nano;
 mod device;
@@ -52,6 +53,7 @@ mod gemma;
 mod gliner;
 mod hub;
 mod linear;
+pub mod sched;
 mod static_embed;
 
 pub use decide::{softmax, DecideAnswer, DecideRequest, Decider};

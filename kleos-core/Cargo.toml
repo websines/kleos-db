@@ -240,6 +240,8 @@ env_logger = "0.11.3"
 # are not registered below, and `autobenches = false` in [package] keeps a
 # bare `cargo bench` from tripping over them).
 criterion = { version = "0.5", features = ["html_reports"] }
+# concurrency_bench: process footprint (proc_pid_rusage)
+libc = "0.2"
 
 # kleos fork perf baselines (stable, self-contained synthetic data).
 [[test]]
@@ -260,6 +262,10 @@ required-features = ["infer"]
 
 [[example]]
 name = "memory_scenario"
+required-features = ["infer"]
+
+[[example]]
+name = "concurrency_bench"
 required-features = ["infer"]
 
 [[bench]]

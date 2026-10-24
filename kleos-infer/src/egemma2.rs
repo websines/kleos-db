@@ -23,13 +23,15 @@
 //! ends with a PLE block and a learned scalar.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Tensor};
 use serde::Deserialize;
 use tokenizers::{Tokenizer, TruncationParams};
 
+use crate::budget::{self, ModelSlot};
 use crate::device::device_name;
+use crate::sched::{current_priority, BatchFns, Batcher};
 use crate::error::tok_err;
 use crate::gemma::with_pool;
 use crate::linear::{Embedding, Linear, Loader, TensorFile};
@@ -118,8 +120,10 @@ pub struct Egemma2Model {
     repo: String,
     cfg: TextConfig,
     engine: EngineConfig,
-    weights: Mutex<Option<Arc<Weights>>>,
-    run: Mutex<()>,
+    /// Weights, device gate and budget bookkeeping.
+    weights: ModelSlot<Weights>,
+    /// Batches rows across concurrent callers.
+    batcher: Batcher<Vec<u32>>,
 }
 
 impl Egemma2Model {
@@ -141,8 +145,8 @@ impl Egemma2Model {
             repo: repo.to_string(),
             cfg,
             engine,
-            weights: Mutex::new(None),
-            run: Mutex::new(()),
+            weights: ModelSlot::new(format!("embedder:{repo}")),
+            batcher: Batcher::new(),
         }))
     }
 
@@ -173,31 +177,32 @@ impl Egemma2Model {
 
     /// Drop the weights (they load again on next use).
     pub fn unload(&self) {
-        with_pool(|| *self.weights.lock().unwrap() = None);
+        self.weights.unload();
     }
 
     /// Whether the weights are in memory.
     pub fn is_loaded(&self) -> bool {
-        self.weights.lock().unwrap().is_some()
+        self.weights.is_loaded()
     }
 
     /// `(device, bytes of weights)` once loaded.
     pub fn loaded_info(&self) -> Option<(&'static str, usize)> {
-        self.weights
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|w| (device_name(&w.device), w.bytes))
+        self.weights.peek().map(|w| (device_name(&w.device), w.bytes))
     }
 
     fn weights(&self) -> Result<Arc<Weights>> {
-        let mut g = self.weights.lock().unwrap();
-        if let Some(w) = g.as_ref() {
-            return Ok(w.clone());
-        }
-        let w = Arc::new(self.load()?);
-        *g = Some(w.clone());
-        Ok(w)
+        self.weights.get_or_load(|| self.load(), |w| w.bytes)
+    }
+
+    /// Activation bytes of one forward pass over `n` rows of padded length `l`:
+    /// counted at the widest attention projection (4 heads × 512 on the full
+    /// layers), plus the masks and the per-layer-embedding signal.
+    fn act_bytes(&self, n: usize, l: usize, dt: DType) -> usize {
+        let c = &self.cfg;
+        let wide = c.hidden_size.max(c.num_attention_heads * 512);
+        budget::encoder_activation_bytes(n, l, wide, 2048, c.num_attention_heads, dt.size_in_bytes(), 2)
+            + 2 * 2 * n * l * l * 4
+            + 2 * n * l * c.num_hidden_layers * c.hidden_size_per_layer_input * 4
     }
 
     fn layer_shape(&self, i: usize) -> (usize, usize) {
@@ -283,24 +288,20 @@ impl Egemma2Model {
     fn embed_full_inner(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let w = self.weights()?;
         let encs = w.tokenizer.encode_batch(texts.to_vec(), true).map_err(tok_err)?;
-        let ids: Vec<&[u32]> = encs.iter().map(|e| e.get_ids()).collect();
-        let mut order: Vec<usize> = (0..ids.len()).collect();
-        order.sort_by_key(|&i| std::cmp::Reverse(ids[i].len()));
-        let mut out = vec![Vec::new(); ids.len()];
-        let budget = self.engine.max_batch_tokens.max(1);
-        let mut start = 0;
-        let _run = self.run.lock().unwrap();
-        while start < order.len() {
-            let longest = ids[order[start]].len().max(1);
-            let n = (budget / longest).clamp(1, order.len() - start);
-            let batch = &order[start..start + n];
-            let vecs = self.forward(&w, batch.iter().map(|&i| ids[i]).collect())?;
-            for (&i, v) in batch.iter().zip(vecs) {
-                out[i] = v;
-            }
-            start += n;
-        }
-        Ok(out)
+        let rows: Vec<Vec<u32>> = encs.into_iter().map(|e| e.get_ids().to_vec()).collect();
+        // rows from concurrent callers share forward passes (sched.rs); each
+        // pass fits the token budget and the activation cap (budget.rs)
+        let _hold = self.weights.hold();
+        let dt = w.dtype;
+        let max_tokens = self.engine.max_batch_tokens.max(1);
+        let max_rows = |l: usize| budget::rows_for(l, max_tokens, |l| self.act_bytes(1, l, dt));
+        let act = |n: usize, l: usize| self.act_bytes(n, l, dt);
+        let forward = |batch: &[&Vec<u32>]| self.forward(&w, batch.iter().map(|r| r.as_slice()).collect());
+        let after = || {
+            let _ = w.device.synchronize();
+        };
+        let fns = BatchFns { max_rows: &max_rows, act_bytes: &act, forward: &forward, after: &after, gate: self.weights.gate() };
+        self.batcher.run(rows, current_priority(), &fns)
     }
 
     /// Token ids as this model feeds them (for tests).

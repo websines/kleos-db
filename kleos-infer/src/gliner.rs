@@ -41,6 +41,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::budget::{self, ModelSlot};
+
 use candle_core::{DType, Device, Tensor};
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -72,6 +74,9 @@ const MAX_ATTN_ELEMS: usize = 1 << 25;
 #[derive(Debug, Clone, Deserialize)]
 struct EncoderConfig {
     hidden_size: usize,
+    /// MLP width (only sizes the activation estimate).
+    #[serde(default)]
+    intermediate_size: usize,
     num_hidden_layers: usize,
     num_attention_heads: usize,
     layer_norm_eps: f64,
@@ -459,8 +464,8 @@ pub struct Gliner {
     repo: String,
     cfg: Config,
     engine: EngineConfig,
-    weights: Mutex<Option<Arc<Weights>>>,
-    run: Mutex<()>,
+    /// Weights, device gate and budget bookkeeping.
+    weights: ModelSlot<Weights>,
 }
 
 impl Gliner {
@@ -484,8 +489,7 @@ impl Gliner {
             repo: repo.to_string(),
             cfg,
             engine,
-            weights: Mutex::new(None),
-            run: Mutex::new(()),
+            weights: ModelSlot::new(format!("extractor:{repo}")),
         })
     }
 
@@ -501,27 +505,29 @@ impl Gliner {
 
     /// `(device, bytes of weights)` once loaded.
     pub fn loaded_info(&self) -> Option<(&'static str, usize)> {
-        self.weights.lock().unwrap().as_ref().map(|w| (device_name(&w.device), w.bytes))
+        self.weights.peek().map(|w| (device_name(&w.device), w.bytes))
     }
 
     /// Whether the weights are in memory.
     pub fn is_loaded(&self) -> bool {
-        self.weights.lock().unwrap().is_some()
+        self.weights.is_loaded()
     }
 
     /// Drop the weights (they reload on the next call).
     pub fn unload(&self) {
-        with_pool(|| *self.weights.lock().unwrap() = None);
+        self.weights.unload();
     }
 
     fn weights(&self) -> Result<Arc<Weights>> {
-        let mut g = self.weights.lock().unwrap();
-        if let Some(w) = g.as_ref() {
-            return Ok(w.clone());
-        }
-        let w = Arc::new(with_pool(|| self.load())?);
-        *g = Some(w.clone());
-        Ok(w)
+        self.weights.get_or_load(|| with_pool(|| self.load()), |w| w.bytes)
+    }
+
+    /// Activation bytes of one encoder pass over `n` rows of padded length
+    /// `l` (DeBERTa's disentangled attention adds c2p and p2c maps).
+    fn act_bytes(&self, n: usize, l: usize, dt: DType) -> usize {
+        let e = &self.cfg.encoder_config;
+        let inter = if e.intermediate_size > 0 { e.intermediate_size } else { 4 * e.hidden_size };
+        budget::encoder_activation_bytes(n, l, e.hidden_size, inter, e.num_attention_heads, dt.size_in_bytes(), 4)
     }
 
     fn load(&self) -> Result<Weights> {
@@ -832,19 +838,23 @@ impl Gliner {
         let budget = self.batch_tokens();
         let heads = self.cfg.encoder_config.num_attention_heads;
         let mut out: Vec<Vec<GlinerSpan>> = vec![vec![]; inputs.len()];
-        let _run = self.run.lock().unwrap();
+        let dt = DType::F32; // conservative: f32 attention maps and LayerNorms
+        let rows_cap = |l: usize| budget::rows_for(l, budget, |l| self.act_bytes(1, l, dt));
         let mut i = 0;
         while i < order.len() {
             let mut j = i + 1;
             while j < order.len() {
                 let l = inputs[order[j]].ids.len();
                 let n = j - i + 1;
-                if n * l > budget || n * heads * l * l > MAX_ATTN_ELEMS {
+                if n * l > budget || n * heads * l * l > MAX_ATTN_ELEMS || n > rows_cap(l) {
                     break;
                 }
                 j += 1;
             }
             let rows: Vec<&GlinerInput> = order[i..j].iter().map(|&k| &inputs[k]).collect();
+            let l = rows.iter().map(|r| r.ids.len()).max().unwrap_or(1);
+            // the device, at this thread's priority, with the pass's activations reserved
+            let _run = self.weights.run(self.act_bytes(rows.len(), l, dt));
             let hidden = self.encode(&w, &rows)?;
             for (r, &k) in order[i..j].iter().enumerate() {
                 let inp = &inputs[k];
