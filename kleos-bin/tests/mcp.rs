@@ -89,7 +89,7 @@ fn tools_list_is_deterministic_and_cacheable() {
     let (b, _) = call(&s, &mut c, req(2, "tools/list", json!({}), json!({})));
     assert_eq!(a["result"]["tools"], b["result"]["tools"]);
     let names: Vec<&str> = a["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "ontology", "reembed", "branch", "query"]);
+    assert_eq!(names, ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "ontology", "reembed", "consolidate", "branch", "query"]);
     assert!(a["result"]["ttlMs"].as_u64().is_some());
     assert_eq!(a["result"]["cacheScope"], "private");
     for t in a["result"]["tools"].as_array().unwrap() {
@@ -99,7 +99,7 @@ fn tools_list_is_deterministic_and_cacheable() {
     // without --allow-query the query tool is absent and refused
     let s2 = McpServer::new(Backend::open("mem", "").unwrap(), "default", false);
     let (r, _) = call(&s2, &mut c, req(3, "tools/list", json!({}), json!({})));
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 12);
     let (r, st) = call(&s2, &mut c, req(4, "tools/call", json!({"name": "query", "arguments": {"script": "?[x] := x = 1"}}), json!({})));
     assert_eq!((r["error"]["code"].as_i64(), st), (Some(-32602), 400));
 }
@@ -277,7 +277,7 @@ fn legacy_initialize_clients() {
     let (r, _) = call(&s, &mut c, json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}));
     assert!(r["result"].is_object());
     let (r, _) = call(&s, &mut c, json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}));
-    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 13);
     let (r, _) = call(&s, &mut c, json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "remember", "arguments": {"text": "Legacy clients still work."}}}));
     assert!(r["result"]["structuredContent"]["id"].is_string(), "{r}");
     // an unknown legacy version negotiates down to the newest legacy one
@@ -316,4 +316,21 @@ fn ontology_and_reembed_tools() {
     // reembed to an embedder that is not enabled is a tool error, not a protocol error
     let r = tool(&s, &mut c, "reembed", json!({"embedder": "nope", "ns": "o1"}));
     assert_eq!(r["isError"], true, "{r}");
+    // consolidate: a task for clients with tasks, which completes via the worker
+    let (r, _) = call(&s, &mut c, req(10, "tools/call", json!({"name": "consolidate", "arguments": {"ns": "o1"}}), json!({"extensions": {"io.modelcontextprotocol/tasks": {}}})));
+    let res = &r["result"];
+    if res["resultType"] == "task" {
+        let id = res["taskId"].as_str().unwrap().to_string();
+        let mut st = String::new();
+        for _ in 0..100 {
+            let (g, _) = call(&s, &mut c, req(11, "tasks/get", json!({"taskId": id}), json!({"extensions": {"io.modelcontextprotocol/tasks": {}}})));
+            st = g["result"]["status"].as_str().unwrap_or_default().to_string();
+            assert!(!st.is_empty(), "{g}");
+            if st != "working" { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(st == "completed" || st == "failed", "{st}");
+    } else {
+        assert!(res.get("isError").is_none() || res["isError"] == true, "{r}");
+    }
 }

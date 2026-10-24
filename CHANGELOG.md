@@ -16,7 +16,7 @@ to kleos.
 - **TypeScript SDK:** `hybridSearch`, `decide`, `exportRelations`/`importRelations`, `backup`/`restore`/`importFromBackup` (native `admin_call`; remote maps export/import/backup to the server routes).
 - **Documents by URL** (feature `docs-url`, off by default): `remember` attachments accept `http(s)` URLs, with public-address checks on every redirect hop, a 100 MB cap, timeouts and a document content-type check; the URL is kept in the document's metadata.
 - **Documents:** with an extractor configured, document chunks get entities (mentions, resolution, merges) in their batch's transaction; no kinship edges from documents.
-- **MCP:** `ontology` tool (list, facts, infer, learn, history, undo with confirmation) and `reembed` tool returning a task.
+- **MCP:** `ontology` tool (list, facts, infer, learn, history, undo with confirmation), and `reembed` and `consolidate` tools returning tasks (an in-process worker runs them for embedded stores).
 - **Graph recall** (docs/specs/memory-api.md, "Graph recall"; `kleos-core/src/memory_graph.rs`).
   - `recall {graph: 'inferred'}` pulls in memories linked to the question's nodes ("my", "my sister", names) and the top hits' subjects through the ontology's facts, inferred ones included ("Who are my relatives?" reaches the family through the new `relative_of` super-property). Hits say why (`via: "inferred: relative_of"`), in the list and the context block.
   - `recall {graph: 'ppr', graph_weight}` re-ranks with a personalized PageRank (HippoRAG 2) over the memory / entity / ontology-node neighbourhood of the hits: the pool seeds the walk by relevance, hub entities and nodes are cut, at most 2,000 memories; it also runs the inferred expansion.
