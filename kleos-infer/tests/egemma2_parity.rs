@@ -36,8 +36,14 @@ fn egemma2_matches_sentence_transformers() {
     let mut engine = EngineConfig::default();
     engine.precision = Precision::parse(&prec).unwrap();
     engine.device = DevicePref::parse(&dev).unwrap();
-    engine.max_seq_len = r["max_seq_length"].as_u64().unwrap_or(8192) as usize;
+    // the reference does not truncate; compare texts that fit 8192 tokens
+    engine.max_seq_len = 8192;
     let model = Egemma2Model::new(EGEMMA2_REPO, engine).unwrap();
+    let keep: Vec<usize> = (0..texts.len())
+        .filter(|&i| model.token_ids(&format!("{EGEMMA2_QUERY_PROMPT}{}", texts[i])).unwrap().len() < 8192)
+        .collect();
+    let longest = keep.iter().map(|&i| model.token_ids(&format!("{EGEMMA2_QUERY_PROMPT}{}", texts[i])).unwrap().len()).max().unwrap();
+    println!("{} of {} texts fit 8192 tokens (longest kept: {longest})", keep.len(), texts.len());
     // token ids as sentence-transformers fed them
     for (i, want) in r["ids_document_first6"].as_array().unwrap().iter().enumerate() {
         let want: Vec<u32> = want.as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect();
@@ -47,13 +53,14 @@ fn egemma2_matches_sentence_transformers() {
     let floor = if prec == "f32" { 0.9999 } else { 0.999 };
     for (kind, prompt) in [("document", EGEMMA2_DOCUMENT_PROMPT), ("query", EGEMMA2_QUERY_PROMPT)] {
         let e = model.embedder(prompt, None).unwrap();
-        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = keep.iter().map(|&i| texts[i].as_str()).collect();
         let t0 = std::time::Instant::now();
         let got = e.embed(&refs).unwrap();
         let secs = t0.elapsed().as_secs_f64();
         let mut worst = (1.0f64, 0usize);
         let mut sum = 0f64;
-        for (i, g) in got.iter().enumerate() {
+        for (j, g) in got.iter().enumerate() {
+            let i = keep[j];
             let want: Vec<f32> = r[kind][i].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect();
             let c = cos(g, &want);
             sum += c;

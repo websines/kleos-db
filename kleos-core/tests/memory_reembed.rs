@@ -110,7 +110,7 @@ fn reembed_moves_every_vector_and_switches_once() {
     assert_eq!(assert_vectors(&db, &A), 70);
     let r = db.memory_call("reembed", json!({"embedder": "re_b", "batch": 16})).unwrap();
     assert_eq!(r["status"], "completed", "{r}");
-    assert_eq!(r["output"], json!(70));
+    assert_eq!(r["embedded"], json!(70));
     assert_eq!(config(&db, "embedder").as_deref(), Some("re_b"));
     assert_eq!(config(&db, "embedder_model").as_deref(), Some("words-b"));
     assert_eq!(config(&db, "reembed"), None);
@@ -217,7 +217,7 @@ fn reembed_resumes_after_its_process_dies() {
         .memory_call("reembed", json!({"embedder": "re_b", "batch": 25}))
         .unwrap();
     assert_eq!(r["status"], "completed", "{r}");
-    assert_eq!(r["output"], json!(401));
+    assert_eq!(r["embedded"], json!(401));
     assert_eq!(assert_vectors(&db, &B), 401);
     assert_eq!(config(&db, "embedder_model").as_deref(), Some("words-b"));
     drop(db);

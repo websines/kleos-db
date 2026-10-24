@@ -1149,6 +1149,9 @@ pub struct MemConfig {
     /// recorded (their gemma vectors are EmbeddingGemma v1's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedder_model: Option<String>,
+    /// A re-embed in progress (JSON record; see memory_reembed.rs).
+    #[serde(skip)]
+    pub(crate) reembed: Option<String>,
     /// Default decider.
     pub decider: Option<String>,
     /// Entity extractor for automatic entities.
@@ -1366,6 +1369,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             match r[0].get_str() {
                 Some("embedder") => cfg.embedder = v,
                 Some("embedder_model") => cfg.embedder_model = v,
+                Some("reembed") => cfg.reembed = v,
                 Some("decider") => cfg.decider = v,
                 Some("extractor") => cfg.extractor = v.filter(|x| !x.is_empty()),
                 Some("dim") => cfg.dim = v.and_then(|x| x.parse().ok()),
@@ -1670,6 +1674,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     fn mem_ready(&'s self, embedder_hint: Option<&str>) -> Result<MemConfig> {
         match self.mem_config()? {
             Some(c) => {
+                let c = self.reembed_finish_if_done(c)?;
                 check_store_model(&c)?;
                 Ok(c)
             }
@@ -3252,9 +3257,10 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// `text`.
     fn recall_hits(&'s self, query: &str, opts: RecallOpts) -> Result<Vec<RecallHit>> {
         let cfg = match self.mem_config()? {
-            Some(c) => c,
+            Some(c) => self.reembed_finish_if_done(c)?,
             None => return Ok(Default::default()),
         };
+        check_store_model(&cfg)?;
         let ns = ns_of(&opts.ns);
         let sc = self.mem_scope(&ns)?;
         let w = opts.vector_weight.unwrap_or(DEFAULT_VECTOR_WEIGHT);
