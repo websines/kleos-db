@@ -897,3 +897,13 @@ questions, QA on the usual 301. LongMemEval: the 119-question set. Results:
   2 s each), with no LLM.
 - **Quota:** about 1.1 points of the weekly plan for all QA in this section
   (99.31% → 98.18% remaining).
+
+
+## Fusion weight, prompts and ontology quality (wave6/quality)
+
+*Retrieval sweeps on branch commit 4fdeaa1 builds (before the main merges); final checks on the merge of main 7d6b970 + graph defaults (PPR on); GLM-4.7-Flash reader/judge.*
+
+- **Fusion weight (split-half: picked on half the conversations, reported on the other):** LoCoMo R@5 at 0.6 / 0.9 / vector-only — v1 0.692 / 0.738 / 0.773, v2 0.628 / 0.667 / 0.656. LongMemEval-119: 0.9 keeps R@5 = 1.000 and has the best NDCG@10 (v1 0.977, v2 0.966); vector-only loses one question. **Default is now 0.9** for recall; `remember`'s candidate search keeps 0.6.
+- **On the merged build (FTS fix, graph PPR default):** LoCoMo R@5 v1 0.701 → 0.745, v2 0.650 → 0.673 (0.6 → 0.9). **v2 LoCoMo QA (301): 0.787 → 0.827** (0.6 → 0.9), 0.3 quota points.
+- **v2 prompts (LoCoMo R@5 at 0.9):** search-result 0.667 (default), question-answering 0.653, fact-checking 0.645, symmetric sentence-similarity 0.686 (vector-only 0.710) but −1 LongMemEval question and lower NDCG; not adopted (it changes document vectors, which stores do not record).
+- **Ontology (merge of main with PPR on):** 180-pair audit allowed v1 7 / v2 13 (unchanged); LoCoMo end to end (3 conversations, decider on) auto-supersedes v1 2 / v2 4, pending 739 / 701; life stream v1 13/0/2, v2 12/1/3; KU latest-first (hide-pending) v1 78% (87%), v2 74% (82%) — v2 is 83% (91%) with `graph: 'off'`, so the drop comes from the PPR default, not this branch; v1 is 78% with candidate search at 0.6 too (rerun after the candidate-weight fix was cut short: v1 0.783 / 0.87, v2 and life not rerun).
