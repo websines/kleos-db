@@ -64,3 +64,57 @@ projection to 12,288 per token and a third residual block per layer. On the
 CPU it is about 2× v1 at batch 1. The first load from a cold page cache read the
 text tensors (~540 MB of bf16) over this machine's USB 2.0 disk link in 18 s;
 warm loads take 0.6 s.
+
+## Memory benchmarks: v2 against v1
+
+One build (`wave5/egemma2` at 8436903 + harness), the same harness, reader and
+judge (GLM-4.7-Flash), shipped recall defaults, `q8` on Metal; only the
+embedder differs (`KLEOS_EMBED_MODEL`).
+
+**Retrieval** (`retrieval.py --variant hybrid --configs default`):
+
+| bench | split | v1 R@5 | v2 R@5 | v1 R@10 | v2 R@10 |
+|---|---|---|---|---|---|
+| LoCoMo (10 conversations, 1,536 questions, cat 1–4) | all | **0.693** | 0.629 | **0.779** | 0.705 |
+| | multi-hop | 0.652 | 0.553 | 0.759 | 0.674 |
+| | temporal | 0.766 | 0.707 | 0.850 | 0.748 |
+| | open-domain | 0.467 | 0.370 | 0.587 | 0.478 |
+| | single-hop | 0.703 | 0.653 | 0.780 | 0.724 |
+| LongMemEval 119 | all | 0.992 | 1.000 | 1.000 | 1.000 (Rall@10 0.966 vs 0.958) |
+
+**Is it the model or kleos's fusion?** The same LoCoMo stores with other
+fusion weights (`vector_weight`; 0.6 is the default):
+
+| weight | v1 R@5 / R@10 | v2 R@5 / R@10 |
+|---|---|---|
+| vector only (1.0) | **0.775 / 0.847** | 0.658 / 0.748 |
+| 0.8 | 0.716 / 0.794 | 0.653 / 0.725 |
+| 0.6 (default) | 0.695 / 0.777 | 0.632 / 0.705 |
+| 0.4 | 0.654 / 0.745 | 0.626 / 0.705 |
+
+v2's vector leg alone is 12 points behind v1's on LoCoMo: the gap is the
+model on this conversational data, not the fusion weights. (Separately: for
+v1, vector-only beats the default hybrid by 8 points R@5 on LoCoMo. The 0.6
+weight was tuned on SciFact; worth re-tuning on memory data.)
+
+**QA, context output** (`qa.py --conditions ctx:hybrid+default`):
+
+| bench | v1 | v2 |
+|---|---|---|
+| LoCoMo 301 | **0.814** | 0.738 |
+| — multi-hop (55) | 0.818 | 0.673 |
+| — temporal (63) | 0.746 | 0.667 |
+| — open-domain (19) | 0.737 | 0.526 |
+| — single-hop (164) | 0.848 | 0.811 |
+| LongMemEval 119 | 0.664 | 0.664 |
+| — knowledge-update (32) | 0.812 | 0.844 |
+
+**Knowledge-update latest-first** (23 held-out questions, decider on,
+`claims_ku.py`): v1 83% (91% with `hide_pending`), v2 78% (91%).
+
+**Verdict:** on kleos's memory benchmarks EmbeddingGemma 2 is worse than v1
+on LoCoMo (−6 R@5, −7.6 QA points) and level on LongMemEval. Its advantages
+are the licence (Apache-2.0, not gated), less memory, 8k context, much better
+code retrieval (card: MTEB code 78.7 vs 68.8) and multimodality. Prompt
+variants for questions (e.g. `task: question answering | query: `) were not
+tried. Quota: about 0.24 points of the weekly plan (95.87% → 95.63%).
