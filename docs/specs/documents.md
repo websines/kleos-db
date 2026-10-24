@@ -262,3 +262,103 @@ ones as shifted multiply-adds), with tract kept as the reference.
   re-embedded only the new one.
 - **Peak RSS:** 0.96 GB.
 
+### Big PDFs, end to end (`scripts/docs/bigpdf_bench.py`)
+
+Two books went through `remember` in fresh stores. Each ingested as a durable
+background workflow in batches of 8 pages, with 4 page workers, the Metal
+embedder and `KLEOS_MEMORY_BUDGET=6G`. Load average was about 5–9. Sources
+and licences are in `.bench-data/docs/bigpdf/SOURCES.md`:
+- *The 9/11 Commission Report*: govinfo.gov, US government work, public domain.
+- *Zenobia, Queen of Palmyra*: Internet Archive scan, pre-1929, public domain.
+
+| | 9/11 Report (digital, 585 pp.) | Zenobia (scanned, 500 pp.) |
+|---|---|---|
+| `remember` returned | 0.39 s (`running`) | 1.28 s (`running`) |
+| first chunk recallable | 0.7 s | 1.3 s |
+| done | 425 s (**1.38 pages/s**) | 590 s (**0.85 pages/s**) |
+| chunks | 1,663 | 802 |
+| page kinds | 585 text layer | 500 OCR (the IA text layer is invisible, so OCR runs) |
+| extraction wall (pages, layout, chunking) | 87 s | 414 s |
+| embedding wall | 221 s | 99 s |
+| peak RSS | 1.76 GB | 2.78 GB |
+| recall hit@5 (10 questions with known pages) | **10/10** | **10/10** |
+
+Summed per-page stage times, across the four workers (seconds):
+
+| Stage | 9/11 Report | Zenobia |
+|---|---|---|
+| render | 4.9 | 120 |
+| text layer | 4.1 | 0 |
+| orientation | 3.4 | 283 |
+| detection | 265 | 187 |
+| recognition | 2.1 | 934 |
+| reading order | 4.5 | 2.4 |
+
+**Bottlenecks:**
+- **Digital books: embedding.** EmbeddingGemma takes about 0.13 s per
+  1,500-character chunk on Metal and about 1.35 s on CPU. The same 9/11 run
+  with the CPU embedder took 2,462 s, with 2,240 s of it embedding.
+- **Scans: recognition.** See "OCR speed" above.
+- **Batch barrier.** In the pipeline, Zenobia's OCR ran at 1.2 pages/s
+  against 2.36 when it runs alone: a batch of 8 pages on 4 workers leaves
+  workers idle at each batch boundary, and embedding runs between batches,
+  not alongside OCR.
+
+**Next steps for the pipeline:**
+- larger batches;
+- embedding that overlaps the next batch's OCR;
+- a faster CPU path for the models (see "OCR speed").
+
+**Kill and resume (Zenobia):**
+- The ingesting process was killed with SIGKILL after 32 of 63 committed
+  batches, 285 s in, with 412 chunks stored.
+- A new process opened the store, and its first `recall` started the
+  worker. The first new batch committed 50 s later: the 30 s lease plus
+  model loads.
+- The book was done 306 s after reopening.
+- Result: 802 chunks, the same as the uninterrupted run. 802 provenance rows
+  and 802 memories, chunk numbers contiguous from 0, no duplicate ids, each
+  of the 63 batch steps recorded once.
+
+**Bug found and fixed:** a bounded change subscription that nobody reads
+used to block writers. The document worker's own wake-up subscription
+filled up with its own heartbeats, and the 9/11 run hung. Delivery is now
+non-blocking: a full bounded subscription misses changes and gets a
+one-time `callback.lagged` diagnostic. This is covered by
+`callback_commit_contract::full_bounded_subscription_never_blocks_writers`
+and `tests/slow_subscriber.rs`.
+
+### Starting point for a faster CPU path (recognizer)
+
+`rec.onnx` takes `x [B, 1, 96, W]` (a three-line-tall window), `widths
+[B]`, and outputs `ids, conf, lengths, blank, topv, topi` over T = W/4
+steps; the vocabulary is 9,585 tokens.
+- **Typical page:** about 40 lines in 3–4 width batches, the largest being
+  **35×1×96×656** (B ≤ 64 and B·W ≤ 40,960).
+- **Graph:**
+  - stem: a 32×4 stride-(32,4) convolution to 128 channels;
+  - context branch: a 4×4 patch convolution, depthwise 3×3, pointwise 32→64,
+    and softmax pooling over the height, projected to 128;
+  - 10 MBConv-1D blocks: depthwise k=9 at 128 channels, pointwise expand
+    128→256, HardSwish, a masked squeeze-excite 256→64→256, project
+    256→128, residual, and a width mask;
+  - classifier: 1×1 to 9,585, softmax, argmax.
+
+tract's profile of the greedy graph on 35×96×656 (total 492 ms; ONNX Runtime
+takes 180 ms single-threaded):
+
+| op | ms | calls |
+|---|---|---|
+| OptMatMul | 162 | 57 |
+| MoveAxis | 103 | 46 |
+| Im2col | 66 | 13 |
+| Add | 44 | 38 |
+| Mul | 43 | 33 |
+| Softmax | 23 | 1 |
+| Reduce Max / ArgMax / Sum | 25 | 15 |
+
+The full graph adds TopK, 400 ms on the same batch. That is why it now runs
+only for batches the LM reads. Orientation (`orient.onnx`, 1×1×768×768, 94
+ms against ONNX Runtime's roughly 40) and detection (`det.onnx`, 1×1×1024×W,
+115 ms against 49) share the depthwise-convolution pattern.
+`kleos-docs/examples/tract_prof.rs` reproduces these profiles.
