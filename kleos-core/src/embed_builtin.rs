@@ -169,8 +169,12 @@ fn register_gemma(
     let (doc, query, kind): (Arc<dyn Embedder>, Arc<dyn Embedder>, &'static str) = if is_v2(repo) {
         let model = kleos_infer::budget::shared(&key, || Egemma2Model::new(repo, engine.clone()))
             .map_err(|e| miette!("{e}"))?;
-        let doc = model.embedder(EGEMMA2_DOCUMENT_PROMPT, dim).map_err(|e| miette!("{e}"))?;
-        let query = model.embedder(EGEMMA2_QUERY_PROMPT, dim).map_err(|e| miette!("{e}"))?;
+        // prompts per the model card; `KLEOS_EGEMMA2_{DOC,QUERY}_PROMPT`
+        // override them (evaluation only)
+        let dp = std::env::var("KLEOS_EGEMMA2_DOC_PROMPT").unwrap_or_else(|_| EGEMMA2_DOCUMENT_PROMPT.to_string());
+        let qp = std::env::var("KLEOS_EGEMMA2_QUERY_PROMPT").unwrap_or_else(|_| EGEMMA2_QUERY_PROMPT.to_string());
+        let doc = model.embedder(&dp, dim).map_err(|e| miette!("{e}"))?;
+        let query = model.embedder(&qp, dim).map_err(|e| miette!("{e}"))?;
         (Arc::new(Gemma2Adapter(doc)), Arc::new(Gemma2Adapter(query)), "gemma2")
     } else {
         let model = kleos_infer::budget::shared(&key, || GemmaModel::new(repo, engine.clone()))
