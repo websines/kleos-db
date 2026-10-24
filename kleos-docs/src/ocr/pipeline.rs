@@ -239,7 +239,10 @@ fn orient_input(gray: &Gray) -> Vec<f32> {
 
 struct Group {
     name: String,
+    /// greedy outputs only (ids, conf, lengths)
     model: Model,
+    /// every output (with the LM's blank / top-k), for batches the LM reads
+    full: Option<Model>,
     vocab: Vocab,
 }
 
@@ -254,6 +257,7 @@ struct Lm {
 pub struct Ocr {
     det: ShapedModel,
     rec: Model,
+    rec_full: Option<Model>,
     order: Option<Model>,
     orient: Option<Model>,
     script: Option<Model>,
@@ -293,7 +297,7 @@ impl Ocr {
         let meta: serde_json::Value = serde_json::from_str(&meta_s).map_err(|e| ModelError::Load("meta.json".into(), e.to_string()))?;
         let vocab = Vocab::from_json(meta["vocab"].as_str().unwrap_or("")).map_err(|e| ModelError::Load("meta.json".into(), e))?;
         let det = ShapedModel::load(&need("det.onnx")?)?;
-        let rec = Model::load(&need("rec.onnx")?)?;
+        let rec = Model::load_outputs(&need("rec.onnx")?, Some(3))?;
         let order = opt("order.onnx").map(|p| Model::load(&p)).transpose()?;
         let orient = opt("orient.onnx").map(|p| Model::load(&p)).transpose()?;
         let mut groups = vec![];
@@ -302,7 +306,7 @@ impl Ocr {
                 let g = &k["vocab_".len()..];
                 if let Some(p) = opt(&format!("rec_{g}.onnx")) {
                     let v = Vocab::from_json(obj[k].as_str().unwrap_or("")).map_err(|e| ModelError::Load(k.clone(), e))?;
-                    groups.push(Group { name: g.to_string(), model: Model::load(&p)?, vocab: v });
+                    groups.push(Group { name: g.to_string(), model: Model::load_outputs(&p, Some(3))?, full: None, vocab: v });
                 }
             }
         }
@@ -324,9 +328,17 @@ impl Ocr {
                 lms.insert(name.clone(), Lm { lm, alpha: g("alpha", LM_ALPHA), beta: g("beta", LM_BETA), gate: g("gate", LM_GATE) });
             }
         }
+        // the full recognizers (with the LM outputs) only where an LM is
+        let rec_full = if lms.contains_key("base") { Some(Model::load(&need("rec.onnx")?)?) } else { None };
+        for g in groups.iter_mut() {
+            if lms.contains_key(&g.name) {
+                g.full = Some(Model::load(&dir.join(format!("rec_{}.onnx", g.name)))?);
+            }
+        }
         Ok(Ocr {
             det,
             rec,
+            rec_full,
             order,
             orient,
             script,
@@ -417,6 +429,13 @@ impl Ocr {
         par_map(&idx, self.threads, |&i| prep::crop_line(gray, &boxes[i][..4], self.height, window, dark.map(|d| d[i])))
     }
 
+    fn full_of(&self, w: Which) -> Option<&Model> {
+        match w {
+            Which::Base => self.rec_full.as_ref(),
+            Which::Group(g) => self.groups[g].full.as_ref(),
+        }
+    }
+
     fn model_of(&self, w: Which) -> &Model {
         match w {
             Which::Base => &self.rec,
@@ -467,6 +486,8 @@ impl Ocr {
     pub fn recognize(&self, gray: &Gray, boxes: &[prep::DetBox], vertical: bool) -> Result<Vec<Rec>, ModelError> {
         let batch = 64;
         let n = boxes.len();
+        let prof = std::env::var("KLEOS_OCR_PROF").is_ok();
+        let tc = std::time::Instant::now();
         let dark: Option<Vec<bool>> = if self.window > 1 { Some(par_map(boxes, self.threads, |b| prep::is_dark_line(gray, &b[..4]))) } else { None };
         let crops = self.crops(gray, boxes, 1, dark.as_deref());
         let tall = if self.window > 1 { Some(self.crops(gray, boxes, self.window, dark.as_deref())) } else { None };
@@ -483,6 +504,10 @@ impl Ocr {
             }
         }
         let mut best_conf = vec![-1f64; n];
+        let (mut t_model, mut t_beam, mut n_beam, mut n_batches) = (0f64, 0f64, 0usize, 0usize);
+        if prof {
+            eprintln!("rec: {n} lines, crops+route {:.0} ms", tc.elapsed().as_secs_f64() * 1000.0);
+        }
         for (which, sel, as_chars) in plan {
             let widths: Vec<usize> = sel.iter().map(|&j| crops[j].1).collect();
             let model = self.model_of(which);
@@ -502,7 +527,32 @@ impl Ocr {
                 let refs: Vec<&(Vec<f32>, usize)> = idx.iter().map(|&j| &src[j]).collect();
                 let (arr, ws, wm) = prep::pad_batch(&refs, hgt);
                 let b = idx.len();
-                let res = model.run(vec![Input::F32(vec![b, 1, hgt, wm], arr), Input::I64(vec![b], ws)])?;
+                let tm = std::time::Instant::now();
+                let inputs = || vec![Input::F32(vec![b, 1, hgt, wm], arr.clone()), Input::I64(vec![b], ws.clone())];
+                let mut res = model.run(inputs())?;
+                // a line the LM must read: the same batch again through the
+                // full graph (its top-k), which the greedy graph leaves out
+                if let (Some(l), Some(full)) = (lm, self.full_of(which)) {
+                    let tt0 = res[0].shape()[1];
+                    let pm0 = res[1].f32();
+                    let ln0 = res[2].i64();
+                    let ids0 = res[0].i64();
+                    let needs = (0..b).any(|k| {
+                        let n = ln0[k] as usize;
+                        let seq = &ids0[k * tt0..k * tt0 + n];
+                        let kept: Vec<f32> = (0..n).filter(|&t| seq[t] != 0 && (t == 0 || seq[t] != seq[t - 1])).map(|t| pm0[k * tt0 + t]).collect();
+                        let c = if kept.is_empty() { 0.0 } else { (kept.iter().sum::<f32>() / kept.len() as f32) as f64 };
+                        MIN_CONF <= c && c < l.gate
+                    });
+                    if needs {
+                        res = full.run(inputs())?;
+                    }
+                }
+                t_model += tm.elapsed().as_secs_f64() * 1000.0;
+                n_batches += 1;
+                if prof {
+                    eprintln!("  batch {b}x{hgt}x{wm}: {:.0} ms", tm.elapsed().as_secs_f64() * 1000.0);
+                }
                 let best = res[0].i64();
                 let tt = res[0].shape()[1];
                 let pmax = res[1].f32();
@@ -530,7 +580,10 @@ impl Ocr {
                             let bk = &bl[k * tt..k * tt + nlen];
                             let tvk: Vec<Vec<f32>> = (0..nlen).map(|t| tv[(k * tt + t) * kk..(k * tt + t + 1) * kk].to_vec()).collect();
                             let tik: Vec<Vec<i64>> = (0..nlen).map(|t| ti[(k * tt + t) * kk..(k * tt + t + 1) * kk].to_vec()).collect();
+                            let tb = std::time::Instant::now();
                             let (bi, steps) = beam_search(bk, &tvk, &tik, &l.lm, l.alpha, l.beta, LM_BEAM, 0.999, LM_CAND_FLOOR);
+                            t_beam += tb.elapsed().as_secs_f64() * 1000.0;
+                            n_beam += 1;
                             ids = bi;
                             ts = steps;
                         }
@@ -548,6 +601,9 @@ impl Ocr {
                     out[j] = if conf >= MIN_CONF { (vocab.decode(&ids), conf, toks) } else { (String::new(), conf, vec![]) };
                 }
             }
+        }
+        if prof {
+            eprintln!("rec: model {t_model:.0} ms in {n_batches} batches, beam {t_beam:.0} ms on {n_beam} lines, total {:.0} ms", tc.elapsed().as_secs_f64() * 1000.0);
         }
         Ok(out)
     }

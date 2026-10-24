@@ -22,10 +22,21 @@ pub enum ModelError {
     Run(String, String),
 }
 
-fn load_symbolic(path: &Path) -> Result<Arc<Plan>, ModelError> {
+fn load_symbolic(path: &Path, keep_outputs: Option<usize>) -> Result<Arc<Plan>, ModelError> {
     let name = path.display().to_string();
     let m = tract_onnx::onnx()
         .model_for_path(path)
+        .and_then(|mut m| {
+            // keep only the first outputs: the graph that only feeds the
+            // others (the recognizers' top-k for the LM) is pruned away
+            if let Some(n) = keep_outputs {
+                let outs = m.output_outlets()?.to_vec();
+                if n < outs.len() {
+                    m.select_output_outlets(&outs[..n])?;
+                }
+            }
+            Ok(m)
+        })
         .and_then(|m| m.into_optimized())
         .and_then(|m| m.into_runnable())
         .map_err(|e| ModelError::Load(name, format!("{e:?}")))?;
@@ -118,7 +129,12 @@ impl Output {
 
 impl Model {
     pub fn load(path: &Path) -> Result<Self, ModelError> {
-        let plan = load_symbolic(path)?;
+        Self::load_outputs(path, None)
+    }
+
+    /// Only the first `n` outputs (None: all).
+    pub fn load_outputs(path: &Path, n: Option<usize>) -> Result<Self, ModelError> {
+        let plan = load_symbolic(path, n)?;
         let outputs = plan
             .model()
             .outputs

@@ -41,6 +41,11 @@ struct Lib(Box<dyn PdfiumLibraryBindings>);
 unsafe impl Send for Lib {}
 
 static LIB: OnceLock<Result<Mutex<Lib>, String>> = OnceLock::new();
+/// The file instance 0 was loaded from (copies of it make more instances).
+static BASE: OnceLock<PathBuf> = OnceLock::new();
+/// Extra pdfium instances: each a separate copy of the library, so its
+/// global state is its own and it renders in parallel with the others.
+static EXTRA: OnceLock<Mutex<Vec<&'static Mutex<Lib>>>> = OnceLock::new();
 
 /// The kleos cache folder for native helpers (next to the Hugging Face cache).
 pub fn cache_dir() -> PathBuf {
@@ -86,6 +91,7 @@ fn open_lib() -> Result<Mutex<Lib>, String> {
             match Pdfium::bind_to_library(&p) {
                 Ok(b) => {
                     unsafe { b.FPDF_InitLibrary() };
+                    let _ = BASE.set(p.clone());
                     return Ok(Mutex::new(Lib(b)));
                 }
                 Err(e) => tried.push(format!("{}: {e:?}", p.display())),
@@ -107,10 +113,40 @@ fn open_lib() -> Result<Mutex<Lib>, String> {
 }
 
 fn lib() -> Result<MutexGuard<'static, Lib>, PdfError> {
-    match LIB.get_or_init(open_lib) {
-        Ok(m) => Ok(m.lock().unwrap_or_else(|e| e.into_inner())),
-        Err(e) => Err(PdfError::NoLibrary(e.clone())),
+    lib_on(0)
+}
+
+/// Instance `k` (0 is the first loaded; k > 0 are copies, made on demand;
+/// without a library file to copy, every k is instance 0).
+fn instance(k: usize) -> Result<&'static Mutex<Lib>, PdfError> {
+    let base = match LIB.get_or_init(open_lib) {
+        Ok(m) => m,
+        Err(e) => return Err(PdfError::NoLibrary(e.clone())),
+    };
+    if k == 0 {
+        return Ok(base);
     }
+    let Some(src) = BASE.get() else { return Ok(base) };
+    let mut extra = EXTRA.get_or_init(|| Mutex::new(vec![])).lock().unwrap_or_else(|e| e.into_inner());
+    while extra.len() < k {
+        let n = extra.len() + 1;
+        let dir = src.parent().unwrap_or(Path::new(".")).join("instances");
+        let _ = std::fs::create_dir_all(&dir);
+        let copy = dir.join(format!("{n}-{}", lib_name()));
+        if !copy.exists() {
+            let tmp = dir.join(format!(".{n}-{}.tmp{}", lib_name(), std::process::id()));
+            std::fs::copy(src, &tmp).map_err(|e| PdfError::NoLibrary(format!("{}: {e}", copy.display())))?;
+            let _ = std::fs::rename(&tmp, &copy);
+        }
+        let b = Pdfium::bind_to_library(&copy).map_err(|e| PdfError::NoLibrary(format!("{}: {e:?}", copy.display())))?;
+        unsafe { b.FPDF_InitLibrary() };
+        extra.push(Box::leak(Box::new(Mutex::new(Lib(b)))));
+    }
+    Ok(extra[k - 1])
+}
+
+fn lib_on(k: usize) -> Result<MutexGuard<'static, Lib>, PdfError> {
+    Ok(instance(k)?.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Whether the pdfium library can be loaded.
@@ -121,7 +157,9 @@ pub fn available() -> bool {
 /// An open PDF.  Pages are opened per call.
 pub struct Doc {
     doc: FPDF_DOCUMENT,
-    _bytes: Option<Vec<u8>>,
+    _bytes: Option<std::sync::Arc<Vec<u8>>>,
+    path: Option<PathBuf>,
+    inst: usize,
     pub pages: usize,
 }
 
@@ -132,29 +170,48 @@ unsafe impl Sync for Doc {}
 
 impl Doc {
     pub fn open(path: &Path, password: Option<&str>) -> Result<Doc, PdfError> {
-        let l = lib()?;
-        let doc = unsafe { l.0.FPDF_LoadDocument(&path.to_string_lossy(), password) };
-        Self::finish(&l, doc, None)
+        Self::open_on(0, Some(path), None, password)
     }
 
     pub fn from_bytes(bytes: Vec<u8>, password: Option<&str>) -> Result<Doc, PdfError> {
-        let l = lib()?;
-        let doc = unsafe { l.0.FPDF_LoadMemDocument64(&bytes, password) };
-        Self::finish(&l, doc, Some(bytes))
+        Self::open_on(0, None, Some(std::sync::Arc::new(bytes)), password)
     }
 
-    fn finish(l: &Lib, doc: FPDF_DOCUMENT, bytes: Option<Vec<u8>>) -> Result<Doc, PdfError> {
+    /// The same document opened on pdfium instance `k` (a worker's own).
+    pub fn reopen_on(&self, k: usize) -> Result<Doc, PdfError> {
+        if k == self.inst {
+            return Self::open_on(k, self.path.as_deref(), self._bytes.clone(), None);
+        }
+        Self::open_on(k, self.path.as_deref(), self._bytes.clone(), None)
+    }
+
+    fn open_on(k: usize, path: Option<&Path>, bytes: Option<std::sync::Arc<Vec<u8>>>, password: Option<&str>) -> Result<Doc, PdfError> {
+        let l = lib_on(k)?;
+        let doc = unsafe {
+            match (&bytes, path) {
+                (Some(b), _) => l.0.FPDF_LoadMemDocument64(b, password),
+                (None, Some(p)) => l.0.FPDF_LoadDocument(&p.to_string_lossy(), password),
+                (None, None) => return Err(PdfError::Open("no source".into())),
+            }
+        };
+        let mut d = Self::finish(&l, doc, bytes)?;
+        d.path = path.map(|p| p.to_path_buf());
+        d.inst = k;
+        Ok(d)
+    }
+
+    fn finish(l: &Lib, doc: FPDF_DOCUMENT, bytes: Option<std::sync::Arc<Vec<u8>>>) -> Result<Doc, PdfError> {
         if doc.is_null() {
             let e = unsafe { l.0.FPDF_GetLastError() };
             return Err(if e == 4 { PdfError::Locked } else { PdfError::Open(format!("pdfium error {e}")) });
         }
         let pages = unsafe { l.0.FPDF_GetPageCount(doc) }.max(0) as usize;
-        Ok(Doc { doc, _bytes: bytes, pages })
+        Ok(Doc { doc, _bytes: bytes, path: None, inst: 0, pages })
     }
 
     /// Run `f` with the page open (and the library locked).
     pub fn with_page<R>(&self, index: usize, f: impl FnOnce(&PageRef) -> R) -> Result<R, PdfError> {
-        let l = lib()?;
+        let l = lib_on(self.inst)?;
         let page = unsafe { l.0.FPDF_LoadPage(self.doc, index as i32) };
         if page.is_null() {
             return Err(PdfError::Page(index, "cannot load".into()));
@@ -167,7 +224,7 @@ impl Doc {
 
 impl Drop for Doc {
     fn drop(&mut self) {
-        if let Ok(l) = lib() {
+        if let Ok(l) = lib_on(self.inst) {
             unsafe { l.0.FPDF_CloseDocument(self.doc) };
         }
     }

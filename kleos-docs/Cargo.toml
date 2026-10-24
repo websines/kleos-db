@@ -12,7 +12,7 @@ rust-version = "1.91"
 [features]
 default = ["ocr", "pdf", "download"]
 ## The OCR pipeline (det / rec / order / orient / script ONNX graphs on tract).
-ocr = ["dep:tract-onnx", "dep:tract-linalg", "dep:image"]
+ocr = ["dep:tract-onnx", "dep:tract-core", "dep:tract-linalg", "dep:image"]
 ## PDF text layers and rendering through pdfium (dynamic library, loaded at run time).
 pdf = ["dep:pdfium-render", "ocr"]
 ## Fetch model files into the Hugging Face cache on first use.
@@ -20,6 +20,7 @@ download = ["dep:hf-hub", "dep:ureq"]
 
 [dependencies]
 tract-onnx = { version = "=0.23.8", optional = true }
+tract-core = { version = "=0.23.8", optional = true }
 tract-linalg = { version = "=0.23.8", optional = true, features = ["multithread-mm"] }
 pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_latest"], optional = true }
 image = { version = "=0.25.8", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp"], optional = true }

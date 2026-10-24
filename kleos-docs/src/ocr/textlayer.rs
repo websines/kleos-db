@@ -299,7 +299,7 @@ fn no_ink_frac(gray: &Gray, runs: &[TextLine], scale: f64) -> f64 {
 
 /// Text-layer runs of a page and the verdict on them.  `gray` is a render at
 /// `scale` px/pt, turned upright like the runs.
-pub fn read_text_layer(page: &PageRef, gray: &Gray, scale: f64, turn: i32, frame: Option<i32>) -> TextLayer {
+pub fn read_text_layer(page: &PageRef, gray: &dyn Fn() -> Gray, scale: f64, turn: i32, frame: Option<i32>) -> TextLayer {
     let frame = frame.unwrap_or(turn);
     let (w, h) = page.size();
     let size = if frame % 2 == 1 { (h, w) } else { (w, h) };
@@ -322,7 +322,8 @@ pub fn read_text_layer(page: &PageRef, gray: &Gray, scale: f64, turn: i32, frame
     if pairs >= MIN_RTL_PAIRS && visual > MAX_VISUAL_RTL_FRAC {
         return mk(runs, false, VISUAL_RTL, st, rotated);
     }
-    let empty = no_ink_frac(gray, &runs, scale);
+    // the ink check is the only step that needs a render: made only now
+    let empty = no_ink_frac(&gray(), &runs, scale);
     if empty > MAX_NO_INK_LINE_FRAC {
         let r = format!("{:.0}% of text runs have no ink", empty * 100.0);
         return mk(runs, false, &r, st, rotated);

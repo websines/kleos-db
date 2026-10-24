@@ -208,13 +208,15 @@ impl<'a> Converter<'a> {
             if self.mode != Mode::Ocr {
                 let t0 = std::time::Instant::now();
                 let s = CHECK_DPI / 72.0;
-                let check = page.render_gray(s);
+                // the 72-dpi ink-check render is made only when a check needs it
+                let check_cell: std::cell::OnceCell<Gray> = std::cell::OnceCell::new();
+                let check = || check_cell.get_or_init(|| page.render_gray(s)).clone();
                 let mut tl = read_text_layer(page, &check, s, 0, None);
                 let kq = textlayer::page_turn(&tl.stats);
                 let rot = page.rotation();
                 if kq != 0 && (rot + 90 * kq) % 360 == 0 {
                     page.set_rotation(0);
-                    let up = page.render_gray(s);
+                    let up = || page.render_gray(s);
                     let mut tl0 = read_text_layer(page, &up, s, 0, None);
                     if !tl0.lines.is_empty() && (tl0.trusted || self.mode == Mode::Text) {
                         tl0.stats.turn = kq;
@@ -222,11 +224,11 @@ impl<'a> Converter<'a> {
                         p.upright = Some((tl0, g, self.page_scale(page.size())));
                     }
                     page.set_rotation(rot);
-                    tl = read_text_layer(page, &cv::rot90(&check, -kq), s, kq, None);
+                    tl = read_text_layer(page, &|| cv::rot90(&check(), -kq), s, kq, None);
                 } else if kq != 0 {
-                    tl = read_text_layer(page, &cv::rot90(&check, -kq), s, kq, None);
+                    tl = read_text_layer(page, &|| cv::rot90(&check(), -kq), s, kq, None);
                 } else if textlayer::vertical_layout(&tl.stats) {
-                    tl = read_text_layer(page, &cv::rot90(&check, 1), s, 0, Some(3));
+                    tl = read_text_layer(page, &|| cv::rot90(&check(), 1), s, 0, Some(3));
                     tl.stats.vertical = true;
                 }
                 p.text_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -408,17 +410,25 @@ impl<'a> Converter<'a> {
         let next = std::sync::atomic::AtomicUsize::new(from);
         let (tx, rx) = std::sync::mpsc::channel::<(usize, Page)>();
         std::thread::scope(|s| {
-            for _ in 0..threads.max(1) {
+            for wi in 0..threads.max(1) {
                 let tx = tx.clone();
                 let next = &next;
-                s.spawn(move || loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if i >= end {
-                        break;
-                    }
-                    let page = self.safe(|| self.pdf_page(doc, i));
-                    if tx.send((i, page)).is_err() {
-                        break;
+                let w = wi;
+                s.spawn(move || {
+                    // each worker reads its pages through its own pdfium
+                    // instance (a separate copy of the library), so renders
+                    // and text layers run in parallel
+                    let own = if w == 0 { None } else { doc.reopen_on(w).ok() };
+                    let d = own.as_ref().unwrap_or(doc);
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if i >= end {
+                            break;
+                        }
+                        let page = self.safe(|| self.pdf_page(d, i));
+                        if tx.send((i, page)).is_err() {
+                            break;
+                        }
                     }
                 });
             }
