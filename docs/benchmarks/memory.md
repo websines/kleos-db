@@ -512,6 +512,32 @@ All four recover KU; dropping `said in` notes is the only one that keeps LoCoMo 
 - **Quota:** about 2,150 LLM calls, about 1.3 points of the weekly plan account-wide (other agents were running too).
 - Results: `.bench-data/dates/results/ku-dip/`; the seeded re-asks were a scratch script over the stored `ctx10` blocks.
 
+## Decider on: LoCoMo QA (wave5/gliner-e2e)
+
+Status: 2026-10-24, main a14b5de, tag `gliner-e2e`. This is the first QA run with decider-nano on during ingest: supersession and duplicate decisions on every `remember`. Every number above has it off. The details, with automatic names from the fine-tuned GLiNER, are in docs/research/gliner.md, "Phase 2".
+
+| LoCoMo 301 (context output) | QA | temporal (63) | R@5 | R@10 | `remember` p50 per turn |
+|---|---|---|---|---|---|
+| hybrid, decider off (the headline config; published 0.821) | 0.811 | 0.746 | 0.691 | 0.778 | 145 ms |
+| decider on | 0.811 | 0.698 | 0.691 | 0.779 | 2.5 s |
+| decider on + capital-letter names | 0.817 | 0.730 | 0.695 | 0.775 | 2.6 s |
+| decider on + GLiNER names | 0.797 | 0.730 | 0.693 | 0.777 | 2.6 s |
+
+- **QA: no change.** All four are within noise. The decider-on run flips 7 questions each way against decider-off.
+- **The decider's automatic replacements on chat are almost all wrong.** There were 174–180 of them over the 5,882 turns. A hand check of 20 random ones per decider-on config found 1 right in total, against 59 wrong or borderline.
+  - They are one speaker's small talk replacing their own: "Wow, John, that's rough." replaces "Wow, John, that's incredible!".
+  - Names do not help, because both sides share the speaker.
+  - The decider also leaves about 1.1 pending decisions per turn: 1,857–1,976 replacements and about 4,580 duplicates.
+- **Cost.** About 1–1.5 s per turn from the decider itself. The 2.5 s p50 includes three decider runs sharing one Metal GPU.
+- **Where the decider is right:** user-fact streams. On the life stream it makes 12 right auto-replacements and 0 wrong. On the 23 held-out knowledge-update questions it gives 83% latest first, 91% with `hide_pending`. Both are unchanged on this build.
+
+**Consequences.**
+- Keep the decider off for the headline LoCoMo number.
+- Report decider-on results on user-fact sets.
+- Before turning the decider on by default for conversational memory, keep small talk and reactions out of `supersedes`. Options are a store-filter or claim-type rule, a gate requiring a shared non-speaker entity (it would have blocked 177 of the 180, all wrong), or a recalibrated auto band on conversational pairs.
+
+Quota: about 0.4 points of the weekly plan. Results: `.bench-data/gliner-e2e/`.
+
 ## Head-to-head: Mem0 (open source)
 
 Status: 2026-10-23, first run. Adapter: `scripts/bench-l2/mem0_adapter.py`. Raw results, logs, the LLM cache and the venv lock file are in `.bench-data/mem0-h2h/`.
