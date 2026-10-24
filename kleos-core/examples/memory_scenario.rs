@@ -57,6 +57,17 @@ fn main() -> miette::Result<()> {
         decider: Some("nano".into()),
         ..Default::default()
     })?;
+    // KLEOS_ONTOLOGY=personal[:decide|pending|dup_only] activates an
+    // ontology on the stream's namespace (docs/specs/ontology.md)
+    if let Ok(o) = std::env::var("KLEOS_ONTOLOGY") {
+        if !o.is_empty() {
+            let (onto, untyped) = o.split_once(':').unwrap_or((o.as_str(), "decide"));
+            db.ontology_call(
+                "activate",
+                json!({"ns": "user", "ontos": onto.split('+').collect::<Vec<_>>(), "untyped": untyped}),
+            )?;
+        }
+    }
 
     let turns = data["turns"].as_array().unwrap();
     let mut id_turn: BTreeMap<String, usize> = BTreeMap::new();

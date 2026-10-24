@@ -195,7 +195,7 @@
     "my flat",
     "bought a house",
     "new house",
-    "renovat",
+    "renovat*",
     "the house"
    ]
   },
@@ -1092,7 +1092,7 @@
     "savings",
     "saved",
     "budget",
-    "invest",
+    "invest*",
     "my portfolio",
     "emergency fund"
    ]
@@ -1155,7 +1155,7 @@
     "painting",
     "knitting",
     "woodworking",
-    "sculpt",
+    "sculpt*",
     "photography"
    ]
   },
@@ -1525,8 +1525,8 @@
    "cues": [
     "volunteer",
     "charity",
-    "donat",
-    "fundrais"
+    "donat*",
+    "fundrais*"
    ]
   },
   {

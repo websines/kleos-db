@@ -30,6 +30,20 @@ pub struct ClaimType {
     pub score: f64,
     /// `cue`, `proto`, `cue+proto`, `rule` or an extractor's name.
     pub by: String,
+    /// The speaker label, when the text has one ("Caroline: …").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    /// Content words (speaker label and photo captions left out).
+    #[serde(default)]
+    pub content: usize,
+}
+
+/// Fill the text-derived fields of a type (speaker, content words): stored
+/// types (`kleos_mem_type`) don't keep them.
+pub fn annotate(t: &mut ClaimType, text: &str) {
+    let (spk, b) = body(text);
+    t.speaker = spk.map(|x| norm(&x));
+    t.content = crate::memory_claims::content_words(&b);
 }
 
 impl ClaimType {
@@ -44,6 +58,19 @@ pub const PROTO_MIN: f64 = 0.45;
 pub const PROTO_MARGIN: f64 = 0.02;
 /// Score bonus of a property whose cue phrase occurs in the claim.
 pub const CUE_BONUS: f64 = 0.06;
+/// A pair where a side is untyped and a side has fewer content words than
+/// this is too thin to replace automatically ("Nah, I haven't." / "I'm off
+/// to do some research."): an auto supersede is capped at pending.
+pub const THIN: f64 = 5.0;
+/// A type is confident enough to keep a pair out of `supersedes` (different
+/// or multi-valued properties) when a cue confirmed it or its prototype
+/// score reaches this.
+pub const CONFIDENT: f64 = 0.55;
+
+/// A tuning knob: `KLEOS_ONTO_<NAME>` overrides the default (evaluation only).
+fn knob(name: &str, default: f64) -> f64 {
+    std::env::var(format!("KLEOS_ONTO_{name}")).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
 
 const FIRST_PERSON: &[&str] = &["i", "i'm", "i've", "i'd", "i'll", "me", "my", "mine", "myself", "we", "we're", "we've", "our", "ours", "us"];
 const SECOND_PERSON: &[&str] = &["you", "you're", "you've", "you'd", "you'll", "your", "yours", "yourself", "u", "ur"];
@@ -134,10 +161,14 @@ fn starts_phrase(s: &str, p: &str) -> bool {
     s.strip_prefix(p).is_some_and(|r| r.is_empty() || !r.chars().next().unwrap().is_alphanumeric())
 }
 
-/// Phrase `p` occurs in lower-cased `s` at word boundaries (a cue ending in
-/// a letter may be a stem: "renovat" matches "renovating").
+/// Phrase `p` occurs in lower-cased `s` at word boundaries; a cue ending in
+/// `*` is a stem ("renovat*" matches "renovating").
 pub fn has_phrase(s: &str, p: &str) -> bool {
     let p = p.trim();
+    let (p, stem) = match p.strip_suffix('*') {
+        Some(x) => (x, true),
+        None => (p, false),
+    };
     if p.is_empty() {
         return false;
     }
@@ -147,9 +178,8 @@ pub fn has_phrase(s: &str, p: &str) -> bool {
         let before = s[..at].chars().next_back();
         let ok_before = before.map_or(true, |c| !c.is_alphanumeric());
         if ok_before {
-            // stems of 6+ letters may continue ("renovat" → "renovating")
             let after = s[at + p.len()..].chars().next();
-            let ok_after = after.map_or(true, |c| !c.is_alphanumeric()) || p.len() >= 6;
+            let ok_after = stem || after.map_or(true, |c| !c.is_alphanumeric());
             if ok_after {
                 return true;
             }
@@ -203,6 +233,13 @@ pub fn smalltalk(text: &str) -> bool {
 const PRONOUN_STARTS: &[&str] = &[
     "i", "we", "you", "he", "she", "they", "it", "this", "that", "there", "the", "a", "an", "my", "our", "your", "his", "her",
     "their", "so", "and", "but", "also", "then", "when", "if", "just", "today", "yesterday", "last", "next", "recently",
+    // discourse openers, interjections and dates are not names
+    "by", "oh", "well", "anyway", "actually", "btw", "speaking", "plus", "besides", "honestly", "basically", "lately",
+    "hey", "hi", "hello", "yes", "yeah", "no", "nah", "ok", "okay", "um", "hmm", "wow", "lol", "haha", "thanks", "sorry",
+    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november",
+    "december", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "what", "how", "why",
+    "where", "who", "which", "after", "before", "since", "as", "at", "in", "on", "for", "with", "from", "to", "of",
+    "about", "here", "now", "one", "some", "every", "all", "most", "many", "not", "please", "let", "guess", "sure",
 ];
 
 /// The claim's subject: the speaker (or `user`) for first person,
@@ -228,13 +265,25 @@ pub fn subject(text: &str) -> Option<String> {
     if ws.iter().take(4).any(|w| FIRST_PERSON.contains(&w.as_str())) {
         return Some(me);
     }
-    // a leading proper name ("Anna moved to …")
+    // a leading proper name as the subject ("Anna moved to …"); not a
+    // vocative ("Anna, …"), a discourse opener or a date
     let raw: Vec<&str> = b.split_whitespace().collect();
     if let Some(w0) = raw.first() {
-        let w = w0.trim_matches(|c: char| !c.is_alphanumeric());
-        if w.chars().next().is_some_and(|c| c.is_uppercase()) && !PRONOUN_STARTS.contains(&w.to_lowercase().as_str()) && w.len() > 1 {
-            return Some(norm(w));
+        let w = w0.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+        let w = w.trim_end_matches("'s").trim_end_matches("’s");
+        if w.chars().next().is_some_and(|c| c.is_uppercase())
+            && !PRONOUN_STARTS.contains(&w.to_lowercase().as_str())
+            && w.len() > 1
+            && !w0.ends_with(',')
+            && w.chars().all(|c| c.is_alphabetic() || c == '-')
+        {
+            // a guess (no NER here): marked, so it never decides a block
+            return Some(format!("name:{}", norm(w)));
         }
+    }
+    // first person later in the sentence ("By the way, I …")
+    if ws.iter().take(12).any(|w| FIRST_PERSON.contains(&w.as_str())) {
+        return Some(me);
     }
     None
 }
@@ -260,16 +309,27 @@ fn norm(s: &str) -> String {
 /// Type one claim against `act`. `protos` are the prototype vectors of the
 /// typable properties (`ontology::prototypes`), `vec` the claim's vector.
 pub fn type_claim(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &str, vec: Option<&[f32]>) -> ClaimType {
+    let mut t = type_claim_inner(act, protos, text, vec);
+    annotate(&mut t, text);
+    t
+}
+
+fn type_claim_inner(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &str, vec: Option<&[f32]>) -> ClaimType {
     if smalltalk(text) {
-        return ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into() };
+        return ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into(), speaker: None, content: 0 };
     }
     let subj = subject(text);
     let (_, b) = body(text);
     let low = b.to_lowercase().replace('’', "'");
+    // a claim whose subject is a relative ("My sister Anna lives in Munich")
+    // states one of the relative's properties; the relation itself is the
+    // subject key, so relations between people are not candidates
+    let about_relative = subj.as_deref().is_some_and(|x| x.contains('.'));
+    let excluded = |p: &crate::ontology::OntoProp| about_relative && p.kind == "object" && p.range.iter().any(|r| r == "Person");
     // cues: the longest matching cue per property
     let mut cue: Vec<usize> = vec![0; act.props.len()];
     for (i, p) in act.props.iter().enumerate() {
-        if !crate::ontology::typable(p) {
+        if !crate::ontology::typable(p) || excluded(p) {
             continue;
         }
         for c in p.cues.iter().chain(p.aliases.iter()) {
@@ -279,23 +339,22 @@ pub fn type_claim(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &str
             }
         }
     }
-    let untyped = |subj: Option<String>| ClaimType { cls: "untyped".into(), subject: subj, prop: None, score: 0.0, by: "none".into() };
+    let untyped = |subj: Option<String>| ClaimType { cls: "untyped".into(), subject: subj, prop: None, score: 0.0, by: "none".into(), speaker: None, content: 0 };
     match (protos, vec) {
         (Some(ps), Some(v)) if !ps.is_empty() => {
-            let mut scored: Vec<(f64, usize)> = ps
-                .iter()
-                .map(|(i, pv)| (cosine(v, pv) + if cue[*i] > 0 { CUE_BONUS } else { 0.0 }, *i))
-                .collect();
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let ps: Vec<(usize, Vec<f32>)> = ps.iter().filter(|(i, _)| !excluded(&act.props[*i])).cloned().collect();
+            let scored = rank(&ps, &cue, v);
             let (best, bi) = scored[0];
             let second = scored.get(1).map_or(0.0, |x| x.0);
-            if best >= PROTO_MIN && best - second >= PROTO_MARGIN {
+            if best >= knob("PROTO_MIN", PROTO_MIN) && best - second >= knob("PROTO_MARGIN", PROTO_MARGIN) {
                 ClaimType {
                     cls: "fact".into(),
                     subject: subj,
                     prop: Some(act.props[bi].name.clone()),
                     score: best,
                     by: if cue[bi] > 0 { "cue+proto" } else { "proto" }.into(),
+                    speaker: None,
+                    content: 0,
                 }
             } else {
                 untyped(subj)
@@ -311,9 +370,37 @@ pub fn type_claim(act: &Active, protos: Option<&[(usize, Vec<f32>)]>, text: &str
             if top.len() != 1 {
                 return untyped(subj);
             }
-            ClaimType { cls: "fact".into(), subject: subj, prop: Some(act.props[top[0]].name.clone()), score: 1.0, by: "cue".into() }
+            ClaimType {
+                cls: "fact".into(),
+                subject: subj,
+                prop: Some(act.props[top[0]].name.clone()),
+                score: 1.0,
+                by: "cue".into(),
+                speaker: None,
+                content: 0,
+            }
         }
     }
+}
+
+/// Properties by prototype score (cosine plus the cue bonus), best first.
+fn rank(ps: &[(usize, Vec<f32>)], cue: &[usize], v: &[f32]) -> Vec<(f64, usize)> {
+    let bonus = knob("CUE_BONUS", CUE_BONUS);
+    let mut scored: Vec<(f64, usize)> = ps.iter().map(|(i, pv)| (cosine(v, pv) + if cue[*i] > 0 { bonus } else { 0.0 }, *i)).collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+}
+
+/// The top `n` properties for a claim with their scores (debugging).
+pub fn top_props(act: &Active, protos: &[(usize, Vec<f32>)], text: &str, vec: &[f32], n: usize) -> Vec<(String, f64)> {
+    let (_, b) = body(text);
+    let low = b.to_lowercase().replace('’', "'");
+    let cue: Vec<usize> = act
+        .props
+        .iter()
+        .map(|p| p.cues.iter().chain(p.aliases.iter()).filter(|c| has_phrase(&low, &c.to_lowercase())).map(|c| c.len()).max().unwrap_or(0))
+        .collect();
+    rank(protos, &cue, vec).into_iter().take(n).map(|(s, i)| (act.props[i].name.clone(), (s * 1000.0).round() / 1000.0)).collect()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -343,29 +430,23 @@ pub enum Gate {
     Block,
 }
 
-/// The first person of a speaker or the store's user.
-fn first_person_subject(s: &str) -> bool {
-    !s.contains('.') && !s.contains(' ')
-}
-
-/// Whether two known subjects are certainly different people: two
-/// first-person subjects of different speakers, a first-person subject and a
-/// relative or name, two different relatives, or two different names. A
-/// name and a relative may be the same person ("Anna" and "user.sister").
+/// Whether two known subjects are certainly different people: the first
+/// persons of two different speakers, a speaker and their own relative
+/// ("user" and "user.sister"), or two different relatives. A leading name
+/// (`name:anna`) is a guess and never decides: it may be the speaker, a
+/// relative or a thing.
 fn different_subjects(a: &str, b: &str) -> bool {
-    if a == b {
+    if a == b || a.starts_with("name:") || b.starts_with("name:") {
         return false;
     }
     let rel = |s: &str| s.contains('.');
     match (rel(a), rel(b)) {
         (true, true) => true,
         (true, false) | (false, true) => {
-            // a relative vs a plain key: different when the plain key is the
-            // relative's owner ("user" vs "user.sister")
             let (r, p) = if rel(a) { (a, b) } else { (b, a) };
             r.split('.').next() == Some(p)
         }
-        (false, false) => first_person_subject(a) && first_person_subject(b),
+        (false, false) => true,
     }
 }
 
@@ -382,22 +463,41 @@ pub fn gate(act: &Active, c: &ClaimType, d: &ClaimType) -> Gate {
             return Gate::Block;
         }
     }
+    // a speaker's statement never replaces another speaker's
+    if let (Some(a), Some(b)) = (&c.speaker, &d.speaker) {
+        if a != b {
+            return Gate::Block;
+        }
+    }
+    let conf = knob("CONFIDENT", CONFIDENT);
+    // cue-only typing (no embedder) is sure; a cue under prototypes adds a
+    // little confidence
+    let sure = |t: &ClaimType| t.by == "cue" || t.by == "rule" || t.score >= conf || (t.by.contains("cue") && t.score >= conf - 0.05);
+    let thin = (c.content.min(d.content) as f64) < knob("THIN", THIN);
+    let untyped = || match act.untyped.as_str() {
+        "pending" => Gate::CapPending,
+        "dup_only" => Gate::NoSupersede,
+        _ if thin => Gate::CapPending,
+        _ => Gate::Allow,
+    };
     match (&c.prop, &d.prop) {
         (Some(a), Some(b)) => {
-            if a != b {
-                return Gate::NoSupersede;
+            let single = act.prop(a).map_or(true, |p| p.single());
+            if a == b && single {
+                return match act.prop(a) {
+                    Some(p) if !p.temporal => Gate::CapPending,
+                    _ => Gate::Allow,
+                };
             }
-            match act.prop(a) {
-                Some(p) if !p.single() => Gate::NoSupersede,
-                Some(p) if !p.temporal => Gate::CapPending,
-                _ => Gate::Allow,
+            // different or multi-valued properties keep the pair out of
+            // `supersedes` only when both types are confident
+            if sure(c) && sure(d) {
+                Gate::NoSupersede
+            } else {
+                untyped()
             }
         }
-        _ => match act.untyped.as_str() {
-            "pending" => Gate::CapPending,
-            "dup_only" => Gate::NoSupersede,
-            _ => Gate::Allow,
-        },
+        _ => untyped(),
     }
 }
 
@@ -524,8 +624,12 @@ mod tests {
         assert_eq!(subject("I live in Berlin.").as_deref(), Some("user"));
         assert_eq!(subject("Caroline: I went hiking.").as_deref(), Some("caroline"));
         assert_eq!(subject("My sister Anna moved to Hamburg.").as_deref(), Some("user.sister"));
-        assert_eq!(subject("Anna moved to Hamburg.").as_deref(), Some("anna"));
+        assert_eq!(subject("Anna moved to Hamburg.").as_deref(), Some("name:anna"));
         assert_eq!(subject("The weather is nice.").as_deref(), None);
+        assert_eq!(subject("By the way, I've been watching Crash Course.").as_deref(), Some("user"));
+        assert_eq!(subject("Oh, and by the way, I'm on episode 10.").as_deref(), Some("user"));
+        assert_eq!(subject("March 18th, Downtown Farmers Market, $220.").as_deref(), None);
+        assert_eq!(subject("Anna, I moved to Lisbon.").as_deref(), Some("user"));
     }
 
     #[test]
@@ -535,6 +639,9 @@ mod tests {
         assert_eq!(t.prop.as_deref(), Some("lives_in"), "{t:?}");
         let t = type_claim(&a, None, "I love sushi.", None);
         assert_eq!(t.prop.as_deref(), Some("likes"), "{t:?}");
+        // about a relative: the relative's property, not the relation
+        let t = type_claim(&a, None, "My sister Anna lives in Munich.", None);
+        assert_eq!((t.subject.as_deref(), t.prop.as_deref()), (Some("user.sister"), Some("lives_in")), "{t:?}");
     }
 
     #[test]
@@ -546,13 +653,28 @@ mod tests {
             prop: Some(prop.into()),
             score: 1.0,
             by: "test".into(),
+            speaker: None,
+            content: 8,
         };
-        let st = ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into() };
+        let st = ClaimType { cls: "smalltalk".into(), subject: None, prop: None, score: 1.0, by: "rule".into(), speaker: None, content: 0 };
+        let un = |content: usize, speaker: Option<&str>| ClaimType {
+            cls: "untyped".into(),
+            subject: None,
+            prop: None,
+            score: 0.0,
+            by: "none".into(),
+            speaker: speaker.map(|x| x.to_string()),
+            content,
+        };
+        assert_eq!(gate(&a, &un(8, None), &un(9, None)), Gate::Allow);
+        assert_eq!(gate(&a, &un(3, None), &un(9, None)), Gate::CapPending);
+        assert_eq!(gate(&a, &un(8, Some("john")), &un(9, Some("maria"))), Gate::Block);
         assert_eq!(gate(&a, &f("user", "lives_in"), &f("user", "lives_in")), Gate::Allow);
         assert_eq!(gate(&a, &f("user", "likes"), &f("user", "likes")), Gate::NoSupersede);
         assert_eq!(gate(&a, &f("user", "lives_in"), &f("user", "employer")), Gate::NoSupersede);
         assert_eq!(gate(&a, &f("user.sister", "lives_in"), &f("user", "lives_in")), Gate::Block);
-        assert_eq!(gate(&a, &f("anna", "lives_in"), &f("user.sister", "lives_in")), Gate::Allow);
+        assert_eq!(gate(&a, &f("name:anna", "lives_in"), &f("user.sister", "lives_in")), Gate::Allow);
+        assert_eq!(gate(&a, &f("name:instagram", "social_media"), &f("user", "social_media")), Gate::Allow);
         assert_eq!(gate(&a, &f("caroline", "lives_in"), &f("melanie", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &st, &f("user", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &f("user", "birthday"), &f("user", "birthday")), Gate::CapPending);

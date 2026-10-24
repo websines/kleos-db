@@ -900,7 +900,7 @@ async fn ontology_op(
     Path(op): Path<String>,
     Json(args): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let reads = ["get", "list", "export", "facts", "infer", "validate", "type"];
+    let reads = ["get", "list", "export", "facts", "infer", "validate", "type", "gate"];
     if matches!(mutability, ScriptMutability::Immutable) && !reads.contains(&op.as_str()) {
         return (
             StatusCode::FORBIDDEN,

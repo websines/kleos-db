@@ -2142,6 +2142,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             cand_types = self.onto_types_of(ns, &ids)?;
             for r in rows_per.iter().flatten() {
                 let (Some(id), Some(t)) = (cell_str(&r[0]), r[2].get_str()) else { continue };
+                if let Some(ct) = cand_types.get_mut(&id) {
+                    crate::ontology_type::annotate(ct, t);
+                }
                 cand_types.entry(id.clone()).or_insert_with(|| {
                     crate::ontology_type::type_claim(
                         a,

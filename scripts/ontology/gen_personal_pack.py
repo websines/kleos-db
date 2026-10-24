@@ -27,7 +27,7 @@ O("lives_in", "where someone lives or moved to", rng=["Place"], aliases=["reside
 O("born_in", "where someone was born or grew up", rng=["Place"], temporal=False, aliases=["hometown"],
   cues=["born in", "grew up in", "my hometown", "originally from"])
 prop("home", "the house or apartment someone lives in, buying a home, renovation", aliases=["house", "apartment"],
-     cues=["my house", "my apartment", "my flat", "bought a house", "new house", "renovat", "the house"])
+     cues=["my house", "my apartment", "my flat", "bought a house", "new house", "renovat*", "the house"])
 O("employer", "the company or organisation someone works for", rng=["Organization"], aliases=["company"],
   cues=["work at", "work for", "working at", "working for", "works at", "works for", "joined", "hired", "my company", "my employer", "quit my job", "laid off"])
 prop("job_title", "someone's job, role or position", aliases=["job", "role", "position", "occupation"],
@@ -73,11 +73,11 @@ prop("home_loan", "mortgage, loan, pre-approval or debt amount", unit="currency"
      cues=["mortgage", "loan", "pre-approved", "pre-approval", "debt", "down payment"])
 prop("rent_or_bills", "rent, utilities and bills", unit="currency", aliases=["rent"], cues=["rent", "utilities", "bills", "electricity bill"])
 prop("savings", "savings, budget, spending and investments", unit="currency", aliases=["budget", "investments"],
-     cues=["savings", "saved", "budget", "invest", "my portfolio", "emergency fund"])
+     cues=["savings", "saved", "budget", "invest*", "my portfolio", "emergency fund"])
 prop("social_media", "followers, posts, accounts and online audience", datatype="xsd:integer",
      aliases=["follower count", "followers"], cues=["followers", "instagram", "youtube", "tiktok", "twitter", "subscribers", "my channel", "my blog"])
 # habits and progress (single-valued state that changes)
-prop("hobby", "a hobby or craft and how far someone has got in it", cues=["hobby", "pottery", "painting", "knitting", "woodworking", "sculpt", "photography"])
+prop("hobby", "a hobby or craft and how far someone has got in it", cues=["hobby", "pottery", "painting", "knitting", "woodworking", "sculpt*", "photography"])
 prop("workout_routine", "gym, exercise and training frequency", cues=["gym", "work out", "workout", "exercise", "yoga", "training", "lift"])
 prop("running", "runs, races, times and distances", cues=["run", "running", "5k", "10k", "marathon", "personal best", "race", "triathlon"])
 prop("diet", "what someone eats or avoids, diet plan", cues=["vegan", "vegetarian", "diet", "i eat", "gluten", "keto", "calories"])
@@ -90,7 +90,7 @@ prop("watching", "shows, films and videos watched and how many", cues=["watching
 prop("music", "instrument, band, songs or concerts", cues=["guitar", "piano", "violin", "band", "concert", "playlist", "songs", "drums"])
 prop("cooking", "recipes, cooking, baking and how many dishes", cues=["recipe", "cook", "bake", "baking", "dish", "chef"])
 prop("garden", "plants and gardening", cues=["garden", "plants", "tomatoes", "seeds", "succulent"])
-prop("volunteering", "volunteering, charity and donations", cues=["volunteer", "charity", "donat", "fundrais"])
+prop("volunteering", "volunteering, charity and donations", cues=["volunteer", "charity", "donat*", "fundrais*"])
 prop("language", "learning a language and level", cues=["learning spanish", "learning french", "learning german", "duolingo", "fluent", "language"])
 prop("project_progress", "progress on a project: pages, hours, percent done, count so far", cues=["so far", "hours", "finished", "completed", "progress", "chapters"])
 prop("schedule", "when something regularly happens, days per week", cues=["every week", "times a week", "days a week", "every monday", "on saturdays", "weekly", "every morning"])

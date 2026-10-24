@@ -793,6 +793,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                     prop: cell_opt(&row[3]),
                     score: row[4].get_float().unwrap_or(0.0),
                     by: cell(&row[5]),
+                    speaker: None,
+                    content: 0,
                 },
             );
         }
@@ -1168,6 +1170,35 @@ impl<'s, S: Storage<'s>> Db<S> {
                 )
             }
             "validate" => self.onto_validate(&serde_json::from_value(from(m)?).map_err(|e| miette!("ontology validate: bad options: {e}"))?)?,
+            "gate" => {
+                // what the cardinality policy does to a (candidate `old`, new
+                // claim `new`) pair, with both types (debugging, evaluation)
+                let ns = ns_of(&take(&mut m, "ns"));
+                let old = take(&mut m, "old").ok_or_else(|| miette!("ontology gate needs 'old'"))?;
+                let new = take(&mut m, "new").ok_or_else(|| miette!("ontology gate needs 'new'"))?;
+                let act = match self.onto_active(&ns)? {
+                    Some(a) => a,
+                    None => Arc::new(Active::merge(&[serde_json::from_str(PERSONAL).into_diagnostic()?], "cardinality", DEFAULT_UNTYPED)),
+                };
+                let embedder = self.mem_embedder_name()?;
+                let (vecs, protos) = match &embedder {
+                    Some(e) => (
+                        crate::embed::embed_texts(e, &[old.as_str(), new.as_str()])?.into_iter().map(|v| Some(v.to_vec())).collect(),
+                        Some(prototypes(&act, e)?),
+                    ),
+                    None => (vec![None, None], None),
+                };
+                let ps = protos.as_deref().map(|v| v.as_slice());
+                let to = crate::ontology_type::type_claim(&act, ps, &old, vecs[0].as_deref());
+                let tn = crate::ontology_type::type_claim(&act, ps, &new, vecs[1].as_deref());
+                let g = match crate::ontology_type::gate(&act, &tn, &to) {
+                    crate::ontology_type::Gate::Allow => "allow",
+                    crate::ontology_type::Gate::CapPending => "cap_pending",
+                    crate::ontology_type::Gate::NoSupersede => "no_supersede",
+                    crate::ontology_type::Gate::Block => "block",
+                };
+                json!({"gate": g, "old": to, "new": tn})
+            }
             "type" => {
                 let ns = take(&mut m, "ns");
                 let text = take(&mut m, "text").ok_or_else(|| miette!("ontology type needs 'text'"))?;
@@ -1190,6 +1221,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                 };
                 let t = crate::ontology_type::type_claim(&act, protos.as_deref().map(|v| v.as_slice()), &text, vec.as_deref());
                 let mut out = serde_json::to_value(&t).into_diagnostic()?;
+                if let (Some(ps), Some(v)) = (&protos, &vec) {
+                    out["top"] = json!(crate::ontology_type::top_props(&act, ps, &text, v, 3));
+                }
                 out["kin"] = json!(crate::ontology_type::kin_facts(&text)
                     .into_iter()
                     .map(|k| json!({"s": k.s, "p": k.p, "o": k.o, "label": k.label}))
@@ -1198,7 +1232,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             other => bail!(
                 "unknown ontology op '{other}': expected define, import, export, get, list, activate, deactivate, \
-                 assert, retract, facts, infer, validate or type"
+                 assert, retract, facts, infer, validate, type or gate"
             ),
         })
     }
