@@ -161,15 +161,23 @@ pub(crate) fn enable_from_spec(name: &str, spec: DeciderSpec) -> Result<()> {
     };
     match target {
         Builtin::Nano(repo) => {
-            let d = DeciderNano::with_repo(&repo, engine.clone()).map_err(|e| {
-                miette!("cannot enable decider '{name}' ({repo}): {e}; download it once with `hf download {repo}`")
-            })?;
+            let key = format!(
+                "decider-nano|{repo}|{}|{:?}|{}|{}",
+                engine.precision.name(),
+                engine.device,
+                engine.max_seq_len,
+                engine.max_batch_tokens
+            );
+            let d = kleos_infer::budget::shared(&key, || DeciderNano::with_repo(&repo, engine.clone()).map(Arc::new))
+                .map_err(|e| {
+                    miette!("cannot enable decider '{name}' ({repo}): {e}; download it once with `hf download {repo}`")
+                })?;
             register_with_info(
                 name,
                 Arc::new(InferDecider {
                     inner: d,
-                    device: |d: &DeciderNano| d.device_name(),
-                    weights: |d: &DeciderNano| Some(d.weights_version().to_string()),
+                    device: |d: &Arc<DeciderNano>| d.device_name(),
+                    weights: |d: &Arc<DeciderNano>| Some(d.weights_version().to_string()),
                 }),
                 DeciderInfo {
                     kind: "decider-nano",

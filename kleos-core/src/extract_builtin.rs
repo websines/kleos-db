@@ -36,7 +36,7 @@ pub const GLINER_WINDOW: (usize, usize) = (384, 64);
 pub const GLINER_DEFAULT_PRECISION: Precision = Precision::F16;
 
 struct GlinerExtractor {
-    g: Gliner,
+    g: Arc<Gliner>,
 }
 
 impl EntityExtractor for GlinerExtractor {
@@ -103,7 +103,14 @@ pub(crate) fn build(name: &str, spec: &ExtractorSpec) -> Result<Arc<dyn EntityEx
         (None, Some("gliner-base" | "gliner2.5-base")) => GLINER_BASE_REPO.to_string(),
         (None, Some(m)) => m.to_string(),
     };
-    let g = Gliner::with_repo(&repo, engine)
+    let key = format!(
+        "gliner|{repo}|{}|{:?}|{}|{}",
+        engine.precision.name(),
+        engine.device,
+        engine.max_seq_len,
+        engine.max_batch_tokens
+    );
+    let g = kleos_infer::budget::shared(&key, || Gliner::with_repo(&repo, engine).map(Arc::new))
         .map_err(|e| miette!("cannot enable extractor '{name}' ({repo}): {e}; download it once with `hf download {repo}`"))?;
     Ok(Arc::new(GlinerExtractor { g }))
 }
