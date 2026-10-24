@@ -209,6 +209,8 @@ pub struct CtxItem {
     pub cite: Option<String>,
     pub doc_name: Option<String>,
     pub doc_page: Option<usize>,
+    /// Why graph recall included it (`inferred: relative_of`).
+    pub via: Option<String>,
 }
 
 /// Estimated tokens: characters / 4, rounded up (no tokenizer, so the
@@ -390,6 +392,9 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         if let Some(c) = &it.cite {
             first.push(' ');
             first.push_str(c);
+        }
+        if let Some(v) = &it.via {
+            first.push_str(&format!(" (via {v})"));
         }
         if show_source {
             if let Some(s) = &it.source {

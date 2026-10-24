@@ -55,6 +55,9 @@ pub use reembed::ReembedOpts;
 /// Memory branches: fork, rewind, merge, diff, discard (docs/specs/memory-branches.md).
 #[path = "memory_branch.rs"]
 pub mod branch;
+// graph-aware recall: inferred ontology links and personalized PageRank
+#[path = "memory_graph.rs"]
+pub mod graph;
 use branch::{Scope, MEM_BRANCH, MEM_COPIED};
 pub use branch::{
     BranchInfo, BranchesOpts, DiffEntities, DiffMem, DiffOpts, DiffPending, DiffResult, DiscardOpts, DiscardResult,
@@ -785,6 +788,15 @@ pub struct RecallOpts {
     /// What to search: `memory` and/or `docs` (document chunks); default
     /// both. `kind` overrides it.
     pub sources: Option<Vec<String>>,
+    /// Graph recall (memory_graph.rs): `off`, `inferred` (memories linked
+    /// through the ontology's facts, inferred ones included) or `ppr`
+    /// (personalized PageRank re-rank around the hits, plus `inferred`).
+    pub graph: Option<String>,
+    /// Share of the PageRank score in a `ppr` re-rank (default 0.3).
+    pub graph_weight: Option<f64>,
+    /// Entity profiles in the context block (memory_consolidate.rs; default
+    /// true when profiles exist).
+    pub profiles: Option<bool>,
 }
 
 /// Options of [`Db::memory_set`]: change a memory's importance, expiry or
@@ -1083,6 +1095,11 @@ pub struct RecallHit {
     /// heading}` (docs/specs/documents.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<JsonValue>,
+    /// Why graph recall included it: `inferred: <property>` (an inferred
+    /// ontology fact), `linked: <property>` (a stated one) or `graph`
+    /// (PageRank neighbourhood).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 impl RecallHit {
@@ -3476,6 +3493,14 @@ impl<'s, S: Storage<'s>> Db<S> {
             None | Some("list") | Some("context") => {}
             Some(f) => bail!("`recall` option format must be 'list' or 'context', got '{f}'"),
         }
+        let gmode = opts.graph.clone().unwrap_or_else(|| graph::DEFAULT_GRAPH_MODE.to_string());
+        if !graph::GRAPH_MODES.contains(&gmode.as_str()) {
+            bail!("`recall` option graph must be 'off', 'inferred' or 'ppr', got '{gmode}'");
+        }
+        let gw = opts.graph_weight.unwrap_or(graph::DEFAULT_GRAPH_WEIGHT);
+        if !(0.0..=1.0).contains(&gw) {
+            bail!("`recall` option graph_weight must be in [0, 1], got {gw}");
+        }
         let diversity = opts.diversity.unwrap_or(true);
         let max_stmt = opts.max_per_statement.unwrap_or(DEFAULT_MAX_PER_STATEMENT);
         let max_src = opts.max_per_source.unwrap_or(DEFAULT_MAX_PER_SOURCE);
@@ -3560,6 +3585,29 @@ impl<'s, S: Storage<'s>> Db<S> {
                     rows.push(r);
                 }
             }
+        }
+        // graph recall: inferred ontology links, PageRank (memory_graph.rs)
+        let mut via: BTreeMap<String, String> = BTreeMap::new();
+        // (inferred links need no hit: the query's own nodes can seed them)
+        if gmode != "off" && eids.is_none() {
+            let g = self.graph_recall(&sc, &ns, query, &gmode, &rows, we, gw, opts.as_of, opts.kind.as_deref())?;
+            for r in rows.iter_mut() {
+                if let Some(id) = cell_str(&r[0]) {
+                    if let Some(&v) = g.set.get(&id) {
+                        if g.replace || v > r[1].get_float().unwrap_or(0.0) {
+                            r[1] = DataValue::from(v);
+                        }
+                    }
+                }
+            }
+            for r in g.new_rows {
+                if let Some(id) = cell_str(&r[0]) {
+                    if expanded.insert(id) {
+                        rows.push(r);
+                    }
+                }
+            }
+            via = g.via;
         }
         let ids: Vec<String> = rows.iter().filter_map(|r| cell_str(&r[0])).collect();
         let iv = intervals(&self.mem_history(&sc, &ids)?, read_at);
@@ -3721,11 +3769,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                     claim: None,
                     events: sev.get(&id).cloned().unwrap_or_default(),
                     doc: None,
+                    via: via.get(&id).cloned(),
                     id,
                 })
             })
             .collect();
-        if blend || !expanded.is_empty() || !qdates.is_empty() {
+        if blend || !expanded.is_empty() || !qdates.is_empty() || gmode != "off" {
             // stable: equal scores keep the relevance order
             hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         }
@@ -4007,6 +4056,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 cite: h.doc.as_ref().and_then(|d| serde_json::from_value::<DocCite>(d.clone()).ok()).map(|d| d.cite()),
                 doc_name: h.doc.as_ref().and_then(|d| d.get("name")).and_then(|x| x.as_str()).map(|x| x.to_string()),
                 doc_page: h.doc.as_ref().and_then(|d| d.get("page")).and_then(|x| x.as_u64()).map(|x| x as usize),
+                via: h.via,
                 id: h.id,
                 text: h.text,
                 valid_from: h.valid_from,
