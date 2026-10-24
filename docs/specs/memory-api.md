@@ -558,8 +558,10 @@ Options of `remember`: `extract` (default on; `false` off for the call, `true` r
 *Code: `kleos-core/src/memory_graph.rs`. Tests: `kleos-core/tests/memory_graph.rs`.*
 
 `recall {graph: 'off' | 'inferred' | 'ppr', graph_weight?}` adds the memory
-graph to the hybrid search. Default: `off` (see "Results" in
-docs/benchmarks/memory.md, "Graph recall and consolidation").
+graph to the hybrid search. Default: `off`: `ppr` helped LongMemEval (QA +5
+net, multi-session Rall@10 0.792 → 0.917) and hurt LoCoMo (QA −3 net, all
+multi-hop), and `inferred` rarely fires on either (docs/benchmarks/memory.md,
+"Graph recall and consolidation").
 
 **`inferred`: memories reached through the ontology's facts.** The facts of
 the namespace (its lineage, each level as of its cut) and everything the active

@@ -92,4 +92,8 @@ Recalled memories, grouped by topic, …
 
 ## Results
 
-See "Graph recall and consolidation" in `docs/benchmarks/memory.md`.
+See "Graph recall and consolidation" in `docs/benchmarks/memory.md`. In short:
+summaries in the context block +6 QA net on LoCoMo (multi-hop 0.673 → 0.727),
+neutral on LongMemEval (knowledge-update −2: a summary can quote a replaced
+value); profiles within noise on both; 7.7× / 4.6× compression; about 3 s per
+LoCoMo conversation, no LLM.
