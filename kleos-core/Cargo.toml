@@ -103,7 +103,7 @@ cypher = []
 ## from the Hugging Face cache, downloading missing files when a model is
 ## enabled (`HF_HUB_OFFLINE=1` to forbid). Off by default: the default build has no
 ## ML dependencies, and models are never bundled. candle 0.11 needs a newer toolchain than 1.90 (verified on 1.99).
-infer = ["dep:kleos-infer", "kleos-infer/download"]
+infer = ["dep:kleos-infer", "kleos-infer/download", "kleos-infer/gliner"]
 ## Engram overlay store (kleos fork; docs/specs/engram-overlay.md): per-user
 ## and per-agent row edits to a model's Engram tables, versioned with valid
 ## time, provenance per fact, export as safetensors. Pulls in `kleos-engram`

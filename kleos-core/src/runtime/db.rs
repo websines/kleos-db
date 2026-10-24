@@ -2777,6 +2777,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             // kleos fork: embedder on/off switch (process-wide state, no tx)
             SysOp::Embedder(op) => self.run_embedder_op(op, read_only, true),
             SysOp::Decider(op) => self.run_decider_op(op, read_only, true),
+            SysOp::Extractor(op) => crate::runtime::extractor::run_extractor_op(op, read_only),
             SysOp::MemApi(op, _) => bail!(
                 "`::memory {op}` must run as a script of its own, not inside an imperative block"
             ),
@@ -3567,6 +3568,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             // runs its own scripts (docs/specs/embedder-toggle.md)
             SysOp::Embedder(op) => return self.run_embedder_op(op, read_only, false),
             SysOp::Decider(op) => return self.run_decider_op(op, read_only, false),
+            SysOp::Extractor(op) => return crate::runtime::extractor::run_extractor_op(op, read_only),
             // kleos fork: the memory API runs its own scripts
             // (docs/specs/memory-api.md)
             SysOp::MemApi(op, args) => {
