@@ -119,7 +119,8 @@ def ingest(db, ns, units):
     """remember() every unit in time order; return id -> [src], stats, per-call ms."""
     owner = {}
     lat = []
-    st = {"added": 0, "duplicate": 0, "superseded": 0, "pending": 0, "errors": 0}
+    st = {"added": 0, "duplicate": 0, "superseded": 0, "pending": 0, "gated": 0, "errors": 0}
+    ingest.decisions = []
     for u in units:
         if not u["text"]:
             continue
@@ -142,7 +143,35 @@ def ingest(db, ns, units):
             owner.setdefault(r["id"], []).append(u["src"])
         st["superseded"] += len(r.get("superseded") or [])
         st["pending"] += len(r.get("tentative") or [])
+        st["gated"] += len(r.get("gated") or [])
+        claims = {c.get("id"): c.get("text") for c in (r.get("claims") or [])}
+        for d in r.get("decisions") or []:  # supersede / duplicate decisions that acted or wait for review
+            if d.get("action") in ("supersede", "superseded", "duplicate", "pending", "auto"):
+                ingest.decisions.append({
+                    "src": u["src"], "new": (claims.get(d.get("claim")) or u["text"])[:300],
+                    "old": (d.get("candidate_text") or "")[:300], "template": d.get("template"),
+                    "action": d.get("action"), "band": d.get("band"), "p": round(d.get("p") or 0, 4),
+                    "entities": u.get("entities")})
     return owner, st, lat
+
+
+def entity_stats(db, ns):
+    """Entities kleos resolved in a namespace: count, merges, possible-same links, a sample."""
+    def q(script):
+        try:
+            return db.run_script(script, {"ns": ns}, True)["rows"]
+        except Exception:
+            return []
+    ents = q("?[eid, name] := *kleos_mem_entity{ns: $ns, eid, name}")
+    eids = {e[0] for e in ents}
+    merges = [m for m in q("?[from, into] := *kleos_entity_merge{relation: 'kleos_mem_entity', from, into @ 'NOW'}") if m[0] in eids]
+    links = [m for m in q("?[a, b] := *kleos_entity_link{relation: 'kleos_mem_entity', a, b}") if m[0] in eids]
+    names = {e[0]: e[1] for e in ents}
+    ments = q("?[eid, count(id)] := *kleos_mem_mention{ns: $ns, id, eid}")
+    top = sorted(ments, key=lambda x: -x[1])[:15]
+    return {"entities": len(ents), "merges": len(merges), "possible_same": len(links),
+            "merge_pairs": [[names.get(m[0], str(m[0])), names.get(m[1], str(m[1]))] for m in merges][:30],
+            "top": [[names.get(e, e), n] for e, n in top]}
 
 
 def recall(db, ns, query, owner, k, **opts):
@@ -239,6 +268,16 @@ def run_lme(args, outdir):
               f"recall {ms10:.0f} ms", flush=True)
 
 
+_EF = {}
+
+
+def ents_file(spec):
+    """--entities file:<path>: entity lists precomputed per LoCoMo turn (scripts/gliner/e2e_entities.py)."""
+    if spec not in _EF:
+        _EF[spec] = json.loads(Path(spec.split(":", 1)[1]).read_text())
+    return _EF[spec]
+
+
 def run_locomo(args, outdir):
     data = C.locomo_data()
     if args.n:
@@ -254,6 +293,10 @@ def run_locomo(args, outdir):
             u["source"] = f"{u['session']}#{u['src']}"
             if args.entities == "caps":
                 u["entities"] = C.caps_entities(u["text"])
+            elif args.entities and args.entities.startswith("file:"):
+                e = ents_file(args.entities)["items"].get(f"{sid}/{u['src']}")
+                if e and e["entities"]:
+                    u["entities"] = e["entities"]
         ns = "c_" + sid
         db = open_db(args.variant, args.device)
         t0 = time.perf_counter()
@@ -283,9 +326,12 @@ def run_locomo(args, outdir):
                     "hits10": h10,
                     "hits5": h5,
                 })
+        estats = entity_stats(db, ns)
+        decisions = ingest.decisions
         db.close()
         for cname, qs in per.items():
             rec = {"sample_id": sid, "n_units": len(units), "ingest": st, "ingest_s": ingest_s, "config": configs[cname],
+                   "entity_stats": estats, "decisions": decisions,
                    "remember_ms": lat, "last_session_date": max(u["at"] for u in units), "questions": qs}
             f = files[cname]
             tmp = f.with_suffix(".tmp")
@@ -304,8 +350,9 @@ def main():
     ap.add_argument("--configs", default=None, help="recall option sets, e.g. 'base,default' (see CONFIGS) or "
                     "'name={\"max_per_source\": 2}'; results go to <variant>+<name>")
     ap.add_argument("--context-budget", type=int, default=0, help="also store recall's context block (tokens)")
-    ap.add_argument("--entities", default=None, choices=[None, "caps"],
-                    help="LoCoMo: pass entities to remember (caps: the speaker and capitalised words)")
+    ap.add_argument("--entities", default=None,
+                    help="LoCoMo: pass entities to remember (caps: the speaker and capitalised words; "
+                         "file:<path>: precomputed per turn, e.g. GLiNER, results go to <variant>+gliner)")
     ap.add_argument("--n", type=int, default=0, help="stratified sample size (LongMemEval) / first n conversations (LoCoMo)")
     ap.add_argument("--ids-from", default=None, help="'ku_heldout', 'ku' or a file of question ids")
     ap.add_argument("--seed", type=int, default=C.SEED)
@@ -320,7 +367,7 @@ def main():
     args = ap.parse_args()
     args.shard_i, args.shard_n = map(int, args.shard.split("/"))
     unit = args.unit if args.bench != "locomo" else "turn"
-    vdir = args.variant + ("@q" if args.as_of == "question" else "") + ("+ents" if args.entities else "")
+    vdir = args.variant + ("@q" if args.as_of == "question" else "") + ("+ents" if args.entities == "caps" else "+gliner" if args.entities else "")
     configs = parse_configs(args.configs) or {"": {}}
     outdirs = {}
     for cname in configs:
