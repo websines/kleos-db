@@ -489,6 +489,28 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect())
     }
 
+    /// Current summary texts of `groups`, in that order.
+    pub(crate) fn summaries_of(&'s self, ns: &str, groups: &[String]) -> Result<Vec<String>> {
+        if groups.is_empty() || !self.consol_exists(MEM_SUMMARY) {
+            return Ok(vec![]);
+        }
+        let mut by: BTreeMap<String, String> = BTreeMap::new();
+        for r in self
+            .mem_q(
+                &format!(
+                    "?[grp, text] := grp in $groups, *{MEM_SUMMARY}{{ns: $ns, sid, grp}}, *{MEM}{{ns: $ns, id: sid, text @ 'NOW'}}"
+                ),
+                vec![("ns", s(ns)), ("groups", str_list(groups))],
+            )?
+            .rows
+        {
+            if let (Some(g), Some(t)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                by.insert(g, t);
+            }
+        }
+        Ok(groups.iter().filter_map(|g| by.get(g).cloned()).collect())
+    }
+
     // ----------------------------------------------------------- summaries
 
     fn build_summaries(

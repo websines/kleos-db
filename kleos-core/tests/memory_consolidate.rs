@@ -68,6 +68,15 @@ fn summaries_built_rebuilt_and_erased() {
     let sum = hits[0].clone();
     assert!(sum.text.starts_with("Summary of chat-1 ("), "{}", sum.text);
     assert_eq!(sum.role.as_deref(), Some("other"));
+    // not a hit by default; the context block shows it for the conversation
+    let plain = db.recall("Caroline dog", RecallOpts { ns: Some("u".into()), ..Default::default() }).unwrap();
+    assert!(!plain.iter().any(|h| h.kind == "summary"), "{plain:?}");
+    let ctx = db.recall_context("Caroline dog", RecallOpts { ns: Some("u".into()), ..Default::default() }).unwrap();
+    assert!(ctx.text.contains("Conversation summaries") && ctx.text.contains("Summary of chat-1"), "{}", ctx.text);
+    let off = db
+        .recall_context("Caroline dog", RecallOpts { ns: Some("u".into()), summaries: Some(false), ..Default::default() })
+        .unwrap();
+    assert!(!off.text.contains("Summary of"), "{}", off.text);
     // unchanged sources: nothing to do
     let r = db.memory_call("consolidate", json!({"ns": "u", "min_claims": 8})).unwrap();
     assert_eq!(r["summaries"]["unchanged"], json!(1), "{r}");

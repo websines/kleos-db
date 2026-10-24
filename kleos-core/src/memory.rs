@@ -206,6 +206,8 @@ const DEFAULT_EXPAND_WEIGHT: f64 = 0.5;
 const EXPAND_FROM: usize = 3;
 const EXPAND_MAX_DEGREE: usize = 25;
 const EXPAND_MAX_NEW: usize = 30;
+/// Session summaries a context block shows at most.
+const SUMMARIES_IN_CONTEXT: usize = 3;
 /// List hits of a claim of a longer statement carry this many characters of
 /// the statement around the claim as their `text` (`recall {hit_text,
 /// text_chars}`); 98% of LongMemEval's and all of LoCoMo's statements fit.
@@ -800,6 +802,10 @@ pub struct RecallOpts {
     /// Entity profiles in the context block (memory_consolidate.rs; default
     /// true when profiles exist).
     pub profiles: Option<bool>,
+    /// Session summaries of the hits' conversations in the context block
+    /// (memory_consolidate.rs; default true when summaries exist). Summary
+    /// memories are hits only with `kind: 'summary'`.
+    pub summaries: Option<bool>,
 }
 
 /// Options of [`Db::memory_set`]: change a memory's importance, expiry or
@@ -3568,6 +3574,11 @@ impl<'s, S: Storage<'s>> Db<S> {
             !opts.include_archived,
             (!opts.include_expired).then_some(read_at),
         )?;
+        // summary memories are derived: hits only when asked for by kind
+        // (the context block shows them per conversation instead)
+        if opts.kind.as_deref() != Some(consolidate::SUMMARY_KIND) {
+            rows.retain(|r| r[3].get_str() != Some(consolidate::SUMMARY_KIND));
+        }
         // entity-graph expansion: other memories about the top hits' entities
         let mut expanded: BTreeSet<String> = BTreeSet::new();
         if opts.expand.unwrap_or(false) && eids.is_none() && !rows.is_empty() {
@@ -3966,6 +3977,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let budget = opts.budget.unwrap_or(DEFAULT_CONTEXT_BUDGET);
         let show_source = opts.show_source;
         let want_profiles = opts.profiles.unwrap_or(true);
+        let want_summaries = opts.summaries.unwrap_or(true);
         let ns = ns_of(&opts.ns);
         let sc = self.mem_scope(&ns)?;
         let read_at = opts.as_of.unwrap_or_else(now_micros);
@@ -4086,27 +4098,46 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
         let profiles = self.profiles_of(&ns, &nodes)?;
-        if profiles.is_empty() {
+        // session summaries of the hits' conversations, best-ranked first
+        let groups: Vec<String> = if want_summaries {
+            items.iter().filter_map(|it| it.source.as_deref().map(|s| memory_recall::source_group(s).to_string())).unique().collect()
+        } else {
+            vec![]
+        };
+        let summaries = self.summaries_of(&ns, &groups)?;
+        if profiles.is_empty() && summaries.is_empty() {
             return Ok(memory_recall::render_context(&items, budget, show_source));
         }
-        let mut lines: Vec<String> = vec![];
         let mut cost = 0usize;
-        let reserve = budget / 4;
-        for (_, t) in profiles {
-            let c = memory_recall::estimate_tokens(&t) + 3;
-            if cost + c > reserve {
-                continue;
+        let mut take = |texts: Vec<String>, reserve: usize, max: usize| -> Vec<String> {
+            let mut out = vec![];
+            let mut used = 0usize;
+            for t in texts.into_iter().take(max) {
+                let c = memory_recall::estimate_tokens(&t) + 3;
+                if used + c > reserve {
+                    continue;
+                }
+                used += c;
+                out.push(format!("- {t}"));
             }
-            cost += c;
-            lines.push(format!("- {t}"));
-        }
+            cost += used;
+            out
+        };
+        let plines = take(profiles.into_iter().map(|x| x.1).collect(), budget / 4, usize::MAX);
+        let slines = take(summaries, budget / 5, SUMMARIES_IN_CONTEXT);
         let mut ctx = memory_recall::render_context(&items, budget.saturating_sub(cost), show_source);
-        if !lines.is_empty() {
-            let block = format!("Profiles (current facts per person or thing):\n{}\n\n", lines.join("\n"));
+        let mut block = String::new();
+        if !plines.is_empty() {
+            block.push_str(&format!("Profiles (current facts per person or thing):\n{}\n\n", plines.join("\n")));
+        }
+        if !slines.is_empty() {
+            block.push_str(&format!("Conversation summaries (the most central statements of each):\n{}\n\n", slines.join("\n")));
+        }
+        if !block.is_empty() {
             ctx.text = format!("{block}{}", ctx.text);
             ctx.tokens = memory_recall::estimate_tokens(&ctx.text);
             ctx.budget = budget;
-            ctx.profiles = lines;
+            ctx.profiles = plines;
         }
         Ok(ctx)
     }
