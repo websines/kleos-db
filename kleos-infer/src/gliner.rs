@@ -375,9 +375,9 @@ struct EncLayer {
     outb: Tensor,
     ln2w: Tensor,
     ln2b: Tensor,
-    /// `key_proj(rel_emb)` as `[1, heads, head_dim, 2·span]` (c2p).
+    /// `key_proj(rel_emb)` as `[heads, head_dim, 2·span]` (c2p).
     pos_k_t: Tensor,
-    /// `query_proj(rel_emb)` as `[1, heads, head_dim, 2·span]` (p2c).
+    /// `query_proj(rel_emb)` as `[heads, head_dim, 2·span]` (p2c).
     pos_q_t: Tensor,
 }
 
@@ -561,10 +561,10 @@ impl Gliner {
             let qb = ld.f32(&n("attention.self.query_proj.bias"))?;
             let k = ld.linear(&n("attention.self.key_proj.weight"))?;
             let kb = ld.f32(&n("attention.self.key_proj.bias"))?;
-            // [2span, hidden] -> [1, h, hd, 2span]
+            // [2span, hidden] -> [h, hd, 2span]
             let pos_t = |lin: &Linear, b: &Tensor| -> Result<Tensor> {
                 let y = lin.forward(&rel)?.broadcast_add(b)?;
-                Ok(y.reshape((span2, h, hd))?.permute((1, 2, 0))?.unsqueeze(0)?.contiguous()?)
+                Ok(y.reshape((span2, h, hd))?.permute((1, 2, 0))?.contiguous()?)
             };
             let pos_k_t = pos_t(&k, &kb)?;
             let pos_q_t = pos_t(&q, &qb)?;
@@ -734,6 +734,76 @@ impl Gliner {
         with_pool(|| self.extract_inner(texts, labels, floor, None))
     }
 
+    /// Like [`Gliner::extract`] for texts of any length: a text longer than
+    /// `window` words is read in windows of `window` words that overlap by
+    /// `overlap` (gliner2's long-text defaults are 384 and 64); the windows'
+    /// spans are mapped back to the text and merged per label with the same
+    /// `flat` resolution, so a span seen in two windows is kept once, with its
+    /// higher score. Offsets index the text as given.
+    pub fn extract_windows(
+        &self,
+        texts: &[&str],
+        labels: &[&str],
+        floor: f32,
+        window: usize,
+        overlap: usize,
+    ) -> Result<Vec<Vec<GlinerSpan>>> {
+        if window == 0 || overlap >= window {
+            return Err(Error::Config("window must be > 0 and larger than overlap".into()));
+        }
+        // (text index, byte start of the window, window text)
+        let mut chunks: Vec<(usize, usize, &str)> = vec![];
+        for (ti, t) in texts.iter().enumerate() {
+            let words = split_words(t);
+            if words.len() <= window {
+                chunks.push((ti, 0, t));
+                continue;
+            }
+            let mut sw = 0;
+            loop {
+                let ew = (sw + window).min(words.len());
+                let (a, b) = (words[sw].1, words[ew - 1].2);
+                chunks.push((ti, a, &t[a..b]));
+                if ew == words.len() {
+                    break;
+                }
+                sw += window - overlap;
+            }
+        }
+        let inputs: Vec<&str> = chunks.iter().map(|c| c.2).collect();
+        let found = self.extract(&inputs, labels, floor)?;
+        let mut per_text: Vec<Vec<GlinerSpan>> = vec![vec![]; texts.len()];
+        let mut windows = vec![0usize; texts.len()];
+        for ((ti, off, _), spans) in chunks.iter().zip(found) {
+            windows[*ti] += 1;
+            per_text[*ti].extend(spans.into_iter().map(|mut s| {
+                s.start += off;
+                s.end += off;
+                s
+            }));
+        }
+        Ok(per_text
+            .into_iter()
+            .zip(windows)
+            .map(|(spans, nw)| {
+                if nw <= 1 {
+                    return spans;
+                }
+                let mut out = vec![];
+                for q in 0..labels.len() {
+                    let mine: Vec<&GlinerSpan> = spans.iter().filter(|s| s.label == q).collect();
+                    let items: Vec<(f32, usize, usize)> = mine.iter().map(|s| (s.score, s.start, s.end)).collect();
+                    for (p, a, b) in resolve_flat(&items) {
+                        if let Some(s) = mine.iter().find(|s| s.start == a && s.end == b && s.score == p) {
+                            out.push((*s).clone());
+                        }
+                    }
+                }
+                out
+            })
+            .collect())
+    }
+
     /// Every intermediate of one text (parity tests).
     #[doc(hidden)]
     pub fn debug_stages(&self, text: &str, labels: &[&str], floor: f32) -> Result<GlinerStages> {
@@ -839,11 +909,13 @@ impl Gliner {
                 p2c_t[kj * l + qi] = pos;
             }
         }
-        let c2p = Tensor::from_vec(c2p, (1, 1, l, l), dev)?.broadcast_as((b, h, l, l))?.contiguous()?;
-        let p2c_t = Tensor::from_vec(p2c_t, (1, 1, l, l), dev)?.broadcast_as((b, h, l, l))?.contiguous()?;
+        // heads-first layout [h, b, l, ·]: the relative-position products are
+        // then one batched matmul per head over all rows ([h, b·l, hd] × [h, hd, 2span])
+        let c2p = Tensor::from_vec(c2p, (1, 1, l, l), dev)?.broadcast_as((h, b, l, l))?.contiguous()?;
+        let p2c_t = Tensor::from_vec(p2c_t, (1, 1, l, l), dev)?.broadcast_as((h, b, l, l))?.contiguous()?;
         let ids_t = Tensor::from_vec(ids, (b, l), dev)?;
         let keep_t = Tensor::from_vec(keep, (b * l, 1), dev)?;
-        let mask_t = Tensor::from_vec(key_mask, (b, 1, 1, l), dev)?;
+        let mask_t = Tensor::from_vec(key_mask, (1, b, 1, l), dev)?;
         let ln = |x: &Tensor, wt: &Tensor, bias: &Tensor| -> Result<Tensor> {
             Ok(candle_nn::ops::layer_norm(&x.contiguous()?, wt, bias, eps)?)
         };
@@ -851,21 +923,21 @@ impl Gliner {
         let mut x = w.embed.lookup(&ids_t)?.reshape((b * l, hidden))?;
         x = ln(&x, &w.emb_lnw, &w.emb_lnb)?.broadcast_mul(&keep_t)?;
         let scale = ((hd as f32) * 3.0).sqrt() as f64;
-        let heads = |t: Tensor| -> Result<Tensor> { Ok(t.reshape((b, l, h, hd))?.transpose(1, 2)?.contiguous()?) };
+        let heads = |t: Tensor| -> Result<Tensor> { Ok(t.reshape((b, l, h, hd))?.permute((2, 0, 1, 3))?.contiguous()?) };
+        let rel_att = |t: &Tensor, pos: &Tensor, idx: &Tensor| -> Result<Tensor> {
+            let full = t.reshape((h, b * l, hd))?.matmul(pos)?.reshape((h, b, l, pos.dim(2)?))?;
+            Ok(full.gather(idx, 3)?)
+        };
         for layer in &w.layers {
             let q = heads(lin(&layer.q, &layer.qb, &x)?)?;
             let k = heads(lin(&layer.k, &layer.kb, &x)?)?;
             let v = heads(lin(&layer.v, &layer.vb, &x)?)?;
             let mut att = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? / scale)?;
-            let c2p_att = q.broadcast_matmul(&layer.pos_k_t)?.contiguous()?.gather(&c2p, 3)?;
-            let p2c_att = k
-                .broadcast_matmul(&layer.pos_q_t)?
-                .contiguous()?
-                .gather(&p2c_t, 3)?
-                .transpose(2, 3)?;
+            let c2p_att = rel_att(&q, &layer.pos_k_t, &c2p)?;
+            let p2c_att = rel_att(&k, &layer.pos_q_t, &p2c_t)?.transpose(2, 3)?;
             att = (att + ((c2p_att + p2c_att)? / scale)?)?.broadcast_add(&mask_t)?;
             let probs = candle_nn::ops::softmax_last_dim(&att.contiguous()?)?;
-            let ctx = probs.matmul(&v)?.transpose(1, 2)?.reshape((b * l, hidden))?;
+            let ctx = probs.matmul(&v)?.permute((1, 2, 0, 3))?.reshape((b * l, hidden))?;
             let a = ln(&(lin(&layer.o, &layer.ob, &ctx)? + &x)?, &layer.ln1w, &layer.ln1b)?;
             let inter = lin(&layer.i, &layer.ib, &a)?.gelu_erf()?;
             x = ln(&(lin(&layer.out, &layer.outb, &inter)? + &a)?, &layer.ln2w, &layer.ln2b)?;

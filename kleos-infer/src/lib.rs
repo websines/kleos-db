@@ -44,6 +44,7 @@ mod decider_nano;
 mod device;
 mod error;
 mod gemma;
+#[cfg(feature = "gliner")]
 mod gliner;
 mod hub;
 mod linear;
@@ -54,6 +55,7 @@ pub use decider_nano::{DeciderNano, DECIDER_BATCH_TOKENS, DECIDER_NANO_BASE_REPO
 pub use device::DevicePref;
 pub use error::{Error, Result};
 pub use gemma::{GemmaEmbedder, GemmaModel, GEMMA_DOCUMENT_PROMPT, GEMMA_QUERY_PROMPT};
+#[cfg(feature = "gliner")]
 pub use gliner::{
     entity_schema_words, log_bucket_position, normalize_text, resolve_flat, split_words, Gliner, GlinerSpan, GlinerStages,
     GLINER_BATCH_TOKENS, GLINER_REPO,

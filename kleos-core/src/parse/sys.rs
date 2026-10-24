@@ -106,6 +106,8 @@ pub enum SysOp {
     /// kleos fork: `::decider list | enable | disable | fit | fitted |
     /// forget` (docs/specs/decide.md).
     Decider(DeciderOp),
+    /// `::extractor ...` (kleos fork).
+    Extractor(ExtractorOp),
     /// kleos fork: `::memory init | remember | recall | forget | reflect |
     /// link | set | flush` (docs/specs/memory-api.md) and the branch ops
     /// `fork | rewind | merge | diff | discard | branches`
@@ -289,6 +291,53 @@ fn parse_engram_op(
         }
     }
     Ok(EngramOp { verb, model, opts })
+}
+
+/// `::extractor ...` (kleos fork): entity extractors for automatic entities.
+#[derive(Debug)]
+pub(crate) enum ExtractorOp {
+    /// One row per enabled or disabled extractor.
+    List,
+    /// Name and spec.
+    Enable(String, crate::extract::ExtractorSpec),
+    /// Name.
+    Disable(String),
+}
+
+fn parse_extractor_op(
+    inner: crate::parse::Pair<'_>,
+    param_pool: &BTreeMap<String, DataValue>,
+) -> Result<ExtractorOp> {
+    let inner = inner.into_inner().next().unwrap();
+    Ok(match inner.as_rule() {
+        Rule::extractor_list => ExtractorOp::List,
+        Rule::extractor_disable => ExtractorOp::Disable(embedder_name(inner.into_inner().next().unwrap())?),
+        Rule::extractor_enable => {
+            let mut parts = inner.into_inner();
+            let name = embedder_name(parts.next().unwrap())?;
+            let mut spec = crate::extract::ExtractorSpec::default();
+            for opt in parts {
+                let mut o = opt.into_inner();
+                let key = o.next().unwrap().as_str();
+                let val = build_expr(o.next().unwrap(), param_pool)?.eval_to_const()?;
+                let v = match val {
+                    DataValue::Str(s) => s.to_string(),
+                    v => bail!("`::extractor enable` option '{key}' must be a string, got {v:?}"),
+                };
+                match key {
+                    "model" => spec.model = Some(v),
+                    "path" => spec.path = Some(v),
+                    "precision" => spec.precision = Some(v),
+                    "device" => spec.device = Some(v),
+                    other => bail!(
+                        "unknown option '{other}' for `::extractor enable`: expected model, path, precision or device"
+                    ),
+                }
+            }
+            ExtractorOp::Enable(name, spec)
+        }
+        r => unreachable!("{:?}", r),
+    })
 }
 
 /// `::decider ...` (kleos fork).
@@ -599,6 +648,7 @@ pub(crate) fn parse_sys(
         )?),
         Rule::embedder_op => SysOp::Embedder(parse_embedder_op(inner, param_pool)?),
         Rule::decider_op => SysOp::Decider(parse_decider_op(inner, param_pool)?),
+        Rule::extractor_op => SysOp::Extractor(parse_extractor_op(inner, param_pool)?),
         Rule::mem_api_op => parse_mem_api_op(inner, param_pool)?,
         Rule::entity_op => SysOp::Entity(parse_entity_op(inner, param_pool)?),
         Rule::engram_op => SysOp::Engram(parse_engram_op(inner, param_pool)?),
