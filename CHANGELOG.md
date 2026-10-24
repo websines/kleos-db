@@ -9,6 +9,9 @@ to kleos.
 
 ## Unreleased
 
+### Changed
+- **Graph recall and consolidation are on by default** (the user's choice): `recall` defaults to `graph: 'ppr'` (which also follows inferred ontology links; `graph: 'off'` opts out), and each namespace consolidates automatically after every 200 new memories (`every: 0` opts out), run by a lazily started in-process thread (`DbInstance::consolidate_kick`) on the flow queue `consolidate`; profiles and summaries appear in the context block once built. The auto-consolidation counters are per open store, not per process.
+
 ### Fixed
 - **Memory text search missed words whose stem is an English stopword** (`billing` → `bill`, `running` → `run`): the memory FTS index ran the stemmer before the built-in `'en'` stopword list, which also holds content words. The index now drops a short list of function words before stemming; stores rebuild the index on first use (memory schema v8).
 

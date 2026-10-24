@@ -1393,8 +1393,49 @@ impl DbInstance {
         if r.documents.iter().any(|d| d.get("status").and_then(|x| x.as_str()) == Some("running")) {
             self.docs_kick(true);
         }
+        self.consolidate_kick();
         Ok(r)
     }
+    /// Run started automatic consolidations (memory_consolidate.rs) on a
+    /// background thread of this process: started lazily after a `remember`
+    /// that queued one, it ticks the `consolidate` flow queue until nothing is
+    /// due and exits. Leases make it safe beside other flow workers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn consolidate_kick(&self) {
+        use std::sync::atomic::Ordering;
+        let st = dispatch_db!(self, db => db.consol_state.clone());
+        if !st.pending.load(Ordering::SeqCst) || st.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let db = self.clone();
+        let _ = std::thread::Builder::new().name("kleos-consolidate".to_string()).spawn(move || {
+            struct Clear(Arc<memory::consolidate::ConsolState>);
+            impl Drop for Clear {
+                fn drop(&mut self) {
+                    self.0.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _clear = Clear(st.clone());
+            let args = serde_json::json!({"queues": [memory::consolidate::CONSOLIDATE_QUEUE], "schedules": false,
+                "worker": format!("consolidate-{}", std::process::id())});
+            loop {
+                st.pending.store(false, Ordering::SeqCst);
+                let ran = match db.flow_call("tick", args.clone()) {
+                    Ok(v) => v.get("ran").and_then(|r| r.as_array()).map(|r| r.len()).unwrap_or(0),
+                    Err(e) => {
+                        eprintln!("kleos consolidation: {e}");
+                        0
+                    }
+                };
+                if ran == 0 && !st.pending.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    #[inline]
+    pub fn consolidate_kick(&self) {}
     /// Dispatcher method. See [crate::Db::recall].
     pub fn recall(&self, query: &str, opts: memory::RecallOpts) -> Result<Vec<memory::RecallHit>> {
         self.docs_kick(false);

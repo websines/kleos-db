@@ -180,6 +180,8 @@ pub struct Db<S> {
     /// The background document worker's state (docs/specs/documents.md).
     #[cfg(feature = "docs")]
     pub(crate) docs_state: Arc<crate::docs::DocsState>,
+    /// The in-process automatic consolidation runner (memory_consolidate.rs).
+    pub(crate) consol_state: Arc<crate::memory::consolidate::ConsolState>,
     pub(crate) tokenizers: Arc<TokenizerCache>,
     #[cfg(not(target_arch = "wasm32"))]
     callback_count: Arc<AtomicU32>,
@@ -448,6 +450,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             mem_access: Default::default(),
             #[cfg(feature = "docs")]
             docs_state: Default::default(),
+            consol_state: Default::default(),
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
