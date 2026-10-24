@@ -109,11 +109,24 @@ pub(crate) struct ServerArgs {
     /// `--flow-worker default`. Repeat for several queues.
     #[clap(long = "flow-worker")]
     flow_queues: Vec<String>,
+    /// Also serve MCP (protocol 2026-07-28, stateless Streamable HTTP) at
+    /// `POST /mcp`, behind the same authentication
+    /// (docs/specs/mcp-cli-skills.md).
+    #[clap(long, default_value_t = false)]
+    mcp: bool,
+    /// Default namespace of the MCP tools.
+    #[clap(long, default_value_t = String::from("default"))]
+    mcp_ns: String,
+    /// Offer the read-only `query` tool over MCP.
+    #[clap(long, default_value_t = false)]
+    mcp_allow_query: bool,
 }
 
 #[derive(Clone)]
 struct DbState {
     db: DbInstance,
+    mcp: Option<Arc<kleos_bin::mcp::McpServer>>,
+    origin: Arc<String>,
     backup_dir: Arc<PathBuf>,
     rule_senders: Arc<Mutex<BTreeMap<u32, crossbeam::channel::Sender<miette::Result<NamedRows>>>>>,
     rule_counter: Arc<AtomicU32>,
@@ -282,7 +295,16 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                         }
                         None
                     });
-                    query_grant.or_else(bearer_grant)
+                    // the server's own secret as a bearer token (MCP clients
+                    // send `Authorization: Bearer`, docs/specs/mcp-cli-skills.md)
+                    let admin_bearer = request
+                        .headers()
+                        .get("Authorization")
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|h| h.strip_prefix("Bearer "))
+                        .filter(|t| !auth_guard.is_empty() && *t == auth_guard.as_str())
+                        .map(|_| AuthContext { mutability: ScriptMutability::Mutable, principal: Principal::Admin });
+                    query_grant.or(admin_bearer).or_else(bearer_grant)
                 }
                 Some(data) => match data.to_str() {
                     Ok(s) => {
@@ -517,7 +539,17 @@ pub(crate) async fn server_main(args: ServerArgs) {
         token_table: args.token_table.map(|t| Arc::new((t, db.clone()))),
     };
 
+    let mcp = args.mcp.then(|| {
+        eprintln!("MCP {} (stateless Streamable HTTP) at {}/mcp", kleos_bin::mcp::MODERN, server_origin);
+        Arc::new(kleos_bin::mcp::McpServer::new(
+            kleos_bin::backend::Backend::Embedded(db.clone()),
+            args.mcp_ns.clone(),
+            args.mcp_allow_query,
+        ))
+    });
     let state = DbState {
+        mcp,
+        origin: Arc::new(server_origin.clone()),
         db,
         backup_dir: Arc::new(backup_dir),
         rule_senders: Default::default(),
@@ -572,6 +604,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
     let app = Router::new()
         .route("/text-query", post(text_query))
         .route("/memory/:op", post(memory_op))
+        .route("/mcp", post(mcp_post).get(mcp_not_allowed).delete(mcp_not_allowed))
         .route("/flow/:op", post(flow_op))
         .route("/doc/:op", post(doc_op))
         .route("/ontology/:op", post(ontology_op))
@@ -859,6 +892,117 @@ async fn memory_op(
             json!({"ok": false, "message": err.to_string()}).into(),
         ),
         Err(err) => internal_error(err),
+    }
+}
+
+/// `GET`/`DELETE /mcp`: protocol 2026-07-28 has no standalone stream and no
+/// sessions.
+async fn mcp_not_allowed() -> StatusCode {
+    StatusCode::METHOD_NOT_ALLOWED
+}
+
+fn principal_name(p: &Principal) -> String {
+    match p {
+        Principal::Local => "local".into(),
+        Principal::Admin => "admin".into(),
+        Principal::Bearer(h) => h.iter().map(|b| format!("{b:02x}")).collect(),
+    }
+}
+
+fn mcp_json(status: u16, body: serde_json::Value) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Whether an `Origin` may call `/mcp`: the server's own origin, or any
+/// loopback origin when the server itself is on loopback.
+fn mcp_origin_ok(origin: &str, server_origin: &str) -> bool {
+    let loopback = |o: &str| {
+        let rest = o.split_once("://").map(|x| x.1).unwrap_or(o);
+        let host = if rest.starts_with('[') { rest.split(']').next().unwrap_or("").trim_start_matches('[') } else { rest.split(':').next().unwrap_or("") };
+        matches!(host, "localhost" | "127.0.0.1" | "::1")
+    };
+    origin == server_origin || (loopback(server_origin) && loopback(origin))
+}
+
+/// `POST /mcp`: one JSON-RPC message per request (Streamable HTTP, protocol
+/// 2026-07-28; docs/specs/mcp-cli-skills.md). Validates `Origin` and the
+/// mirrored `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers, then
+/// hands the message to the stateless MCP core. No session ids are minted;
+/// `Mcp-Session-Id` and `Last-Event-ID` are ignored.
+async fn mcp_post(
+    Extension(auth): Extension<AuthContext>,
+    State(st): State<DbState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response<Body> {
+    use kleos_bin::mcp::{decode_header_value, Conn, RpcError, HEADER_MISMATCH, LEGACY, MODERN, PARSE_ERROR};
+    let Some(server) = st.mcp.clone() else {
+        return Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap();
+    };
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
+        if !mcp_origin_ok(origin, &st.origin) {
+            return mcp_json(403, RpcError::new(-32600, "Origin not allowed").to_response(None));
+        }
+    }
+    let msg: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return mcp_json(400, RpcError::new(PARSE_ERROR, format!("Parse error: {e}")).to_response(None)),
+    };
+    let id = msg.get("id").cloned();
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let mismatch = |why: String| mcp_json(400, RpcError::new(HEADER_MISMATCH, why).to_response(id.as_ref()));
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or_default().to_string();
+    let body_version = msg.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let header_version = header("mcp-protocol-version");
+    let mut conn = Conn {
+        principal: principal_name(&auth.principal),
+        read_only: matches!(auth.mutability, ScriptMutability::Immutable),
+        legacy: None,
+    };
+    if let Some(bv) = &body_version {
+        // modern request: the mirrored headers are required and must match
+        match &header_version {
+            None => return mismatch("missing MCP-Protocol-Version header".into()),
+            Some(hv) if hv != bv => return mismatch(format!("MCP-Protocol-Version header '{hv}' does not match body value '{bv}'")),
+            _ => {}
+        }
+        match header("mcp-method") {
+            None => return mismatch("missing Mcp-Method header".into()),
+            Some(hm) if hm != method => return mismatch(format!("Mcp-Method header '{hm}' does not match body value '{method}'")),
+            _ => {}
+        }
+        let name_field = match method.as_str() {
+            "tools/call" | "prompts/get" => msg.pointer("/params/name"),
+            "resources/read" => msg.pointer("/params/uri"),
+            _ => None,
+        };
+        if let Some(expected) = name_field.and_then(|v| v.as_str()) {
+            match header("mcp-name").map(|h| decode_header_value(&h)) {
+                None => return mismatch("missing Mcp-Name header".into()),
+                Some(None) => return mismatch("malformed Mcp-Name header".into()),
+                Some(Some(hn)) if hn != expected => return mismatch(format!("Mcp-Name header '{hn}' does not match body value '{expected}'")),
+                _ => {}
+            }
+        }
+    } else if method != "initialize" {
+        // an earlier-revision client: its version comes from the header
+        // (2025-06-18 and later); without one, 2025-03-26
+        match header_version.as_deref() {
+            Some(v) if v == MODERN => {} // modern header, but no _meta: the core rejects it
+            Some(v) if LEGACY.contains(&v) => conn.legacy = Some(v.to_string()),
+            Some(_) => {}
+            None => conn.legacy = Some("2025-03-26".to_string()),
+        }
+    }
+    let result = spawn_blocking(move || server.handle(&msg, &mut conn)).await;
+    match result {
+        Ok(Some((resp, status))) => mcp_json(status, resp),
+        Ok(None) => Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap(),
+        Err(err) => mcp_json(500, RpcError::new(-32603, format!("internal error: {err}")).to_response(None)),
     }
 }
 
