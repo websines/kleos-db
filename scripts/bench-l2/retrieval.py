@@ -75,6 +75,7 @@ CONFIGS = {
     "vec": {"vector_weight": 1.0},
     "vw08": {"vector_weight": 0.8},
     "vw04": {"vector_weight": 0.4},
+    "vw06": {"vector_weight": 0.6},
     "vw09": {"vector_weight": 0.9},
     "vw095": {"vector_weight": 0.95},
     # the defaults without the question-date boost
