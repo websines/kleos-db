@@ -260,7 +260,7 @@ Options:
 - `ns`, `k` (default 10), `kind`;
 - `entity`: a name. Every memory mentioning any row of that entity's cluster (its merged names) matches;
 - `as_of`: valid time in µs;
-- `vector_weight`: default 0.6;
+- `vector_weight`: default 0.9 (chosen split-half on LoCoMo and LongMemEval for both embedders; was 0.6, tuned on SciFact);
 - `hide_pending`: leave out memories with a pending `supersedes` by a memory valid at the read time. Default false;
 - `include_archived`, `include_expired`: default false;
 - ranking: `blend` (default true), `recency_weight`, `half_life_days`, `importance_weight`, `access_weight`, `question_weight` (see "Ranking");

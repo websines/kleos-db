@@ -139,8 +139,10 @@ impl DocCite {
 }
 /// Candidates scored per `remember`.
 const DEFAULT_K: usize = 5;
-/// Vector-leg weight of the hybrid fusion (the SciFact-tuned 0.6, CHANGELOG).
-const DEFAULT_VECTOR_WEIGHT: f64 = 0.6;
+/// Vector-leg weight of the hybrid fusion. 0.9, chosen split-half on memory
+/// data for both EmbeddingGemma models (docs/benchmarks/memory.md, "Fusion
+/// weight"); it was the SciFact-tuned 0.6.
+const DEFAULT_VECTOR_WEIGHT: f64 = 0.9;
 /// A `supersedes` answer at or above this p, but below the calibrated
 /// threshold, is kept for review. The tuned decider-nano calibration has
 /// threshold = τ_auto (0.995), so it has no tentative band of its own.
@@ -696,7 +698,7 @@ pub struct RecallOpts {
     pub entity: Option<String>,
     /// Valid time to read at (µs); default now, current memories only.
     pub as_of: Option<i64>,
-    /// Vector-leg weight in [0, 1] (text gets the rest); default 0.6.
+    /// Vector-leg weight in [0, 1] (text gets the rest); default 0.9.
     pub vector_weight: Option<f64>,
     /// Leave out memories that a memory valid at the read time may have
     /// superseded (a pending `supersedes` decision); default false: return
