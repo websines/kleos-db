@@ -10,6 +10,10 @@ to kleos.
 ## Unreleased
 
 ### Added
+- **Faster documents** (docs/specs/documents.md, "Speed work (wave 6)").
+  - **Native kernels for Indra's nets:** the recognizers (`ocr::fastnn`, channels-last GEMMs on Accelerate/AMX, vectorized depthwise, fused HardSwish / masked squeeze-excite / residual, native top-k) and the detector and orientation model (`ocr::convnet`, a small NCHW interpreter with hand-written convolutions). Identical text to tract on the parity sets; tract stays as the reference (`KLEOS_OCR_TRACT=1`) and the fallback. Recognizer batch 500 → 70 ms, detector 194 → 54 ms, orientation 93 → 21 ms; whole scanned book 1.58× Python indra-ocr under the same load.
+  - **Digital-page geometry fast path:** simple text-layer pages skip the render and the line detector (`KLEOS_DOC_FAST=0` turns it off); 9/11 Report 111 → 33 ms/page with a 0.998 mean word ratio against the full path; forms and tables keep the full path.
+  - **Streaming ingestion:** pages flow from one streaming extraction into chunk → embed → commit with a bounded queue; batches still commit as durable steps, so resume is unchanged. Scanned 500-page book end to end 590 → 217 s.
 - **Zero-maintenance ontologies** (docs/specs/ontology.md, "Defaults", "Learning", "Maintenance").
   - **On by default:** every memory namespace gets the personal pack unless the store turns it off (`memory_init {ontology: 'none'}`); memory branches inherit their ancestor's ontology and read facts and inference through the lineage as of the fork.
   - **Learning:** `::ontology learn` clusters the claims nothing typed (and document chunks) and proposes a property per coherent cluster (label and cues from its distinctive words, cardinality and time-variance from the data and the decider) or new vocabulary for an existing one. Auto mode (default) applies strong proposals to the namespace's learned layer `learned:<ns>`; review mode keeps them for `approve` / `reject`. `remember` runs it every `KLEOS_ONTO_LEARN_EVERY` (200) untyped claims.

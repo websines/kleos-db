@@ -12,7 +12,7 @@ rust-version = "1.91"
 [features]
 default = ["ocr", "pdf", "download"]
 ## The OCR pipeline (det / rec / order / orient / script ONNX graphs on tract).
-ocr = ["dep:tract-onnx", "dep:tract-core", "dep:tract-linalg", "dep:image"]
+ocr = ["dep:tract-onnx", "dep:tract-core", "dep:tract-linalg", "dep:image", "dep:matrixmultiply"]
 ## PDF text layers and rendering through pdfium (dynamic library, loaded at run time).
 pdf = ["dep:pdfium-render", "ocr"]
 ## Fetch model files into the Hugging Face cache on first use.
@@ -36,5 +36,7 @@ unicode-general-category = "1"
 thiserror = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+# portable GEMM for the hand-written CPU path (Accelerate is used on macOS)
+matrixmultiply = { version = "0.3", optional = true }
 
 [dev-dependencies]

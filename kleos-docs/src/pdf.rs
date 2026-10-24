@@ -19,6 +19,9 @@ const BITMAP_GRAY: i32 = 1;
 const RENDER_FLAGS: i32 = 8 | 1; // FPDF_GRAYSCALE | FPDF_ANNOT
 const OBJ_TEXT: u32 = 1;
 const OBJ_FORM: u32 = 5;
+const OBJ_PATH: u32 = 2;
+const OBJ_IMAGE: u32 = 3;
+const OBJ_SHADING: u32 = 4;
 const TEXTMODE_INVISIBLE: i32 = 3;
 
 /// The pdfium-binaries build the port was checked against (the one pypdfium2 5.14 ships).
@@ -230,6 +233,17 @@ impl Drop for Doc {
     }
 }
 
+/// What a page draws besides text (forms searched 4 deep): the cheap signal
+/// for the digital-page fast path.
+#[derive(Debug, Default, Clone)]
+pub struct Census {
+    pub images: usize,
+    /// summed image bounds, in square points
+    pub image_area: f64,
+    pub paths: usize,
+    pub shadings: usize,
+}
+
 /// A character of the text layer: its UTF-16 unit, angle and box (page space: l, b, r, t).
 pub struct RawChar {
     pub unit: u32,
@@ -319,6 +333,39 @@ impl PageRef<'_> {
             self.l.FPDFText_ClosePage(tp);
             out
         }
+    }
+
+    /// Images, paths and shadings on the page (forms searched 4 deep).
+    pub fn census(&self) -> Census {
+        let mut c = Census::default();
+        unsafe {
+            let count = self.l.FPDFPage_CountObjects(self.page);
+            let mut stack: Vec<(FPDF_PAGEOBJECT, usize)> = (0..count).map(|i| (self.l.FPDFPage_GetObject(self.page, i), 1)).collect();
+            while let Some((o, depth)) = stack.pop() {
+                if o.is_null() {
+                    continue;
+                }
+                match self.l.FPDFPageObj_GetType(o) as u32 {
+                    OBJ_IMAGE => {
+                        c.images += 1;
+                        let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+                        if self.l.FPDFPageObj_GetBounds(o, &mut l, &mut b, &mut r, &mut t) != 0 {
+                            c.image_area += ((r - l).abs() * (t - b).abs()) as f64;
+                        }
+                    }
+                    OBJ_PATH => c.paths += 1,
+                    OBJ_SHADING => c.shadings += 1,
+                    OBJ_FORM if depth < 4 => {
+                        let n = self.l.FPDFFormObj_CountObjects(o).max(0);
+                        for k in 0..n {
+                            stack.push((self.l.FPDFFormObj_GetObject(o, k as _), depth + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        c
     }
 
     /// Share of text objects drawn invisibly (an OCR layer), searching form XObjects 4 deep.

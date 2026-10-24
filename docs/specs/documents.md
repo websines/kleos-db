@@ -244,6 +244,99 @@ gain at most that on these scans. The larger lever is a hand-written CPU path
 for these small CNNs (pointwise convolutions as Accelerate GEMMs, depthwise
 ones as shifted multiply-adds), with tract kept as the reference.
 
+### Speed work (wave 6): native kernels, digital fast path, streaming
+
+*Measured 2026-10-24 on the M3 while another agent's builds and benchmarks
+kept the load average at 15–26 for most runs, so absolute times are
+inflated; the Rust/Python pairs below ran back to back under the same load.*
+
+**1. Hand-written CPU path for Indra's nets** (`kleos-docs/src/ocr/fastnn.rs`,
+`convnet.rs`). The recognizers run channels-last with every 1×1 convolution,
+stem and the classifier as one GEMM (Accelerate/AMX on macOS,
+`matrixmultiply` elsewhere), vectorized depthwise convolutions, and
+HardSwish, the masked squeeze-excite, the residual and the width mask fused
+around them; top-k for the LM is computed natively. The detector and the
+orientation model run on a small NCHW interpreter of their op set
+(pointwise GEMM, im2col dense conv, direct depthwise, Conv+HardSwish fused,
+in-place elementwise, nearest Resize, DepthToSpace, …). Weights are read from
+the same ONNX files by node name; a graph the native code does not implement
+falls back to tract, and `KLEOS_OCR_TRACT=1` forces tract (the reference).
+
+| Graph, input | tract | native | ONNX Runtime (earlier) | outputs vs tract |
+|---|---|---|---|---|
+| `rec.onnx`, 35×1×96×656 (greedy) | ~500 ms | **70 ms** | 180 ms | ids and top-k indices identical; floats within 8e-5 |
+| `rec.onnx`, full (with top-k) | 595 ms | 105 ms | — | as above |
+| `rec_cjk.onnx`, 30×1×32×512 | 1,345 ms | 155 ms | — | ids identical |
+| `det.onnx`, 1×1×1024×784 | 194 ms | **54 ms** | ~49 ms | max \|Δ\| 5e-5 (of 40) |
+| `orient.onnx`, 1×1×768×768 | 93 ms | **21 ms** | ~40 ms | max \|Δ\| 6e-8 |
+
+Parity: identical lines on the 27 fixture pages (`ocr_parity`) and on the 20
+sampled Zenobia pages. Per scanned page, single-threaded (load ≈ 5): recognizer
+model time 759 → ~65 ms; the page ~1,185 → ~600 ms (Python indra-ocr: 739). The
+remaining per-page time is the orientation preview and skew search (~70–110
+ms, image ops), crops and routing (~45 ms), the render (~80 ms) and the
+detector.
+
+Whole scanned book (Zenobia, 500 pages, OCR only, 4 workers), back to back
+at load ≈ 18–21:
+
+| | pages/s | peak RSS |
+|---|---|---|
+| Python indra-ocr `convert_many(cores=4)` | 2.22 | 1.06 GB |
+| **Rust, native kernels** | **3.51** (1.58×) | 1.29 GB |
+| Rust before (tract, earlier at load ≈ 5) | 2.36 | 2.1 GB |
+| Python earlier at load ≈ 5 | 5.13 | 0.95 GB |
+
+**2. Digital-page geometry fast path** (`Converter::simple_page`,
+`geometry_page`). A page whose text layer is trusted, upright, horizontal,
+Latin and readable, with ≤ 40 path objects, < 1% image area and no shading,
+whose lines share the left margin and mostly run the full width, and with no
+wide gap inside a baseline band, is read from the layer's geometry alone:
+runs are cut where their characters leave the line (a run can carry a
+hyphenated word across a break), merged per band, and pieces of one content
+object join without a space, as the detector path does. No render, no
+detector. `KLEOS_DOC_FAST=0` (or `Converter::fast_digital = false`) turns it
+off; the Indra parity test runs the full path.
+
+| Set | pages | fast | word-identical to the full path | mean word ratio | ms/page full → with fast path |
+|---|---|---|---|---|---|
+| 9/11 Report, first 120 pages | 120 | 94 | 82 | 0.998 | 111 → 33 |
+| Fixtures: form (`irs_fw4`), ruled table | 6 | 0 | — | — | (full path kept) |
+| Fixtures: two-column | 2 | 1 | 1 | 1.000 | |
+
+The differing pages are tables of contents and dialogue lists whose reading
+order differs (page numbers or speaker lines placed before/after a line); no
+words are lost.
+
+**3. Streaming ingestion** (`docs.rs`, `Converter::convert_doc_streaming`). A
+PDF's pages come from one streaming extraction (the document opened once,
+page workers on their own pdfium instances, a bounded queue so a slow
+consumer holds the workers back) feeding chunk → embed → commit; there is no
+barrier at batch edges and embedding a batch overlaps the OCR of the next.
+Each batch still commits as its own durable step with the same keys and
+results, so replay and resume are unchanged (new test
+`pdf_streaming_ingestion_resumes`: a streamed PDF cut after two committed
+batches resumes to the clean run's chunks).
+
+**End to end** (`bigpdf_bench.py`, Metal embedder, `KLEOS_MEMORY_BUDGET=6G`):
+
+| | before (load 5–9) | after |
+|---|---|---|
+| Zenobia (scanned): done / pages/s | 590 s / 0.85 | **217 s / 2.31** (load 2–20) |
+| Zenobia: `remember` returns / first chunk | 1.28 s / 1.3 s | 1.41 s / 1.4 s |
+| Zenobia: peak RSS | 2.78 GB | 1.86 GB |
+| Zenobia kill at 32/63 batches | resumed, 802 chunks, exact | resumed, 802 chunks, no duplicates, contiguous |
+| 9/11 (digital): done / pages/s | 425 s / 1.38 | 456 s / 1.28 (EmbeddingGemma 2, load ≈ 20); 481 s / 1.22 (v1) |
+| 9/11: extraction (render, detector, text, OCR) | ~204 s | **~13–17 s** (detector 265 → ~20 ms/page) |
+| 9/11: embedding | 221 s | 387 s (v2) / 410 s (v1), under load ≈ 20 |
+| Recall hit@5, 10 questions each | 10/10, 10/10 | 10/10, 10/10 |
+
+The digital book is now bound by the embedder: extraction is ~15× cheaper,
+but embedding its 1,660 chunks took ~400 s under the concurrent load (221 s
+before at load 5–9; the default embedder also became EmbeddingGemma 2, ~1.8×
+slower per text). That is the next lever for digital documents (EmbeddingGemma
+2 speed is a separate item).
+
 ### End to end (`remember` and `recall` only)
 
 `scripts/docs/docs_demo.py` (Metal embedder, load ≈ 6):
