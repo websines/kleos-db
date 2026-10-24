@@ -326,3 +326,30 @@ export interface EntityProfile {
   /** Facts and context as one text, ready for a prompt. */
   text: string;
 }
+
+/** A hybrid search query (snake_case, as in Python's `hybrid_search`). */
+export interface HybridQuery {
+  relation: string;
+  id_col?: string;
+  vector_index?: string;
+  query_vector?: number[];
+  vector_f64?: boolean;
+  vector_k?: number;
+  ef?: number;
+  fts_index?: string;
+  query_text?: string;
+  fts_k?: number;
+  rrf_k?: number;
+  limit?: number;
+  detailed?: boolean;
+  fusion?: 'rrf' | 'weighted' | { kind?: 'rrf' | 'weighted'; weights?: Record<string, number>; norm?: unknown; leg_norms?: Record<string, unknown> };
+  extra_lists?: { label: string; rule_body: string }[];
+}
+
+/** The outcome of `decide` (label, p, band, decided_by, ...). */
+export interface DecideResult {
+  label?: string;
+  p?: number;
+  band?: string;
+  [k: string]: unknown;
+}

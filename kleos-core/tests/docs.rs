@@ -226,3 +226,43 @@ fn pdf_streaming_ingestion_resumes() {
     let mems = rows(&db2, "?[count(id)] := *kleos_mem{ns: 'default', id, kind: 'doc' @ 'NOW'}")[0][0].get_int().unwrap();
     assert_eq!(mems as usize, clean.len());
 }
+
+/// Document chunks get entities from the store's extractor (one fake span).
+struct Names;
+
+impl kleos::extract::EntityExtractor for Names {
+    fn model_id(&self) -> String {
+        "names".into()
+    }
+    fn version(&self) -> String {
+        "names:v1".into()
+    }
+    fn labels(&self) -> Vec<String> {
+        vec!["person".into()]
+    }
+    fn extract(&self, texts: &[&str]) -> miette::Result<Vec<Vec<kleos::extract::ExtractSpan>>> {
+        Ok(texts
+            .iter()
+            .map(|t| {
+                t.find("Ingrid Solberg")
+                    .map(|a| {
+                        vec![kleos::extract::ExtractSpan { label: "person".into(), start: a, end: a + 14, text: "Ingrid Solberg".into(), score: 0.99 }]
+                    })
+                    .unwrap_or_default()
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn document_chunks_get_entities_from_the_extractor() {
+    let name = "docs_emb_ents";
+    let _ = embed::register_embedder(name, Arc::new(Words));
+    let _ = kleos::extract::register_extractor("docs_names", Arc::new(Names));
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.memory_init(InitOpts { embedder: Some(name.into()), extractor: Some("docs_names".into()), ..Default::default() }).unwrap();
+    let text = "# Contacts\n\nThe harbour master is Ingrid Solberg; the night desk is extension 4417.\n";
+    db.remember("", RememberOpts { attachments: vec![md(text, "c.md")], ..Default::default() }).unwrap();
+    let m = rows(&db, "?[id, name] := *kleos_mem_mention{ns: 'default', id, eid}, *kleos_mem_entity{ns: 'default', eid, name}, starts_with(id, 'dc_')");
+    assert!(m.iter().any(|r| r[1].get_str() == Some("Ingrid Solberg")), "{m:?}");
+}

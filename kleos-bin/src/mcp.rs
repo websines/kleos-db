@@ -59,6 +59,9 @@ pub struct McpServer {
     default_ns: String,
     allow_query: bool,
     state_key: [u8; 32],
+    /// In-process worker for background jobs (re-embed, consolidate) of an
+    /// embedded store, started on first use; a remote server runs its own.
+    worker: std::sync::Arc<std::sync::Mutex<Option<kleos::FlowWorker>>>,
 }
 
 /// Per-connection context for clients of earlier revisions: the version an
@@ -154,7 +157,7 @@ impl McpServer {
                 rand::thread_rng().fill_bytes(&mut state_key);
             }
         }
-        Self { backend, default_ns: default_ns.into(), allow_query, state_key }
+        Self { backend, default_ns: default_ns.into(), allow_query, state_key, worker: Default::default() }
     }
 
     /// Fixes the confirmation key (tests, or several instances sharing one key).
@@ -437,6 +440,41 @@ impl McpServer {
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
             }),
             json!({
+                "name": "ontology",
+                "title": "Ontology",
+                "description": "Inspect and steer the self-maintaining ontology: list, facts, infer (derived facts), learn, history, undo (asks for confirmation).",
+                "inputSchema": {"type": "object", "properties": {
+                    "action": {"type": "string", "enum": ["list", "facts", "infer", "learn", "history", "undo"]},
+                    "ns": ns,
+                    "subject": {"type": "string", "description": "facts/infer: filter by subject"},
+                    "property": {"type": "string", "description": "facts/infer: filter by property"},
+                    "change": {"type": "string", "description": "undo: change id from history"},
+                    "confirm": {"type": "boolean", "description": "Set after the user agreed (clients without elicitation)"}
+                }, "required": ["action"]},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
+            }),
+            json!({
+                "name": "reembed",
+                "title": "Re-embed",
+                "description": "Move a namespace's vectors to another embedder as a durable background job (returns a task).",
+                "inputSchema": {"type": "object", "properties": {
+                    "embedder": {"type": "string", "description": "Name of an enabled embedder"},
+                    "ns": ns
+                }, "required": ["embedder"]},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
+            }),
+            json!({
+                "name": "consolidate",
+                "title": "Consolidate",
+                "description": "Rebuild entity profiles and session summaries for a namespace (a task when the client supports tasks).",
+                "inputSchema": {"type": "object", "properties": {
+                    "ns": ns,
+                    "profiles": {"type": "boolean"},
+                    "summaries": {"type": "boolean"}
+                }},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
+            }),
+            json!({
                 "name": "branch",
                 "title": "Memory branches",
                 "description": "fork a namespace (instant copy), diff two, merge one into another (dry_run first), rewind to a time, discard, or list. merge/rewind/discard ask for confirmation.",
@@ -474,13 +512,14 @@ impl McpServer {
             Some(v @ Value::Object(_)) => v.clone(),
             Some(_) => return Err(RpcError::new(INVALID_PARAMS, "'arguments' must be an object")),
         };
-        let known = ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "branch"];
+        let known = ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "branch", "ontology", "reembed", "consolidate"];
         if !known.contains(&name) && !(name == "query" && self.allow_query) {
             return Err(RpcError::new(INVALID_PARAMS, format!("Unknown tool: {name}")));
         }
         let read_tool = matches!(name, "recall" | "reflect" | "entity_profile" | "doc_status" | "query")
             || (name == "branch" && matches!(args.get("action").and_then(|a| a.as_str()), Some("diff" | "list")))
-            || (name == "flow" && matches!(args.get("action").and_then(|a| a.as_str()), Some("status" | "list")));
+            || (name == "flow" && matches!(args.get("action").and_then(|a| a.as_str()), Some("status" | "list")))
+            || (name == "ontology" && matches!(args.get("action").and_then(|a| a.as_str()), Some("list" | "facts" | "infer" | "history")));
         let out = if conn.read_only && !read_tool {
             tool_error(format!("'{name}' needs write access; this connection is read-only"))
         } else {
@@ -606,6 +645,9 @@ impl McpServer {
                 }
             }
             "branch" => self.branch(&ns, args, params, era, conn)?,
+            "ontology" => self.ontology(&ns, args, params, era, conn)?,
+            "reembed" => self.reembed(&ns, args, era),
+            "consolidate" => self.consolidate(&ns, args, era),
             "query" => {
                 let Some(script) = args.get("script").and_then(|v| v.as_str()) else { return Ok(tool_error("query needs 'script'")) };
                 match b.query(script, args.get("params").unwrap_or(&Value::Null)) {
@@ -658,6 +700,121 @@ impl McpServer {
             }));
         }
         done(r)
+    }
+
+    fn ontology(&self, ns: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
+        let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+        let call = |op: &str, a: Value| match self.backend.call(Area::Ontology, op, a) {
+            Ok(v) => done(v),
+            Err(e) => tool_error(e),
+        };
+        let action = s("action").unwrap_or_default();
+        Ok(match action.as_str() {
+            "list" => call("list", json!({})),
+            "history" => call("history", json!({"ns": ns})),
+            "learn" => call("learn", json!({"ns": ns})),
+            "facts" | "infer" => {
+                let mut a = json!({"ns": ns});
+                if let Some(v) = s("subject") {
+                    a["s"] = json!(v);
+                }
+                if let Some(v) = s("property") {
+                    a["p"] = json!(v);
+                }
+                if action == "infer" {
+                    a["derived_only"] = json!(true);
+                }
+                match self.backend.call(Area::Ontology, &action, a) {
+                    Ok(v) if action == "infer" => done(json!({"inferred": v})),
+                    Ok(v) => done(json!({"facts": v})),
+                    Err(e) => tool_error(e),
+                }
+            }
+            "undo" => {
+                let Some(change) = s("change") else { return Ok(tool_error("ontology undo needs 'change' (an id from history)")) };
+                let msg = format!("Undo ontology change '{change}' in namespace '{ns}'?");
+                match self.confirm("ontology", args, params, era, conn, &msg)? {
+                    Confirm::Yes => call("undo", json!({"ns": ns, "change": change})),
+                    other => other.into_out(),
+                }
+            }
+            other => tool_error(format!("ontology: unknown action '{other}' (list, facts, infer, learn, history, undo)")),
+        })
+    }
+
+    /// Start the background worker of an embedded store once.
+    fn ensure_worker(&self) {
+        if let Backend::Embedded(db) = &self.backend {
+            let mut w = self.worker.lock().unwrap();
+            if w.is_none() {
+                *w = Some(db.flow_worker(kleos::FlowWorkerOpts { queues: vec!["default".into(), "consolidate".into()], ..Default::default() }));
+            }
+        }
+    }
+
+    fn task_out(kind: &str, ns: &str, flow: &str, message: String) -> ToolOut {
+        let task_id = encode_task(&json!({"k": kind, "ns": ns, "flow": flow}));
+        let now = iso_now();
+        ToolOut::Task(json!({
+            "resultType": "task",
+            "taskId": task_id,
+            "status": "working",
+            "statusMessage": message,
+            "createdAt": now,
+            "lastUpdatedAt": now,
+            "ttlMs": Value::Null,
+            "pollIntervalMs": 2000,
+        }))
+    }
+
+    /// Entity profiles and session summaries: a task when the client takes
+    /// tasks (the `memory.consolidate` workflow on the `consolidate` queue,
+    /// as automatic consolidation uses), else run inside the call.
+    fn consolidate(&self, ns: &str, args: &Value, era: &Era) -> ToolOut {
+        let mut opts = json!({"ns": ns});
+        for k in ["profiles", "summaries"] {
+            if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
+                opts[k] = v.clone();
+            }
+        }
+        let simple = opts.as_object().map_or(true, |o| o.len() == 1);
+        if era.has_tasks() && simple {
+            let b = &self.backend;
+            let def = json!({"name": "memory.consolidate",
+                "graph": {"steps": [{"name": "consolidate", "consolidate": {"ns": "$input.ns"}, "retry": {"max_attempts": 3}}]}});
+            let started = b.call(Area::Flow, "define", def).and_then(|_| {
+                b.call(Area::Flow, "start", json!({"workflow": "memory.consolidate", "input": {"ns": ns}, "serial": format!("consolidate:{ns}"), "queue": "consolidate"}))
+            });
+            return match started {
+                Ok(v) => match v.get("id").and_then(|i| i.as_str()) {
+                    Some(flow) => {
+                        self.ensure_worker();
+                        Self::task_out("consolidate", ns, flow, format!("consolidating '{ns}'"))
+                    }
+                    None => done(v),
+                },
+                Err(e) => tool_error(e),
+            };
+        }
+        match self.backend.call(Area::Memory, "consolidate", opts) {
+            Ok(v) => done(v),
+            Err(e) => tool_error(e),
+        }
+    }
+
+    fn reembed(&self, ns: &str, args: &Value, era: &Era) -> ToolOut {
+        let Some(embedder) = args.get("embedder").and_then(|v| v.as_str()) else { return tool_error("reembed needs 'embedder'") };
+        let r = match self.backend.call(Area::Memory, "reembed", json!({"ns": ns, "embedder": embedder, "wait": !era.has_tasks()})) {
+            Ok(v) => v,
+            Err(e) => return tool_error(e),
+        };
+        match (r.get("status").and_then(|s| s.as_str()), r.get("id").and_then(|i| i.as_str())) {
+            (Some("running"), Some(flow)) if era.has_tasks() => {
+                self.ensure_worker();
+                Self::task_out("reembed", ns, flow, format!("re-embedding '{ns}' with {embedder}"))
+            }
+            _ => done(r),
+        }
     }
 
     fn branch(&self, ns: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
@@ -804,6 +961,27 @@ impl McpServer {
                 });
                 let ns = t.get("ns").and_then(|v| v.as_str()).unwrap_or_default();
                 let doc = t.get("doc").and_then(|v| v.as_str()).unwrap_or_default();
+                if matches!(t.get("k").and_then(|k| k.as_str()), Some("reembed" | "consolidate")) {
+                    match st {
+                        "completed" => {
+                            let out = w.get("output").cloned().unwrap_or(Value::Null);
+                            r["status"] = json!("completed");
+                            r["result"] = json!({
+                                "resultType": "complete",
+                                "content": [{"type": "text", "text": format!("{} done for '{ns}'", t.get("k").and_then(|k| k.as_str()).unwrap_or("job"))}],
+                                "structuredContent": out,
+                            });
+                        }
+                        "failed" => {
+                            r["status"] = json!("failed");
+                            let msg = w.get("error").map(|e| e.to_string()).unwrap_or_else(|| "background job failed".into());
+                            r["error"] = json!({"code": -1, "message": msg});
+                        }
+                        "canceled" | "cancelled" => r["status"] = json!("cancelled"),
+                        _ => r["status"] = json!("working"),
+                    }
+                    return Ok(r);
+                }
                 match st {
                     "completed" => {
                         let d = self.backend.call(Area::Doc, "get", json!({"ns": ns, "doc": doc})).unwrap_or(Value::Null);

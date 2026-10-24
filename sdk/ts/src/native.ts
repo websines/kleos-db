@@ -11,7 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { KleosError } from './backend.js';
-import type { Backend, ModelKind } from './backend.js';
+import type { AdminOp, Backend, ModelKind } from './backend.js';
 import type { FlowWorker, FlowWorkerOptions, Json, ModelSpec, NamedRows } from './types.js';
 
 interface NativeDb {
@@ -20,6 +20,7 @@ interface NativeDb {
   ontologyCall(op: string, argsJson: string): Promise<string>;
   flowCall(op: string, argsJson: string): Promise<string>;
   docCall(op: string, argsJson: string): Promise<string>;
+  adminCall(op: string, argsJson: string): Promise<string>;
   flowWorker(optsJson: string): FlowWorker;
   close(): boolean;
 }
@@ -132,6 +133,9 @@ export class NativeBackend implements Backend {
   }
   run(script: string, params: Record<string, Json>, immutable: boolean): Promise<NamedRows> {
     return call('run', () => this.db.runScript(script, JSON.stringify(params), immutable));
+  }
+  admin(op: AdminOp, args: Record<string, unknown>) {
+    return call(`admin.${op}`, () => this.db.adminCall(op, JSON.stringify(args)));
   }
   async enableModel(kind: ModelKind, name: string, spec: ModelSpec): Promise<void> {
     const s = JSON.stringify(spec);
