@@ -42,7 +42,6 @@ impl Embedder for Words {
 }
 
 #[test]
-#[ignore = "fails on main (1 of 200 remembers before writers block on the full channel): needs the non-blocking, coalescing callback delivery from wave5/docs (runtime/callback.rs); un-ignore when it merges"]
 fn a_slow_subscriber_does_not_block_writers() {
     embed::register_embedder("slow_sub_words", Arc::new(Words)).unwrap();
     let db = DbInstance::new("mem", "", "").unwrap();

@@ -1279,6 +1279,53 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
     }
 
+    /// Run `scripts` and record the step's event (`result`) in one
+    /// transaction, fenced by the worker's token: the data and the
+    /// checkpoint commit together or not at all (retried on contention).
+    pub(crate) fn flow_commit_scripts(
+        &'s self,
+        id: &str,
+        token: i64,
+        key: &str,
+        name: &str,
+        scripts: &[(String, BTreeMap<String, DataValue>)],
+        result: &JsonValue,
+    ) -> Result<JsonValue> {
+        let mut attempt = 0;
+        loop {
+            let (pay_tx, pay_rx) = bounded(1);
+            let (res_tx, res_rx) = bounded(1);
+            let out: Result<JsonValue> = std::thread::scope(move |sc| {
+                let pay_tx = pay_tx;
+                sc.spawn(move || self.run_multi_transaction(true, pay_rx, res_tx));
+                let gone = || miette!("flow step: the transaction ended early");
+                let run = |q: String, p: BTreeMap<String, DataValue>| -> Result<NamedRows> {
+                    pay_tx.send(TransactionPayload::Query((q, p))).map_err(|_| gone())?;
+                    res_rx.recv().map_err(|_| gone())?
+                };
+                for (q, p) in scripts {
+                    run(q.clone(), p.clone())?;
+                }
+                let (parts, p) = record_parts(id, token, &[ev("step", Some(key), Some(name), result.clone())], true);
+                let p: BTreeMap<String, DataValue> = p.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+                for q in parts {
+                    run(q, p.clone())?;
+                }
+                pay_tx.send(TransactionPayload::Commit).map_err(|_| gone())?;
+                res_rx.recv().map_err(|_| gone())??;
+                Ok(result.clone())
+            });
+            match out {
+                Ok(v) => return Ok(v),
+                Err(e) if attempt < 10 && is_contention(&e) => {
+                    std::thread::sleep(Duration::from_millis(1 << attempt.min(6)));
+                    attempt += 1;
+                }
+                Err(e) => return Err(self.fl_diagnose(id, token, e)),
+            }
+        }
+    }
+
     /// `remember {text, …}`: the memory and the step's event commit in
     /// `remember`'s own transaction (`Db::remember_with`).
     fn flow_action_remember(&'s self, id: &str, token: i64, key: &str, name: &str, args: &JsonValue) -> Result<JsonValue> {

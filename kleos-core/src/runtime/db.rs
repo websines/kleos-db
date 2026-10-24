@@ -177,6 +177,9 @@ pub struct Db<S> {
     /// Access counts the memory API's `recall` has not written yet (E4;
     /// flushed in batches by `Db::memory_flush`).
     pub(crate) mem_access: Arc<crate::memory::AccessBuf>,
+    /// The background document worker's state (docs/specs/documents.md).
+    #[cfg(feature = "docs")]
+    pub(crate) docs_state: Arc<crate::docs::DocsState>,
     pub(crate) tokenizers: Arc<TokenizerCache>,
     #[cfg(not(target_arch = "wasm32"))]
     callback_count: Arc<AtomicU32>,
@@ -443,6 +446,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             fixed_rules: Arc::new(ShardedLock::new(fixed_rules)),
             rerankers,
             mem_access: Default::default(),
+            #[cfg(feature = "docs")]
+            docs_state: Default::default(),
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
@@ -2781,6 +2786,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
             SysOp::Engram(op) => crate::engram::run_engram_op(self, op, read_only, true),
             SysOp::Flow(op, _) => bail!("`::flow {op}` must run as a script of its own, not inside an imperative block"),
+            SysOp::Doc(op, _) => bail!("`::doc {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::Ontology(op, _) => bail!("`::ontology {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
@@ -3585,6 +3591,21 @@ impl<'s, S: Storage<'s>> Db<S> {
             SysOp::Engram(op) => return crate::engram::run_engram_op(self, &op, read_only, false),
             // kleos fork: durable workflows run their own scripts
             // (docs/specs/durable-workflows.md)
+            SysOp::Doc(op, args) => {
+                if read_only && !["get", "list"].contains(&op.as_str()) {
+                    bail!("`::doc {op}` cannot run in read-only mode");
+                }
+                #[cfg(feature = "docs")]
+                {
+                    let out = self.doc_call(op, args.clone())?;
+                    return Ok(crate::flow::flow_rows(out));
+                }
+                #[cfg(not(feature = "docs"))]
+                {
+                    let _ = args;
+                    bail!("`::doc` needs kleos built with the `docs` feature");
+                }
+            }
             SysOp::Flow(op, args) => {
                 let reads = ["status", "list", "history", "stats", "schedules"];
                 if read_only && !reads.contains(&op.as_str()) {

@@ -204,6 +204,11 @@ pub struct CtxItem {
     pub previously: Vec<Previous>,
     /// Texts of newer memories that may replace it (pending decisions).
     pub maybe_replaced_by: Vec<(String, i64)>,
+    /// A document chunk's citation (`[name p. 14, § Heading]`), its
+    /// document's name and its first page (docs/specs/documents.md).
+    pub cite: Option<String>,
+    pub doc_name: Option<String>,
+    pub doc_page: Option<usize>,
 }
 
 /// Estimated tokens: characters / 4, rounded up (no tokenizer, so the
@@ -376,12 +381,16 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
         if let Some(to) = it.valid_to {
             first.push_str(&format!(" (until {})", day(to)));
         }
-        if let Some(r) = it.role.as_deref().filter(|r| *r != "user") {
+        if let Some(r) = it.role.as_deref().filter(|r| *r != "user" && it.cite.is_none()) {
             first.push_str(&format!(" ({r})"));
         }
         first.push(' ');
         first.push_str(&one_line(&it.text));
         first.push_str(&dates_note(it.events.iter()));
+        if let Some(c) = &it.cite {
+            first.push(' ');
+            first.push_str(c);
+        }
         if show_source {
             if let Some(s) = &it.source {
                 first.push_str(&format!(" [source: {s}]"));
@@ -451,9 +460,17 @@ pub fn render_context(items: &[CtxItem], budget: usize, show_source: bool) -> Re
     let mut ids = vec![];
     for g in order {
         let mut members: Vec<usize> = (0..merged.len()).filter(|&i| shown[i] && group_of[i] == g).collect();
-        members.sort_by(|&a, &b| merged[a].valid_from.cmp(&merged[b].valid_from).then(a.cmp(&b)));
+        members.sort_by(|&a, &b| {
+            merged[a]
+                .doc_page
+                .cmp(&merged[b].doc_page)
+                .then(merged[a].valid_from.cmp(&merged[b].valid_from))
+                .then(a.cmp(&b))
+        });
+        let doc_name = members.iter().find_map(|&i| merged[i].doc_name.clone());
         let label = match g.split_once(':') {
             Some(("e", name)) => name.to_string(),
+            Some(("s", _)) if doc_name.is_some() => format!("Document: {}", doc_name.unwrap()),
             Some(("s", _)) => {
                 let lo = members.iter().map(|&i| merged[i].valid_from).min().unwrap_or(0);
                 let hi = members.iter().map(|&i| merged[i].valid_from).max().unwrap_or(0);

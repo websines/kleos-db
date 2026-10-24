@@ -1578,6 +1578,28 @@ impl CozoDbPy {
         let out = py.allow_threads(|| db.flow_call(op, a)).map_err(report2py)?;
         Ok(json_to_py(out, py))
     }
+    /// Documents (kleos fork; docs/specs/documents.md): admin op `op` (`get`,
+    /// `list`, `delete`) with `args` (a dict: `ns`, `doc`, `mode`). Documents
+    /// themselves go through `remember(..., attachments=[...])`.
+    #[pyo3(signature = (op, args=None))]
+    pub fn doc_call(&self, py: Python<'_>, op: &str, args: Option<&PyAny>) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let a = match args {
+            None => serde_json::Value::Null,
+            Some(x) if x.is_none() => serde_json::Value::Null,
+            Some(x) => serde_json::Value::from(py_to_value(x)?),
+        };
+        #[cfg(feature = "docs")]
+        {
+            let out = py.allow_threads(|| db.doc_call(op, a)).map_err(report2py)?;
+            Ok(json_to_py(out, py))
+        }
+        #[cfg(not(feature = "docs"))]
+        {
+            let _ = (db, a, op);
+            Err(PyException::new_err("doc_call needs kleos built with the `docs` feature"))
+        }
+    }
     /// Start an in-process worker thread that runs due built-in workflows and
     /// fires schedules; returns a handle whose `stop()` ends it.
     #[pyo3(signature = (queues=None, poll_ms=1000, lease_ms=30000, worker=None))]

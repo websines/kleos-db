@@ -113,7 +113,27 @@ impl<'s, S: Storage<'s>> Db<S> {
                     Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => false,
                 }
             } else {
-                sender.send(message).is_ok()
+                // never block the writer: a bounded subscription that is full
+                // (its reader slow, busy or itself the writer) misses this
+                // change and stays subscribed; an unbounded one never fills
+                match sender.try_send(message) {
+                    Ok(()) => true,
+                    Err(crossbeam::channel::TrySendError::Full(_)) => {
+                        static LAGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LAGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            crate::runtime::diagnostics::emit(
+                                "callback.lagged",
+                                "A bounded change subscription was full, so committed changes were \
+                                 dropped for it instead of blocking the writer"
+                                    .into(),
+                                "read the subscription faster, give it more capacity, or treat it as a \
+                                 wake-up signal and reconcile with stored data",
+                            );
+                        }
+                        true
+                    }
+                    Err(crossbeam::channel::TrySendError::Disconnected(_)) => false,
+                }
             }
         };
 
