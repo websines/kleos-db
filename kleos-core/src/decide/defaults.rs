@@ -49,10 +49,14 @@ pub const NANO_TUNE_V1: &str = "nano-tune-v1";
 fn nano_tune_v1(t: Template) -> Calibration {
     const SRC: &str = "adapt-60 nano-tune-v1";
     match t {
-        // `KLEOS_SUPERSEDES_TAU` overrides the fitted value (an experiment
-        // knob; docs/benchmarks/memory.md, "Supersedes threshold")
+        // 0.995, not the fitted 0.997 (wave5/onto-auto): on the life stream
+        // 13 right / 0 wrong automatic replacements against 12 / 0, the 23
+        // held-out knowledge-update questions unchanged (83% / 91%) with two
+        // more automatic replacements, both right ("4 MCU films" -> "12
+        // films, including 5 MCU"; docs/specs/ontology.md, "Results").
+        // `KLEOS_SUPERSEDES_TAU` overrides it.
         Template::Supersedes => {
-            let tau = std::env::var("KLEOS_SUPERSEDES_TAU").ok().and_then(|v| v.parse().ok()).unwrap_or(0.997);
+            let tau = std::env::var("KLEOS_SUPERSEDES_TAU").ok().and_then(|v| v.parse().ok()).unwrap_or(0.995);
             cal(&[], tau, tau, SRC)
         }
         Template::Contradicts => cal(&[], 0.954, 0.954, SRC),

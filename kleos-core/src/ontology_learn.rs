@@ -142,6 +142,51 @@ const STOP: &[&str] = &[
     "recently", "currently", "since", "back", "around", "yeah", "well", "think", "know", "want", "really", "pretty",
 ];
 
+/// Words that make a poor label or cue: greetings, courtesy, fillers and
+/// evaluations (a cluster about "thanks" is small talk, not a property).
+const LABEL_STOP: &[&str] = &[
+    "thanks", "thank", "hey", "hi", "hello", "love", "loved", "loving", "gonna", "kinda", "wanna", "excited",
+    "looks", "look", "here's", "people", "help", "wow", "great", "awesome", "glad", "sorry", "cool", "nice",
+    "amazing", "lovely", "fun", "good", "best", "happy", "sure", "totally", "definitely", "maybe", "stuff",
+    "lot", "bit", "way", "something", "anything", "everything", "someone", "everyone", "guys", "chat", "talk",
+    "memories", "support", "tough", "hard", "easy", "feel", "feeling", "felt",
+];
+
+/// Names a pool uses as speakers or to address someone ("Caroline:",
+/// "Thanks, Mel"): never a label or cue.
+pub fn pool_names(texts: &[&str]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for t in texts {
+        if let Some((n, _)) = crate::memory_extract::speaker_prefix(t) {
+            for w in n.split_whitespace() {
+                out.insert(w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase());
+            }
+        }
+        let ws: Vec<&str> = t.split_whitespace().collect();
+        for w in ws.windows(2) {
+            let a = w[0].trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+            let b = w[1].trim_matches(|c: char| !c.is_alphanumeric());
+            if ["thanks", "hey", "hi", "hello", "congrats", "wow", "yes", "no", "sorry", "oh"].contains(&a.as_str())
+                && b.chars().next().is_some_and(|c| c.is_uppercase())
+            {
+                out.insert(b.to_lowercase());
+            }
+        }
+    }
+    out
+}
+
+fn stem(w: &str) -> String {
+    for suf in ["ing", "es", "ed", "s"] {
+        if let Some(x) = w.strip_suffix(suf) {
+            if x.len() >= 3 {
+                return x.to_string();
+            }
+        }
+    }
+    w.to_string()
+}
+
 /// Words that mark a value replacing an earlier one.
 const UPDATE_CUES: &[&str] = &[
     "now", "anymore", "no longer", "moved", "switched", "changed", "currently", "these days", "upgraded", "replaced",
@@ -187,10 +232,13 @@ fn snake(label: &str) -> String {
 
 /// The words and adjacent word pairs that set a cluster apart from the
 /// whole pool: (term, share of the cluster containing it, lift).
-pub fn distinctive(cluster: &[&str], pool_df: &HashMap<String, usize>, pool_n: usize) -> Vec<(String, f64, f64)> {
+pub fn distinctive(cluster: &[&str], pool_df: &HashMap<String, usize>, pool_n: usize, names: &BTreeSet<String>) -> Vec<(String, f64, f64)> {
     let mut df: HashMap<String, usize> = HashMap::new();
     for t in cluster {
-        let c = content(t);
+        let c: Vec<String> = content(t)
+            .into_iter()
+            .filter(|w| !LABEL_STOP.contains(&w.as_str()) && !names.contains(w))
+            .collect();
         let mut terms: BTreeSet<String> = c.iter().cloned().collect();
         for w in c.windows(2) {
             terms.insert(format!("{} {}", w[0], w[1]));
@@ -316,6 +364,8 @@ pub struct Shape {
     /// Mean decider P(supersedes) over sampled same-subject pairs.
     pub decider_p: Option<f64>,
     pub numeric: bool,
+    /// Claims of the cluster already replaced by another of them.
+    pub replaced: usize,
     pub why: String,
 }
 
@@ -324,6 +374,12 @@ pub struct Shape {
 /// replace the earlier ones); multi-valued otherwise, which is the safe
 /// default (a multi-valued property never supersedes).
 pub fn shape(texts: &[&str], subjects: &[Option<String>], decider_p: Option<f64>) -> Shape {
+    shape_with(texts, subjects, decider_p, 0)
+}
+
+/// [`shape`] with the number of the cluster's claims that `remember`
+/// already replaced by another of them (supersedes links inside the cluster).
+pub fn shape_with(texts: &[&str], subjects: &[Option<String>], decider_p: Option<f64>, replaced: usize) -> Shape {
     let n = texts.len().max(1) as f64;
     let cue = texts.iter().filter(|t| has_cue(t)).count() as f64 / n;
     let mut per: BTreeMap<&str, usize> = BTreeMap::new();
@@ -333,6 +389,7 @@ pub fn shape(texts: &[&str], subjects: &[Option<String>], decider_p: Option<f64>
     let repeat = per.values().filter(|c| **c >= 2).count();
     let numeric = texts.iter().filter(|t| has_number(t)).count() as f64 / n >= 0.6;
     let (card, why) = match decider_p {
+        _ if replaced >= 2 => ("one", format!("{replaced} of its statements were already replaced by later ones")),
         Some(p) if p >= 0.9 => ("one", format!("the decider says later statements replace earlier ones (mean p {p:.2})")),
         Some(p) if p <= 0.5 => ("many", format!("the decider says statements coexist (mean p {p:.2})")),
         _ if repeat >= 1 && cue >= 0.25 => ("one", format!("{repeat} subject(s) restate it and {:.0}% carry update cues", cue * 100.0)),
@@ -345,6 +402,7 @@ pub fn shape(texts: &[&str], subjects: &[Option<String>], decider_p: Option<f64>
         repeat_subjects: repeat,
         decider_p,
         numeric,
+        replaced,
         why,
     }
 }
@@ -451,11 +509,14 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// Claims no property typed (not small talk, not the assistant's), and
     /// document chunks, most recent first, with their vectors.
     fn learn_points(&'s self, ns: &str, max: usize) -> Result<Vec<Pt>> {
+        // current claims and the ones later statements replaced: a value that
+        // keeps being replaced is the best evidence of a single-valued property
         let r = self.ol_q(
             "ty[id] := *kleos_mem_type{ns: $ns, id, cls}, cls != 'untyped' \
              asst[id] := *kleos_mem_role{ns: $ns, id, role}, role == 'assistant' \
-             ?[id, text, kind, created] := *kleos_mem{ns: $ns, id, text, kind, created @ 'NOW'}, \
-                 *kleos_mem_vec{ns: $ns, id, current: true}, not ty[id], not asst[id] \
+             all[id, text, kind, created] := *kleos_mem{ns: $ns, id, text, kind, created} \
+             ?[id, text, kind, created] := all[id, text, kind, created], *kleos_mem_vec{ns: $ns, id}, \
+                 not ty[id], not asst[id] \
              :order -created \
              :limit $n",
             vec![("ns", s(ns)), ("n", DataValue::from(max as i64))],
@@ -482,6 +543,15 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         pts.retain(|p| !p.vec.is_empty());
         Ok(pts)
+    }
+
+    /// How many of `ids` a later one of them replaced (`supersedes` links).
+    fn learn_replaced(&'s self, ns: &str, ids: &[String]) -> Result<usize> {
+        let r = self.ol_q(
+            "?[count(dst)] := *kleos_mem_link{ns: $ns, src, rel: 'supersedes', dst}, is_in(src, $ids), is_in(dst, $ids)",
+            vec![("ns", s(ns)), ("ids", strs(ids))],
+        )?;
+        Ok(r.rows.first().and_then(|x| x[0].get_int()).unwrap_or(0) as usize)
     }
 
     /// Mean decider P(supersedes) over up to 8 same-subject pairs (older,
@@ -531,6 +601,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let texts: Vec<&str> = pts.iter().map(|p| p.text.as_str()).collect();
         let pdf = pool_df(&texts);
+        let names = pool_names(&texts);
         let protos = match cfg.embedder.as_deref() {
             Some(e) => Some(crate::ontology::prototypes(&act, e)?),
             None => None,
@@ -553,7 +624,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 continue;
             }
             let ctexts: Vec<&str> = members.iter().map(|&i| texts[i]).collect();
-            let terms = distinctive(&ctexts, &pdf, total);
+            let terms = distinctive(&ctexts, &pdf, total, &names);
             let Some((label, _, _)) = terms.iter().find(|t| t.1 >= 0.3).cloned() else { continue };
             let cues: Vec<String> = terms.iter().filter(|t| t.1 >= 0.3).take(5).map(|t| t.0.clone()).collect();
             let evidence: Vec<String> = members.iter().map(|&i| pts[i].id.clone()).collect();
@@ -586,8 +657,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                     ("vocabulary", json!({"prop": p.name, "cues": new_cues, "alias": label, "similarity": x}))
                 }
                 _ => {
-                    let dp = self.learn_decider_p(cfg.decider.as_deref(), &ctexts, &subjects);
-                    let sh = shape(&ctexts, &subjects, dp);
+                    let replaced = self.learn_replaced(&ns, &evidence)?;
+                    let dp = if replaced >= 2 { None } else { self.learn_decider_p(cfg.decider.as_deref(), &ctexts, &subjects) };
+                    let sh = shape_with(&ctexts, &subjects, dp, replaced);
                     let mut name = snake(&label);
                     if name.is_empty() {
                         continue;
@@ -626,7 +698,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             let mut body = body;
             if kind == "property" && strong && body["prop"]["card"] == "one" {
                 let sh = body["shape"].clone();
-                let backed = sh["decider_p"].as_f64().is_some_and(|p| p >= 0.9) || sh["update_cue_share"].as_f64().unwrap_or(0.0) >= 0.4;
+                let backed = sh["replaced"].as_u64().unwrap_or(0) >= 2
+                    || sh["decider_p"].as_f64().is_some_and(|p| p >= 0.9)
+                    || sh["update_cue_share"].as_f64().unwrap_or(0.0) >= 0.4;
                 if !backed {
                     body["prop"]["card"] = json!("many");
                     body["shape"]["why"] = json!(format!("{} (kept multi-valued: not enough support for single-valued)", sh["why"].as_str().unwrap_or("")));
@@ -810,8 +884,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                     continue;
                 }
                 let same_words = {
-                    let wa: BTreeSet<String> = content(&a.label).into_iter().collect();
-                    let wb: BTreeSet<String> = content(&b.label).into_iter().collect();
+                    let wa: BTreeSet<String> = content(&a.label).iter().map(|w| stem(w)).collect();
+                    let wb: BTreeSet<String> = content(&b.label).iter().map(|w| stem(w)).collect();
                     !wa.is_empty() && wa == wb
                 };
                 let sim = lv.as_ref().map(|v| cosine(&v[i], &v[j])).unwrap_or(0.0);
@@ -1055,8 +1129,25 @@ mod tests {
         ];
         let pool: Vec<&str> = cluster.iter().copied().chain(["I love sushi.", "I went hiking with Anna.", "My rent is due Friday.", "The weather was nice in Rome."]).collect();
         let df = pool_df(&pool);
-        let d = distinctive(&cluster, &df, pool.len());
+        let d = distinctive(&cluster, &df, pool.len(), &BTreeSet::new());
         assert!(d[0].0.contains("instagram") || d[0].0.contains("follower"), "{d:?}");
+    }
+
+    #[test]
+    fn greetings_and_names_are_not_labels() {
+        let cluster = [
+            "Caroline: Thanks, Mel. The pottery class was great.",
+            "Caroline: Hey Mel! I signed up for another pottery class.",
+            "Caroline: Thanks, Melanie! My pottery bowl came out well.",
+            "Caroline: Thanks! The pottery class starts Monday.",
+        ];
+        let pool: Vec<&str> = cluster.iter().copied().chain(["Melanie: I went camping.", "Melanie: The kids loved the beach."]).collect();
+        let names = pool_names(&pool);
+        assert!(names.contains("mel") && names.contains("caroline") && names.contains("melanie"), "{names:?}");
+        let d = distinctive(&cluster, &pool_df(&pool), pool.len(), &names);
+        assert!(d[0].0.contains("pottery"), "{d:?}");
+        assert!(d.iter().all(|t| !t.0.contains("thanks") && !t.0.contains("mel")), "{d:?}");
+        assert_eq!(stem("dancing"), stem("dances"));
     }
 
     #[test]
@@ -1072,6 +1163,9 @@ mod tests {
         // the decider overrides the cues
         let sh = shape(&t, &subj, Some(0.95));
         assert_eq!(sh.card, "one");
+        // statements remember already replaced are the strongest evidence
+        let sh = shape_with(&t, &subj, Some(0.2), 3);
+        assert_eq!(sh.card, "one", "{sh:?}");
     }
 
     #[test]
