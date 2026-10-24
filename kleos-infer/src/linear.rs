@@ -95,6 +95,12 @@ impl TensorFile {
         let n = self.rows(name)?;
         self.read_rows(name, 0, n)
     }
+
+    /// A whole tensor as f32 on the CPU.
+    #[allow(dead_code)]
+    pub(crate) fn load_f32(&self, name: &str) -> Result<Tensor> {
+        Ok(self.load(name)?.to_dtype(DType::F32)?)
+    }
 }
 
 /// Rows per chunk when converting a token table.
