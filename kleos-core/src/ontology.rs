@@ -1252,16 +1252,63 @@ impl<'s, S: Storage<'s>> Db<S> {
         if keys.is_empty() || !self.onto_exists()? {
             return Ok(json!({"ns": ns, "retracted": 0}));
         }
-        let r = self.on_q(
+        // the namespace's own current facts among the keys
+        let own: BTreeSet<(String, String, String)> = self
+            .on_q(
+                &format!(
+                    "k[s, p, o] <- $keys \
+                     ?[s, p, o] := k[s, p, o], *{ONTO_FACT}{{ns, s, p, o, status @ 'NOW'}}, ns = $ns, status != 'retracted'"
+                ),
+                vec![("ns", s(&ns)), ("keys", DataValue::List(keys.clone()))],
+            )?
+            .rows
+            .iter()
+            .map(|x| (cell(&x[0]), cell(&x[1]), cell(&x[2])))
+            .collect();
+        self.on_q(
             &format!(
                 "k[s, p, o] <- $keys \
                  ?[ns, s, p, o, vt, lit, conf, by, mem, status] := k[s, p, o], *{ONTO_FACT}{{ns, s, p, o, lit, conf, by, mem, status @ 'NOW'}}, \
                     ns = $ns, vt = $vt \
                  :put {ONTO_FACT} {{ns, s, p, o, vt => lit, conf, by, mem, status}}"
             ),
-            vec![("ns", s(&ns)), ("keys", DataValue::List(keys)), ("vt", vt(at, false))],
+            vec![("ns", s(&ns)), ("keys", DataValue::List(keys.clone())), ("vt", vt(at, false))],
         )?;
-        Ok(json!({"ns": ns, "retracted": r.rows.len(), "at": at}))
+        // a branch retracting what it inherited: a tombstone in the branch
+        // hides the ancestor's fact from the branch only (the parent keeps it)
+        let mut tombs = vec![];
+        for (l, a) in self.onto_levels(&ns, Some(at)).into_iter().skip(1) {
+            let r = self.on_q(
+                &format!(
+                    "k[s, p, o] <- $keys \
+                     ?[s, p, o] := k[s, p, o], *{ONTO_FACT}{{ns, s, p, o, status @ {}}}, ns = $ns, status != 'retracted'",
+                    at_clause(a)
+                ),
+                vec![("ns", s(&l)), ("keys", DataValue::List(keys.clone()))],
+            )?;
+            for x in &r.rows {
+                let k = (cell(&x[0]), cell(&x[1]), cell(&x[2]));
+                if !own.contains(&k) && !tombs.iter().any(|t: &(String, String, String)| *t == k) {
+                    tombs.push(k);
+                }
+            }
+        }
+        if !tombs.is_empty() {
+            let rows: Vec<DataValue> = tombs
+                .iter()
+                .map(|(fs, fp, fo)| {
+                    DataValue::List(vec![
+                        s(&ns), s(fs), s(fp), s(fo), vt(at, true), DataValue::Null, DataValue::from(1.0), s("retract"),
+                        DataValue::Null, s("retracted"),
+                    ])
+                })
+                .collect();
+            self.on_q(
+                &format!("?[ns, s, p, o, vt, lit, conf, by, mem, status] <- $rows :put {ONTO_FACT} {{ns, s, p, o, vt => lit, conf, by, mem, status}}"),
+                vec![("rows", DataValue::List(rows))],
+            )?;
+        }
+        Ok(json!({"ns": ns, "retracted": own.len() + tombs.len(), "inherited_hidden": tombs.len(), "at": at}))
     }
 
     fn onto_node_classes(&'s self, ns: &str, at: Option<i64>) -> Result<BTreeMap<String, String>> {
@@ -1296,7 +1343,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         if !self.onto_exists()? {
             return Ok(json!([]));
         }
-        let st = strs(&Self::statuses(&o.status)?);
+        let mut stv = Self::statuses(&o.status)?;
+        // tombstones: a branch's retraction of an inherited fact
+        stv.push("retracted".into());
+        let st = strs(&stv);
         let mut seen = BTreeSet::new();
         let mut out: Vec<JsonValue> = vec![];
         // a branch reads its own facts, then each ancestor's as of the fork
@@ -1310,7 +1360,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 vec![("ns", s(&l)), ("st", st.clone())],
             )?;
             for x in r.rows.iter().filter(|x| filt(o, &cell(&x[0]), &cell(&x[1]), &cell(&x[2]))) {
-                if !seen.insert((cell(&x[0]), cell(&x[1]), cell(&x[2]))) {
+                if !seen.insert((cell(&x[0]), cell(&x[1]), cell(&x[2]))) || cell(&x[7]) == "retracted" {
                     continue;
                 }
                 let mut f = json!({"s": jv(&x[0]), "p": jv(&x[1]), "o": jv(&x[2]), "lit": jv(&x[3]), "conf": jv(&x[4]),
@@ -1805,18 +1855,31 @@ pub fn infer_program<'a>(act: &Active, levels: &[(String, Option<i64>)], statuse
         v.push(DataValue::List(vec![s("\u{0}"), s("\u{0}"), s("\u{0}")]));
         DataValue::List(v)
     };
-    let base: String = levels
-        .iter()
-        .take(LEVEL_PARAMS.len())
-        .enumerate()
-        .map(|(i, (_, a))| {
-            format!(
+    let lv: Vec<&(String, Option<i64>)> = levels.iter().take(LEVEL_PARAMS.len()).collect();
+    let mut base = String::new();
+    for (i, (_, a)) in lv.iter().enumerate() {
+        if i == 0 {
+            base += &format!(
                 "base[s, p, o] := *{ONTO_FACT}{{ns, s, p, o, status @ {}}}, ns = ${}, is_in(status, $st) ",
                 at_clause(*a),
                 LEVEL_PARAMS[i]
-            )
-        })
-        .collect();
+            );
+            continue;
+        }
+        // an ancestor's fact a nearer level retracted (tombstone) is hidden
+        for (k, (_, b)) in lv.iter().enumerate().take(i) {
+            base += &format!(
+                "hide{i}[s, p, o] := *{ONTO_FACT}{{ns, s, p, o, status @ {}}}, ns = ${}, status = 'retracted' ",
+                at_clause(*b),
+                LEVEL_PARAMS[k]
+            );
+        }
+        base += &format!(
+            "base[s, p, o] := *{ONTO_FACT}{{ns, s, p, o, status @ {}}}, ns = ${}, is_in(status, $st), not hide{i}[s, p, o] ",
+            at_clause(*a),
+            LEVEL_PARAMS[i]
+        );
+    }
     let prog = format!(
         "inv[p, q] <- $inv \
          sup[p, q] <- $sup \

@@ -306,6 +306,15 @@ fn a_branch_inherits_its_parents_ontology_and_facts_as_of_the_fork() {
     // inference reads the lineage too
     let inf = onto(&db, "infer", json!({"ns": "b"}));
     assert!(inf.as_array().unwrap().iter().any(|f| f["p"] == "sister_of"), "{inf:#}");
+    // the branch retracts what it inherited: hidden in the branch only
+    let out = onto(&db, "retract", json!({"ns": "b", "facts": [{"s": "anna", "p": "sister_of", "o": "user"}], "at": d(5)}));
+    assert_eq!(out["inherited_hidden"], 1, "{out:#}");
+    let fb = onto(&db, "facts", json!({"ns": "b"}));
+    assert!(!fb.as_array().unwrap().iter().any(|f| f["p"] == "sister_of"), "{fb:#}");
+    let ib = onto(&db, "infer", json!({"ns": "b"}));
+    assert!(!ib.as_array().unwrap().iter().any(|f| f["s"] == "anna" && f["p"] == "sister_of"), "{ib:#}");
+    let fp = onto(&db, "facts", json!({"ns": "p"}));
+    assert!(fp.as_array().unwrap().iter().any(|f| f["p"] == "sister_of"), "the parent keeps it: {fp:#}");
 }
 
 /// Finds the listed spans; records the extra labels it was asked for.
