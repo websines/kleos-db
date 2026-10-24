@@ -114,6 +114,9 @@ engram = ["dep:kleos-engram"]
 ## memories. Pulls in `kleos-docs` (tract, pdfium at run time); needs the
 ## 1.91+ toolchain like `infer`.
 docs = ["dep:kleos-docs", "kleos-docs/download"]
+## Documents by URL in `remember` attachments (http/https only, public
+## addresses only, size-capped; docs/specs/documents.md). Off by default.
+docs-url = ["docs", "requests"]
 ## `infer` plus Apple-GPU (Metal) kernels.
 # Accelerate too: Metal builds are macOS-only, and the CPU path (device
 # `cpu`, or anything Metal can't run) is 2-2.5x faster with Apple BLAS

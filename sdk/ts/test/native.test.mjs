@@ -107,3 +107,26 @@ test('embedded: documents through remember (docs build)', { skip: !nativeFeature
   assert.ok(JSON.stringify(list).includes('h.md'));
   await k.close();
 });
+
+test('embedded: hybrid search, export/import, backup', async () => {
+  const k = open();
+  await k.run(':create docs {id: Int => body: String}');
+  await k.run('::fts create docs:body {extractor: body, tokenizer: Simple, filters: [Lowercase]}');
+  await k.run("?[id, body] <- [[1, 'the billing service was chosen'], [2, 'a cat sat']] :put docs {id => body}");
+  const h = await k.hybridSearch({ relation: 'docs', fts_index: 'body', query_text: 'billing', limit: 5 });
+  assert.ok(h.rows.length >= 1, JSON.stringify(h));
+  const ex = await k.exportRelations(['docs']);
+  assert.equal(ex.docs.rows.length, 2);
+  const k2 = open();
+  await k2.run(':create docs {id: Int => body: String}');
+  await k2.importRelations(ex);
+  assert.equal((await k2.run('?[id] := *docs{id}')).rows.length, 2);
+  const file = join(tempDir(), 'b.backup');
+  await k.backup(file);
+  const k3 = open({ path: join(tempDir(), 'c.db') });
+  await k3.run(':create docs {id: Int => body: String}');
+  await k3.importFromBackup(file, ['docs']);
+  assert.equal((await k3.run('?[id] := *docs{id}')).rows.length, 2);
+  await assert.rejects(k.decide('no-such-decider', 'supersedes', 'a', 'b'), KleosError);
+  for (const x of [k, k2, k3]) await x.close();
+});

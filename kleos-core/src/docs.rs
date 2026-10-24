@@ -481,6 +481,9 @@ struct IngestInput {
     opts: DocOpts,
     /// chunk ids of the previous version (re-ingestion)
     previous: Vec<String>,
+    /// The URL the document was fetched from (documents by URL).
+    #[serde(default)]
+    url: Option<String>,
 }
 
 impl<'s, S: Storage<'s>> Db<S> {
@@ -657,6 +660,13 @@ impl<'s, S: Storage<'s>> Db<S> {
         out
     }
 
+    /// Entities named in new chunks, when the store has an extractor
+    /// (`memory_init {extractor}`); nothing otherwise.
+    fn chunk_entities(&'s self, ns: &str, rows: &[ChunkRow]) -> Result<Vec<(String, BTreeMap<String, DataValue>)>> {
+        let chunks: Vec<(String, String)> = rows.iter().map(|r| (r.id.clone(), r.text.clone())).collect();
+        self.chunk_entity_scripts(ns, &chunks)
+    }
+
     /// Embed chunk texts with the store's embedder (None per row without one).
     fn embed_chunks(&'s self, rows: &[ChunkRow]) -> Result<Vec<Option<Vec<f32>>>> {
         let cfg = self.memory_config()?;
@@ -689,6 +699,10 @@ impl<'s, S: Storage<'s>> Db<S> {
     }
 
     fn doc_one(&'s self, ns: &str, a: Attachment, o: &DocOpts) -> Result<DocStatus> {
+        #[allow(unused_mut)]
+        let mut fetched_url: Option<String> = None;
+        #[allow(unused_mut)]
+        let mut url_mime: Option<String> = a.mime.clone();
         let (src, name) = if let Some(p) = &a.path {
             let pb = PathBuf::from(p);
             let name = a.name.clone().unwrap_or_else(|| pb.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| p.clone()));
@@ -698,17 +712,31 @@ impl<'s, S: Storage<'s>> Db<S> {
         } else if let Some(b64) = &a.data_b64 {
             let b = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| miette!("data_b64: {e}"))?;
             (Source::Bytes(Arc::new(b)), a.name.clone().unwrap_or_default())
-        } else if a.url.is_some() {
-            bail!("documents by URL need the `docs-url` feature (off by default); pass the bytes or a path")
+        } else if let Some(u) = &a.url {
+            #[cfg(feature = "docs-url")]
+            {
+                let f = crate::docs_url::fetch(u)?;
+                fetched_url = Some(f.url.clone());
+                if url_mime.is_none() {
+                    url_mime = f.mime.clone();
+                }
+                let name = a.name.clone().unwrap_or(f.name);
+                (Source::Bytes(Arc::new(f.bytes)), name)
+            }
+            #[cfg(not(feature = "docs-url"))]
+            {
+                let _ = u;
+                bail!("documents by URL need the `docs-url` feature (off by default); pass the bytes or a path")
+            }
         } else {
             bail!("an attachment needs 'path', 'bytes' or 'data_b64'")
         };
         let bytes = src.bytes()?;
-        let kind = formats::detect(&bytes, a.mime.as_deref(), Some(&name)).ok_or_else(|| miette!("{name}: not a PDF, image or text document"))?;
+        let kind = formats::detect(&bytes, url_mime.as_deref(), Some(&name)).ok_or_else(|| miette!("{name}: not a PDF, image or text document"))?;
         let hash = sha(&[&bytes]);
         let name = if name.is_empty() { format!("document-{}", &hash[..8]) } else { name };
         let doc = format!("doc_{}", &sha(&[ns.as_bytes(), name.as_bytes()])[..16]);
-        let mime = a.mime.clone().unwrap_or_else(|| kind.mime().to_string());
+        let mime = url_mime.clone().unwrap_or_else(|| kind.mime().to_string());
         let kname = format!("{kind:?}").to_lowercase();
         // the same bytes: nothing to do
         let mut previous = vec![];
@@ -732,7 +760,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         };
         let inline = o.sync.unwrap_or(false) || pages <= o.inline_pages.unwrap_or(DEFAULT_INLINE_PAGES);
         if inline {
-            return self.doc_ingest_inline(ns, &doc, &name, kind, &mime, &hash, &src, pages, o, &previous);
+            return self.doc_ingest_inline(ns, &doc, &name, kind, &mime, &hash, &src, pages, o, &previous, fetched_url.as_deref());
         }
         // background: keep the bytes (a path is re-read and its hash checked)
         let at = now_us();
@@ -748,10 +776,10 @@ impl<'s, S: Storage<'s>> Db<S> {
                 None
             }
         };
-        let input = IngestInput { ns: ns.into(), doc: doc.clone(), name: name.clone(), kind, mime: mime.clone(), hash: hash.clone(), path, pages, opts: o.clone(), previous };
+        let input = IngestInput { ns: ns.into(), doc: doc.clone(), name: name.clone(), kind, mime: mime.clone(), hash: hash.clone(), path, pages, opts: o.clone(), previous, url: fetched_url.clone() };
         self.dw(
             &self.doc_row_script(),
-            vec![("doc_rows", DataValue::List(vec![Self::doc_row(ns, &doc, at, &name, &mime, &hash, pages, "running", 0, json!({"kind": kname}))]))],
+            vec![("doc_rows", DataValue::List(vec![Self::doc_row(ns, &doc, at, &name, &mime, &hash, pages, "running", 0, json!({"kind": kname, "url": fetched_url}))]))],
         )?;
         let wf = format!("doc:{ns}:{doc}:{}", &hash[..12]);
         let started = self.flow_call(
@@ -763,7 +791,7 @@ impl<'s, S: Storage<'s>> Db<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn doc_ingest_inline(&'s self, ns: &str, doc: &str, name: &str, kind: Kind, mime: &str, hash: &str, src: &Source, pages: usize, o: &DocOpts, previous: &[String]) -> Result<DocStatus> {
+    fn doc_ingest_inline(&'s self, ns: &str, doc: &str, name: &str, kind: Kind, mime: &str, hash: &str, src: &Source, pages: usize, o: &DocOpts, previous: &[String], url: Option<&str>) -> Result<DocStatus> {
         let t0 = Instant::now();
         let (pb, mut timings) = extract_pages(src, kind, 0, pages, o, &|_| {})?;
         timings.insert("extract_ms".into(), t0.elapsed().as_secs_f64() * 1000.0);
@@ -782,10 +810,11 @@ impl<'s, S: Storage<'s>> Db<S> {
         let ids: BTreeSet<String> = rows.iter().map(|r| r.id.clone()).collect();
         let gone: Vec<String> = previous.iter().filter(|x| !ids.contains(*x)).cloned().collect();
         let mut scripts = self.chunk_scripts(ns, doc, &new_rows, &vecs, at);
+        scripts.extend(self.chunk_entities(ns, &new_rows)?);
         scripts.extend(self.retract_scripts(ns, &gone, at));
         scripts.push((
             self.doc_row_script(),
-            params(vec![("doc_rows", DataValue::List(vec![Self::doc_row(ns, doc, at, name, mime, hash, pages, "done", rows.len() as i64, json!({"kind": format!("{kind:?}").to_lowercase(), "kept": rows.len() - new_rows.len(), "removed": gone.len()}))]))]),
+            params(vec![("doc_rows", DataValue::List(vec![Self::doc_row(ns, doc, at, name, mime, hash, pages, "done", rows.len() as i64, json!({"kind": format!("{kind:?}").to_lowercase(), "kept": rows.len() - new_rows.len(), "removed": gone.len(), "url": url}))]))]),
         ));
         self.run_scripts_tx(&scripts)?;
         timings.insert("store_ms".into(), t3.elapsed().as_secs_f64() * 1000.0);
@@ -1064,7 +1093,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                     let embed_ms = t2.elapsed().as_secs_f64() * 1000.0;
                     let t3 = Instant::now();
                     let at = now_us();
-                    let scripts = self.chunk_scripts(&input.ns, &input.doc, &new_rows, &vecs, at);
+                    let mut scripts = self.chunk_scripts(&input.ns, &input.doc, &new_rows, &vecs, at);
+                    scripts.extend(self.chunk_entities(&input.ns, &new_rows)?);
                     let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
                     let n_end = n0 + rows.len() as i64;
                     let mut stage = timings.clone();
@@ -1121,7 +1151,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.doc_row_script(),
             params(vec![(
                 "doc_rows",
-                DataValue::List(vec![Self::doc_row(&input.ns, &input.doc, at, &input.name, &input.mime, &input.hash, input.pages, "done", all_ids.len() as i64, json!({"kind": format!("{:?}", input.kind).to_lowercase(), "removed": gone.len()}))]),
+                DataValue::List(vec![Self::doc_row(&input.ns, &input.doc, at, &input.name, &input.mime, &input.hash, input.pages, "done", all_ids.len() as i64, json!({"kind": format!("{:?}", input.kind).to_lowercase(), "removed": gone.len(), "url": input.url}))]),
             )]),
         ));
         scripts.push((format!("?[doc, part] := *{DOC_BLOB}{{doc, part}}, doc = $doc :rm {DOC_BLOB} {{doc, part}}"), params(vec![("doc", s(&input.doc))])));

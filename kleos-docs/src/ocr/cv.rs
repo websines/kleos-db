@@ -87,21 +87,30 @@ pub fn resize_area(src: &Gray, w: usize, h: usize) -> Gray {
     }
     let xt = area_tab(src.w, w, sx);
     let yt = area_tab(src.h, h, sy);
-    // horizontal pass into f64 rows, then vertical accumulate
-    let mut hrow = vec![vec![0f64; w]; src.h];
-    for y in 0..src.h {
-        let r = src.row(y);
-        let out = &mut hrow[y];
-        for &(dx, sxi, a) in &xt {
-            out[dx] += r[sxi] as f64 * a;
-        }
-    }
-    let mut acc = vec![0f64; w * h];
+    // horizontal pass of one source row at a time into a reused buffer,
+    // then its vertical contributions. yt is ordered by (dy, syi), so every
+    // destination row still receives its terms in the same order as a pass
+    // over all rows would give it (bit-identical results, one row of memory)
+    let mut by_src: Vec<Vec<(usize, f64)>> = vec![vec![]; src.h];
     for &(dy, syi, b) in &yt {
-        let row = &hrow[syi];
-        let o = &mut acc[dy * w..(dy + 1) * w];
-        for x in 0..w {
-            o[x] += row[x] * b;
+        by_src[syi].push((dy, b));
+    }
+    let mut row_buf = vec![0f64; w];
+    let mut acc = vec![0f64; w * h];
+    for (y, terms) in by_src.iter().enumerate() {
+        if terms.is_empty() {
+            continue;
+        }
+        row_buf.iter_mut().for_each(|v| *v = 0.0);
+        let r = src.row(y);
+        for &(dx, sxi, a) in &xt {
+            row_buf[dx] += r[sxi] as f64 * a;
+        }
+        for &(dy, b) in terms {
+            let o = &mut acc[dy * w..(dy + 1) * w];
+            for x in 0..w {
+                o[x] += row_buf[x] * b;
+            }
         }
     }
     Gray { w, h, data: acc.iter().map(|&v| sat_u8(cv_round(v))).collect() }
@@ -320,21 +329,71 @@ pub fn warp_affine_row_sums(src: &Gray, m: [[f64; 3]; 2], w: usize, h: usize) ->
             0.0
         }
     };
+    // The sums are integers, so skipping terms that are exactly zero leaves
+    // them unchanged. A destination pixel can only be non-zero when its 2x2
+    // source neighbourhood touches the bounding box of the non-zero source
+    // pixels: per destination row, only the x range whose source point falls
+    // within that box (plus a 2-pixel margin for rounding) is visited, and a
+    // neighbourhood of four zeros is skipped without interpolating.
     let mut out = vec![0f64; h];
+    let (mut bx0, mut by0, mut bx1, mut by1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for yy in 0..sh {
+        let row = &data[(yy * sw) as usize..((yy + 1) * sw) as usize];
+        if let Some(f) = row.iter().position(|&v| v != 0) {
+            let l = row.iter().rposition(|&v| v != 0).unwrap();
+            bx0 = bx0.min(f as i64);
+            bx1 = bx1.max(l as i64);
+            by0 = by0.min(yy);
+            by1 = by1.max(yy);
+        }
+    }
+    if bx0 > bx1 {
+        return out;
+    }
+    let (lx, hx, ly, hy) = ((bx0 - 3) as f64, (bx1 + 3) as f64, (by0 - 3) as f64, (by1 + 3) as f64);
+    // the x where a linear function c0 + c1 * x lies in [lo, hi]
+    let span = |c0: f64, c1: f64, lo: f64, hi: f64| -> (f64, f64) {
+        if c1.abs() < 1e-12 {
+            if c0 >= lo && c0 <= hi { (f64::NEG_INFINITY, f64::INFINITY) } else { (1.0, 0.0) }
+        } else {
+            let (p, q) = ((lo - c0) / c1, (hi - c0) / c1);
+            (p.min(q), p.max(q))
+        }
+    };
     for (y, o) in out.iter_mut().enumerate() {
+        let (ax0, ax1) = span(a12 * y as f64 + b1, a11, lx, hx);
+        let (ay0, ay1) = span(a22 * y as f64 + b2, a21, ly, hy);
+        let (xa, xb) = (ax0.max(ay0), ax1.min(ay1));
+        if xa > xb {
+            continue;
+        }
+        let xs = (xa.floor() as i64 - 1).clamp(0, w as i64) as usize;
+        let xe = (xb.ceil() as i64 + 2).clamp(0, w as i64) as usize;
         let mut acc = 0u64;
-        for x in 0..w {
-            let sx = a11 * x as f64 + a12 * y as f64 + b1;
-            let sy = a21 * x as f64 + a22 * y as f64 + b2;
-            let qx = (sx * 32.0).round() / 32.0;
-            let qy = (sy * 32.0).round() / 32.0;
-            let x0 = qx.floor() as i64;
-            let y0 = qy.floor() as i64;
+        // the same sums as `a11 * x + a12 * y + b1` (left to right), with the
+        // y terms hoisted; the 1/32 quantisation in integers: round(s * 32)
+        // gives floor (>> 5) and fraction (& 31) / 32 exactly
+        let (cy1, cy2) = (a12 * y as f64, a22 * y as f64);
+        for x in xs..xe {
+            let sx = a11 * x as f64 + cy1 + b1;
+            let sy = a21 * x as f64 + cy2 + b2;
+            let ix = (sx * 32.0).round() as i64;
+            let iy = (sy * 32.0).round() as i64;
+            let x0 = ix >> 5;
+            let y0 = iy >> 5;
             // whole 2x2 neighbourhood outside: zero
             if x0 >= -1 && y0 >= -1 && x0 < sw && y0 < sh {
-                let fx = (qx - x0 as f64) as f32;
-                let fy = (qy - y0 as f64) as f32;
-                let v = (get(x0, y0) * (1.0 - fx) + get(x0 + 1, y0) * fx) * (1.0 - fy) + (get(x0, y0 + 1) * (1.0 - fx) + get(x0 + 1, y0 + 1) * fx) * fy;
+                let (p00, p10, p01, p11) = if x0 >= 0 && y0 >= 0 && x0 + 1 < sw && y0 + 1 < sh {
+                    // inside: direct reads
+                    let i = (y0 * sw + x0) as usize;
+                    let j = i + sw as usize;
+                    (data[i] as f32, data[i + 1] as f32, data[j] as f32, data[j + 1] as f32)
+                } else {
+                    (get(x0, y0), get(x0 + 1, y0), get(x0, y0 + 1), get(x0 + 1, y0 + 1))
+                };
+                let fx = (ix & 31) as f32 / 32.0;
+                let fy = (iy & 31) as f32 / 32.0;
+                let v = (p00 * (1.0 - fx) + p10 * fx) * (1.0 - fy) + (p01 * (1.0 - fx) + p11 * fx) * fy;
                 acc += v.round().clamp(0.0, 255.0) as u64;
             }
         }
@@ -509,6 +568,152 @@ pub fn percentile_u8(hist: &[u64; 256], n: u64, q: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    // the original general-path area resize, for the equality check below
+    fn resize_area_ref(src: &Gray, w: usize, h: usize) -> Gray {
+        if w == src.w && h == src.h {
+            return src.clone();
+        }
+        if w > src.w || h > src.h {
+            // OpenCV: INTER_AREA is area averaging only when neither axis grows;
+            // otherwise it is INTER_LINEAR
+            return resize_linear(src, w, h);
+        }
+        let sx = src.w as f64 / w as f64;
+        let sy = src.h as f64 / h as f64;
+        let ix = sx.round();
+        let iy = sy.round();
+        if (sx - ix).abs() < f64::EPSILON && (sy - iy).abs() < f64::EPSILON && ix >= 1.0 && iy >= 1.0 {
+            return resize_area_fast(src, w, h, ix as usize, iy as usize);
+        }
+        let xt = area_tab(src.w, w, sx);
+        let yt = area_tab(src.h, h, sy);
+        // horizontal pass into f64 rows, then vertical accumulate
+        let mut hrow = vec![vec![0f64; w]; src.h];
+        for y in 0..src.h {
+            let r = src.row(y);
+            let out = &mut hrow[y];
+            for &(dx, sxi, a) in &xt {
+                out[dx] += r[sxi] as f64 * a;
+            }
+        }
+        let mut acc = vec![0f64; w * h];
+        for &(dy, syi, b) in &yt {
+            let row = &hrow[syi];
+            let o = &mut acc[dy * w..(dy + 1) * w];
+            for x in 0..w {
+                o[x] += row[x] * b;
+            }
+        }
+        Gray { w, h, data: acc.iter().map(|&v| sat_u8(cv_round(v))).collect() }
+    }
+    
+
+    #[test]
+    fn resize_area_matches_the_reference_exactly() {
+        let mut seed = 3u64;
+        let data: Vec<u8> = (0..928 * 1472)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (seed >> 56) as u8
+            })
+            .collect();
+        let g = Gray { w: 928, h: 1472, data };
+        for (w, h) in [(504, 800), (252, 400), (768, 1218), (300, 333)] {
+            let t = std::time::Instant::now();
+            let a = resize_area(&g, w, h);
+            let t_new = t.elapsed();
+            let t = std::time::Instant::now();
+            let b = resize_area_ref(&g, w, h);
+            let t_ref = t.elapsed();
+            assert_eq!(a.data, b.data, "{w}x{h}");
+            eprintln!("resize_area {w}x{h}: new {t_new:?} ref {t_ref:?}");
+        }
+    }
+
+    // the original kernel, for the equality check below
+    fn row_sums_ref(src: &Gray, m: [[f64; 3]; 2], w: usize, h: usize) -> Vec<f64> {
+        let d = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+        let d = if d != 0.0 { 1.0 / d } else { 0.0 };
+        let (a11, a22, a12, a21) = (m[1][1] * d, m[0][0] * d, -m[0][1] * d, -m[1][0] * d);
+        let b1 = -a11 * m[0][2] - a12 * m[1][2];
+        let b2 = -a21 * m[0][2] - a22 * m[1][2];
+        let (sw, sh) = (src.w as i64, src.h as i64);
+        let data = &src.data;
+        let get = |x: i64, y: i64| -> f32 {
+            if x >= 0 && y >= 0 && x < sw && y < sh {
+                data[(y * sw + x) as usize] as f32
+            } else {
+                0.0
+            }
+        };
+        let mut out = vec![0f64; h];
+        for (y, o) in out.iter_mut().enumerate() {
+            let mut acc = 0u64;
+            for x in 0..w {
+                let sx = a11 * x as f64 + a12 * y as f64 + b1;
+                let sy = a21 * x as f64 + a22 * y as f64 + b2;
+                let qx = (sx * 32.0).round() / 32.0;
+                let qy = (sy * 32.0).round() / 32.0;
+                let x0 = qx.floor() as i64;
+                let y0 = qy.floor() as i64;
+                // whole 2x2 neighbourhood outside: zero
+                if x0 >= -1 && y0 >= -1 && x0 < sw && y0 < sh {
+                    let fx = (qx - x0 as f64) as f32;
+                    let fy = (qy - y0 as f64) as f32;
+                    let v = (get(x0, y0) * (1.0 - fx) + get(x0 + 1, y0) * fx) * (1.0 - fy) + (get(x0, y0 + 1) * (1.0 - fx) + get(x0 + 1, y0 + 1) * fx) * fy;
+                    acc += v.round().clamp(0.0, 255.0) as u64;
+                }
+            }
+            *o = acc as f64;
+        }
+        out
+    }
+    
+
+    #[test]
+    fn row_sums_match_the_reference_exactly() {
+        let (w, h) = (300usize, 420usize);
+        let mut seed = 7u64;
+        let mut data = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let r = (seed >> 33) as u32;
+                // text-like rows of ink inside a margin, a little noise elsewhere
+                let ink = x > 30 && x < 270 && y > 40 && y < 380 && (y / 9) % 2 == 0 && r % 3 == 0;
+                data[y * w + x] = if ink { 120 + (r % 130) as u8 } else if r % 50 == 0 { (r % 9) as u8 } else { 0 };
+            }
+        }
+        let g = Gray { w, h, data };
+        for k in 0..60 {
+            let a = -45.0 + k as f64 * 1.53;
+            let m = rotation_matrix(w as f64 / 2.0, h as f64 / 2.0, a);
+            assert_eq!(warp_affine_row_sums(&g, m, w, h), row_sums_ref(&g, m, w, h), "angle {a}");
+        }
+        // timing on a page-sized ink map (cargo test --release -- --nocapture)
+        let (w2, h2) = (800usize, 1270usize);
+        let mut d2 = vec![0u8; w2 * h2];
+        for (i, v) in d2.iter_mut().enumerate() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let (x, y) = (i % w2, i / w2);
+            let r = (seed >> 33) as u32;
+            *v = if x > 60 && x < 740 && y > 80 && y < 1190 && (y / 14) % 2 == 0 && r % 3 == 0 { 150 } else if r % 4 == 0 { 3 } else { 0 };
+        }
+        let g2 = Gray { w: w2, h: h2, data: d2 };
+        let ms: Vec<_> = (0..24).map(|k| rotation_matrix(400.0, 635.0, -6.0 + k as f64 * 0.5)).collect();
+        let t = std::time::Instant::now();
+        let a: Vec<_> = ms.iter().map(|m| warp_affine_row_sums(&g2, *m, w2, h2)).collect();
+        let t_new = t.elapsed();
+        let t = std::time::Instant::now();
+        let b: Vec<_> = ms.iter().map(|m| row_sums_ref(&g2, *m, w2, h2)).collect();
+        let t_ref = t.elapsed();
+        assert_eq!(a, b);
+        eprintln!("row sums, 24 angles 800x1270: new {t_new:?} ref {t_ref:?}");
+        let blank = Gray { w: 50, h: 40, data: vec![0; 2000] };
+        let m = rotation_matrix(25.0, 20.0, 7.0);
+        assert_eq!(warp_affine_row_sums(&blank, m, 50, 40), row_sums_ref(&blank, m, 50, 40));
+    }
+
     use super::*;
 
     #[test]

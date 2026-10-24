@@ -27,6 +27,8 @@ import type {
   ReflectResult,
   RememberOptions,
   RememberResult,
+  HybridQuery,
+  DecideResult,
 } from './types.js';
 
 type Opts = Record<string, unknown> | undefined;
@@ -205,6 +207,46 @@ export class Kleos {
   /** Run a CozoScript query. */
   run(script: string, params?: Record<string, Json>, opts?: { immutable?: boolean }): Promise<NamedRows> {
     return this.backend.run(script, params ?? {}, opts?.immutable ?? false);
+  }
+
+  /**
+   * Hybrid search over any stored relation with vector and/or text indexes
+   * (snake_case fields as in Python's `hybrid_search`: `relation`,
+   * `vector_index`, `query_vector`, `fts_index`, `query_text`, `limit`,
+   * `fusion`, `extra_lists`, ...). Embedded only.
+   */
+  hybridSearch(query: HybridQuery): Promise<NamedRows> {
+    return this.backend.admin('hybrid_search', query as unknown as Record<string, unknown>);
+  }
+
+  /** One typed decision with an enabled decider (e.g. template `supersedes`). Embedded only. */
+  decide(name: string, template: string, a: string, b: string): Promise<DecideResult> {
+    return this.backend.admin('decide', { name, template, a, b });
+  }
+
+  /** Export stored relations as `{relation: {headers, rows}}`. */
+  exportRelations(relations: string[]): Promise<Record<string, NamedRows>> {
+    return this.backend.admin('export', { relations });
+  }
+
+  /** Import rows into existing stored relations (the shape `exportRelations` returns). */
+  async importRelations(data: Record<string, NamedRows | { headers: string[]; rows: Json[][] }>): Promise<void> {
+    await this.backend.admin('import', { data });
+  }
+
+  /** Write a backup file (a path on the store's machine; remote: inside the server's backup dir). */
+  async backup(path: string): Promise<void> {
+    await this.backend.admin('backup', { path });
+  }
+
+  /** Restore a backup into this (empty) store. Embedded only. */
+  async restore(path: string): Promise<void> {
+    await this.backend.admin('restore', { path });
+  }
+
+  /** Copy some relations from a backup file into this store. */
+  async importFromBackup(path: string, relations: string[]): Promise<void> {
+    await this.backend.admin('import_from_backup', { path, relations });
   }
 
   /** Turn an embedder on (`embeddinggemma` downloads on first use). Process-wide when embedded. */
