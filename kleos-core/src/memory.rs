@@ -47,6 +47,11 @@ use crate::memory_engram::{self as engram_hook, Job};
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
 use crate::storage::Storage;
 
+/// Moving the store's vectors to another embedder (`::memory reembed`).
+#[path = "memory_reembed.rs"]
+pub mod reembed;
+pub use reembed::ReembedOpts;
+
 /// Memory branches: fork, rewind, merge, diff, discard (docs/specs/memory-branches.md).
 #[path = "memory_branch.rs"]
 pub mod branch;
@@ -1197,6 +1202,14 @@ pub struct MemConfig {
     pub embedder: Option<String>,
     /// Vector dimension.
     pub dim: Option<usize>,
+    /// Model behind the embedder (its repo or model id), so a store never
+    /// mixes vectors of two models; `None` on stores made before it was
+    /// recorded (their gemma vectors are EmbeddingGemma v1's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedder_model: Option<String>,
+    /// A re-embed in progress (JSON record; see memory_reembed.rs).
+    #[serde(skip)]
+    pub(crate) reembed: Option<String>,
     /// Default decider.
     pub decider: Option<String>,
     /// Entity extractor for automatic entities.
@@ -1417,6 +1430,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             let v = cell_str(&r[1]);
             match r[0].get_str() {
                 Some("embedder") => cfg.embedder = v,
+                Some("embedder_model") => cfg.embedder_model = v,
+                Some("reembed") => cfg.reembed = v,
                 Some("decider") => cfg.decider = v,
                 Some("extractor") => cfg.extractor = v.filter(|x| !x.is_empty()),
                 Some("dim") => cfg.dim = v.and_then(|x| x.parse().ok()),
@@ -1638,12 +1653,19 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// no vector yet.
     fn attach_embedder(&'s self, cfg: &mut MemConfig, name: &str) -> Result<()> {
         let status = embed::embedders().into_iter().find(|e| e.name == name && e.enabled);
-        let dim = match status {
-            Some(st) => st.dim,
+        let (dim, model) = match status {
+            Some(st) => (st.dim, st.model.clone()),
             None => bail!(
                 "embedder '{name}' is not enabled; enable it with `::embedder enable {name}` before `::memory init {{embedder: '{name}'}}`"
             ),
         };
+        if cfg.dim.is_some() {
+            if let Some(m) = store_vector_model(cfg, Some(&model)) {
+                if m != model {
+                    bail!("{}", model_mismatch(&m, name, &model));
+                }
+            }
+        }
         match (&cfg.embedder, cfg.dim) {
             (Some(old), Some(d)) if old == name && d == dim => {}
             (_, Some(d)) if d != dim => bail!(
@@ -1666,7 +1688,11 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.set_mem_config("embedder", Some(name.to_string()))?;
             }
         }
+        if cfg.embedder_model.as_deref() != Some(model.as_str()) {
+            self.set_mem_config("embedder_model", Some(model.clone()))?;
+        }
         cfg.embedder = Some(name.to_string());
+        cfg.embedder_model = Some(model);
         cfg.dim = Some(dim);
         self.backfill_memory_vectors(name)?;
         Ok(())
@@ -1715,7 +1741,11 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     fn mem_ready(&'s self, embedder_hint: Option<&str>) -> Result<MemConfig> {
         match self.mem_config()? {
-            Some(c) => Ok(c),
+            Some(c) => {
+                let c = self.reembed_finish_if_done(c)?;
+                check_store_model(&c)?;
+                Ok(c)
+            }
             None => {
                 // lazy init: the given embedder, else the first enabled
                 // document embedder (gemma's `_query` twin is for queries)
@@ -3246,6 +3276,15 @@ impl<'s, S: Storage<'s>> Db<S> {
                 0,
                 &format!("{{?[seq] := *{MEM_NS}{{ns: $ns, seq}}, seq != $seen :assert none}}"),
             );
+            // and so must the embedder its vectors came from (a re-embed
+            // switches it in one transaction; see memory_reembed.rs)
+            if let Some(e) = cfg.embedder.as_deref().filter(|_| claims.iter().any(|c| c.2.is_some())) {
+                script.insert_str(
+                    0,
+                    &format!("{{?[v] := *{MEM_CONFIG}{{key: 'embedder', value: v}}, v != $emb_used :assert none}}"),
+                );
+                p.push(("emb_used", DataValue::from(e)));
+            }
             script.push_str(&bump_ns_head_by(bump));
             p.push(("seen", DataValue::from(seen)));
             res.superseded = old_all;
@@ -3267,6 +3306,12 @@ impl<'s, S: Storage<'s>> Db<S> {
                 Ok(_) => break res,
                 Err(e) => {
                     drop(commit);
+                    let switched = self.mem_config().ok().flatten().map(|c| c.embedder) != Some(cfg.embedder.clone());
+                    if switched {
+                        // the store moved to another embedder after these
+                        // vectors were made: start over with the new one
+                        return self.remember_with(text, opts.clone(), extra);
+                    }
                     let moved = self.ns_head(&ns).map_or(false, |h| h != seen);
                     if !(moved || is_contention(&e)) {
                         return Err(e);
@@ -3385,9 +3430,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let _prio = crate::sched::scope(opts.priority.as_deref())?;
         let cfg = match self.mem_config()? {
-            Some(c) => c,
+            Some(c) => self.reembed_finish_if_done(c)?,
             None => return Ok(Default::default()),
         };
+        check_store_model(&cfg)?;
         let ns = ns_of(&opts.ns);
         let sc = self.mem_scope(&ns)?;
         let w = opts.vector_weight.unwrap_or(DEFAULT_VECTOR_WEIGHT);
@@ -4701,13 +4747,57 @@ impl<'s, S: Storage<'s>> Db<S> {
             "diff" => serde_json::to_value(self.memory_diff(from_args(op, args)?)?).into_diagnostic()?,
             "discard" => serde_json::to_value(self.memory_discard(from_args(op, args)?)?).into_diagnostic()?,
             "branches" => serde_json::to_value(self.memory_branches(from_args(op, args)?)?).into_diagnostic()?,
+            // moving the store's vectors to another embedder (memory_reembed.rs)
+            "reembed" => self.memory_reembed(from_args(op, args)?)?,
             other => bail!(
                 "unknown memory op '{other}': expected init, remember, recall, forget, reflect, link, set, flush, \
-                 fork, rewind, merge, diff, discard or branches"
+                 fork, rewind, merge, diff, discard, branches or reembed"
             ),
         };
         Ok(out)
     }
+}
+
+/// The model a store's vectors were made with: the recorded one, else (a
+/// store made before models were recorded) EmbeddingGemma v1 when the
+/// embedder is a gemma, else `current` (the enabled embedder's model).
+pub(crate) fn store_vector_model(cfg: &MemConfig, current: Option<&str>) -> Option<String> {
+    if let Some(m) = &cfg.embedder_model {
+        return Some(m.clone());
+    }
+    cfg.dim?;
+    let name = cfg.embedder.as_deref()?;
+    let st = embed::embedders().into_iter().find(|e| e.name == name);
+    match st {
+        Some(st) if st.kind.starts_with("gemma") => Some(LEGACY_GEMMA_MODEL.to_string()),
+        _ => current.map(|c| c.to_string()),
+    }
+}
+
+/// Repo of EmbeddingGemma v1, the only gemma before models were recorded.
+const LEGACY_GEMMA_MODEL: &str = "google/embeddinggemma-300m";
+
+fn model_mismatch(stored: &str, name: &str, enabled: &str) -> String {
+    format!(
+        "the memory store's vectors were made by '{stored}', but embedder '{name}' is '{enabled}'; vectors of two models are never mixed. \
+         Either enable '{stored}' under '{name}' (e.g. `::embedder enable {name} {{model: '{stored}'}}`), \
+         or move the store to '{enabled}' with `::memory reembed {{embedder: '{name}'}}`"
+    )
+}
+
+/// The store's embedder, if enabled, must be the model its vectors came from.
+fn check_store_model(cfg: &MemConfig) -> Result<()> {
+    let Some(name) = cfg.embedder.as_deref() else { return Ok(()) };
+    if cfg.dim.is_none() {
+        return Ok(());
+    }
+    let Some(st) = embed::embedders().into_iter().find(|e| e.name == name && e.enabled) else { return Ok(()) };
+    if let Some(m) = store_vector_model(cfg, Some(&st.model)) {
+        if m != st.model {
+            bail!("{}", model_mismatch(&m, name, &st.model));
+        }
+    }
+    Ok(())
 }
 
 fn from_args<T: serde::de::DeserializeOwned>(op: &str, args: serde_json::Map<String, JsonValue>) -> Result<T> {

@@ -28,8 +28,11 @@
 //! Models:
 //! * [`StaticEmbedder`]: Model2Vec static embeddings (e.g.
 //!   `minishlab/potion-base-8M`), a table lookup and a mean, ~0.05 ms/text.
+//! * [`Egemma2Embedder`]: `google/embeddinggemma-2` (Apache-2.0; Gemma 4
+//!   bidirectional encoder with per-layer embeddings, text path only, mean
+//!   pooling, Matryoshka output). kleos's default embedder.
 //! * [`GemmaEmbedder`]: `google/embeddinggemma-300m` (Gemma 3 bidirectional
-//!   encoder, mean pooling, two dense projections, Matryoshka output).
+//!   encoder, mean pooling, two dense projections, Matryoshka output; gated).
 //!
 //! Extraction models:
 //! * [`Gliner`]: GLiNER2.5 entity extraction (`Mazino0/kleos-gliner`, a fine-tune of `fastino/gliner2.5-base-v1`,
@@ -43,6 +46,7 @@ pub mod budget;
 mod decide;
 mod decider_nano;
 mod device;
+mod egemma2;
 mod error;
 mod gemma;
 #[cfg(feature = "gliner")]
@@ -55,6 +59,7 @@ mod static_embed;
 pub use decide::{softmax, DecideAnswer, DecideRequest, Decider};
 pub use decider_nano::{DeciderNano, DECIDER_BATCH_TOKENS, DECIDER_NANO_BASE_REPO, DECIDER_NANO_REPO};
 pub use device::DevicePref;
+pub use egemma2::{Egemma2Embedder, Egemma2Model, EGEMMA2_DOCUMENT_PROMPT, EGEMMA2_QUERY_PROMPT, EGEMMA2_REPO};
 pub use error::{Error, Result};
 pub use gemma::{GemmaEmbedder, GemmaModel, GEMMA_DOCUMENT_PROMPT, GEMMA_QUERY_PROMPT};
 #[cfg(feature = "gliner")]
