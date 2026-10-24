@@ -618,30 +618,8 @@ impl McpServer {
     }
 
     fn entity_profile(&self, ns: &str, name: &str) -> ToolOut {
-        let b = &self.backend;
-        let facts = b
-            .call(Area::Ontology, "facts", json!({"ns": ns, "s": name}))
-            .ok()
-            .filter(|v| v.as_array().map_or(false, |a| !a.is_empty()))
-            .unwrap_or_else(|| json!([]));
-        match b.call(Area::Memory, "recall", json!({"ns": ns, "query": name, "entity": name, "format": "context", "budget": 600})) {
-            Ok(ctx) => {
-                let mut text = String::new();
-                if let Some(fs) = facts.as_array().filter(|a| !a.is_empty()) {
-                    text.push_str(&format!("Facts about {name}:\n"));
-                    for f in fs {
-                        text.push_str(&format!("- {}\n", serde_json::to_string(f).unwrap_or_default()));
-                    }
-                    text.push('\n');
-                }
-                let block = ctx.get("text").and_then(|t| t.as_str()).unwrap_or_default();
-                if block.trim().is_empty() && text.is_empty() {
-                    text = format!("Nothing is known about '{name}' in namespace '{ns}'.");
-                } else {
-                    text.push_str(block);
-                }
-                ToolOut::Done { text, structured: json!({"name": name, "ns": ns, "facts": facts, "context": ctx}), is_error: false }
-            }
+        match entity_profile(&self.backend, ns, name) {
+            Ok((text, structured)) => ToolOut::Done { text, structured, is_error: false },
             Err(e) => tool_error(e),
         }
     }
@@ -909,6 +887,36 @@ impl McpServer {
     }
 }
 
+/// What memory knows about an entity: ontology facts whose subject is the
+/// name, and the context block of memories mentioning it (by recorded entity
+/// links, else by search). Shared by the MCP tool and `kleos profile`.
+pub fn entity_profile(b: &Backend, ns: &str, name: &str) -> Result<(String, Value), String> {
+    let facts = b
+        .call(Area::Ontology, "facts", json!({"ns": ns, "s": name}))
+        .ok()
+        .filter(|v| v.as_array().map_or(false, |a| !a.is_empty()))
+        .unwrap_or_else(|| json!([]));
+    let mut ctx = b.call(Area::Memory, "recall", json!({"ns": ns, "query": name, "entity": name, "format": "context", "budget": 600}))?;
+    if ctx.get("ids").and_then(|i| i.as_array()).map_or(true, |a| a.is_empty()) {
+        ctx = b.call(Area::Memory, "recall", json!({"ns": ns, "query": name, "format": "context", "budget": 600}))?;
+    }
+    let mut text = String::new();
+    if let Some(fs) = facts.as_array().filter(|a| !a.is_empty()) {
+        text.push_str(&format!("Facts about {name}:\n"));
+        for f in fs {
+            text.push_str(&format!("- {}\n", serde_json::to_string(f).unwrap_or_default()));
+        }
+        text.push('\n');
+    }
+    let empty = ctx.get("ids").and_then(|i| i.as_array()).map_or(true, |a| a.is_empty());
+    if empty && text.is_empty() {
+        text = format!("Nothing is known about '{name}' in namespace '{ns}'.");
+    } else if !empty {
+        text.push_str(ctx.get("text").and_then(|t| t.as_str()).unwrap_or_default());
+    }
+    Ok((text, json!({"name": name, "ns": ns, "facts": facts, "context": ctx})))
+}
+
 fn resource_templates() -> Vec<Value> {
     vec![
         json!({"uriTemplate": "kleos://doc/{ns}/{doc}", "name": "document", "title": "Document", "mimeType": "application/json"}),
@@ -1034,7 +1042,8 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
-fn encode_task(v: &Value) -> String {
+/// A task id: the task's locator, hex-encoded (opaque to clients, durable).
+pub fn encode_task(v: &Value) -> String {
     format!("kt_{}", hex(v.to_string().as_bytes()))
 }
 

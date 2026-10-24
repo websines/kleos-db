@@ -73,6 +73,7 @@ impl Backend {
 
     /// One op, e.g. `call(Area::Memory, "recall", {"query": ...})`.
     pub fn call(&self, area: Area, op: &str, args: Value) -> Result<Value, String> {
+        let args2 = args.clone();
         match self {
             Backend::Embedded(db) => {
                 let r = match area {
@@ -91,6 +92,7 @@ impl Backend {
             }
             Backend::Remote(r) => r.post(&format!("/{}/{op}", area.path()), &args),
         }
+        .or_else(|e| empty_read(area, op, &args2, e))
     }
 
     /// A read-only CozoScript query; answers `{headers, rows}`.
@@ -115,6 +117,23 @@ impl Backend {
                 Ok(v)
             }
         }
+    }
+}
+
+/// A read of a store with no memories yet (its relations are created by the
+/// first `remember`) is an empty answer, not an error.
+fn empty_read(area: Area, op: &str, args: &Value, err: String) -> Result<Value, String> {
+    if area != Area::Memory || !err.contains("Cannot find requested stored relation 'kleos_mem") {
+        return Err(err);
+    }
+    let ns = args.get("ns").and_then(|v| v.as_str()).unwrap_or("default");
+    match op {
+        "recall" if args.get("format").and_then(|f| f.as_str()) == Some("context") => {
+            Ok(json!({"text": "", "tokens": 0, "budget": args.get("budget").cloned().unwrap_or(json!(1000)), "ids": [], "omitted": []}))
+        }
+        "recall" | "branches" => Ok(json!([])),
+        "reflect" => Ok(json!({"ns": ns, "pending": [], "changes": [], "contradictions": []})),
+        _ => Err(err),
     }
 }
 

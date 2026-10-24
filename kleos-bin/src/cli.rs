@@ -437,22 +437,8 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
         }
         CliCmd::Profile { name, conn } => {
             let (ctx, _) = connect(&conn)?;
-            let facts = ctx.backend.call(Area::Ontology, "facts", json!({"ns": ctx.ns, "s": name})).unwrap_or(json!([]));
-            let block = ctx.backend.call(Area::Memory, "recall", json!({"ns": ctx.ns, "query": name, "entity": name, "format": "context", "budget": 600}))?;
-            let v = json!({"name": name, "facts": facts, "context": block});
-            print(&ctx, &v, |v| {
-                let mut s = String::new();
-                if let Some(fs) = v["facts"].as_array().filter(|a| !a.is_empty()) {
-                    s.push_str(&format!("Facts about {name}:\n"));
-                    for f in fs {
-                        s.push_str(&format!("- {f}\n"));
-                    }
-                    s.push('\n');
-                }
-                let t = v["context"]["text"].as_str().unwrap_or_default();
-                s.push_str(if t.trim().is_empty() && s.is_empty() { "(nothing known)" } else { t });
-                Some(s)
-            });
+            let (text, v) = crate::mcp::entity_profile(&ctx.backend, &ctx.ns, &name)?;
+            print(&ctx, &v, |_| Some(text));
         }
         CliCmd::Doc { cmd } => match cmd {
             DocCmd::Add { file, text, conn } => {
