@@ -1426,6 +1426,15 @@ impl DbInstance {
         let db = self.clone();
         let st = state.clone();
         let _ = std::thread::Builder::new().name("kleos-docs-worker".to_string()).spawn(move || {
+            // the flag clears however the thread ends (a panic included), so
+            // the next call can start a new worker
+            struct Clear(Arc<docs::DocsState>);
+            impl Drop for Clear {
+                fn drop(&mut self) {
+                    self.0.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _clear = Clear(st.clone());
             let worker = format!("docs-{}", std::process::id());
             let (cb, changes) = db.register_callback(flow::FLOW_TASK, Some(64));
             let mut idle_since = std::time::Instant::now();

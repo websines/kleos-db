@@ -447,9 +447,14 @@ impl<'a> Converter<'a> {
     }
 
     fn safe(&self, f: impl FnOnce() -> Result<Page, DocError>) -> Page {
-        match f() {
-            Ok(p) => p,
-            Err(e) => Page { markdown: Some(String::new()), source: "error".into(), note: e.to_string(), ..Default::default() },
+        // one bad page (an error, or a panic in a model) must not end the document
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => Page { markdown: Some(String::new()), source: "error".into(), note: e.to_string(), ..Default::default() },
+            Err(p) => {
+                let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
+                Page { markdown: Some(String::new()), source: "error".into(), note: format!("panic: {msg}"), ..Default::default() }
+            }
         }
     }
 }

@@ -452,6 +452,16 @@ impl Ocr {
         for idx in prep::width_batches(&widths, batch) {
             let refs: Vec<&(Vec<f32>, usize)> = idx.iter().map(|&j| &crops[j]).collect();
             let (arr, ws, wm) = prep::pad_batch(&refs, self.height);
+            if wm < 32 {
+                // the classifier pools the width away below 32 px: ONNX Runtime
+                // returns NaN there (argmax 0 = base, never sure); tract would
+                // divide by zero
+                for &j in &idx {
+                    out[j] = "base".into();
+                    sure[j] = false;
+                }
+                continue;
+            }
             let r = script.run(vec![Input::F32(vec![idx.len(), 1, self.height, wm], arr), Input::I64(vec![idx.len()], ws)])?;
             let p = r[0].f32();
             let shape = r[0].shape().to_vec();
