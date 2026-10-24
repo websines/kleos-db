@@ -1149,6 +1149,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         #[cfg(feature = "engram")]
         {
             self.engram_erase_namespace(ns, None)?;
+            // the discarded branch's Engram jobs ran as `engram.apply`
+            // workflows: cancel the unfinished ones (their job rows are gone)
+            self.discard_engram_flows(ns)?;
         }
         self.mem_access.forget(ns, &ids);
         res.discarded.push(ns.to_string());
@@ -1515,5 +1518,33 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
         Ok(out)
+    }
+}
+
+impl<'s, S: Storage<'s>> Db<S> {
+    /// Cancel the unfinished `engram.apply` workflows of `ns` (ids
+    /// `engram:<ns>:<qid>`); a store without workflows has none.
+    #[cfg(feature = "engram")]
+    fn discard_engram_flows(&'s self, ns: &str) -> Result<()> {
+        let tx_has = {
+            let tx = self.transact()?;
+            tx.get_relation(crate::flow::FLOW_WF, false).is_ok()
+        };
+        if !tx_has {
+            return Ok(());
+        }
+        let r = self.mem_q(
+            &format!(
+                "?[id] := *{wf}{{id, status}}, starts_with(id, $p), !is_in(status, ['completed', 'failed', 'canceled'])",
+                wf = crate::flow::FLOW_WF
+            ),
+            vec![("p", s(&format!("engram:{ns}:")))],
+        )?;
+        for row in &r.rows {
+            if let Some(id) = row[0].get_str() {
+                let _ = self.flow_call("cancel", serde_json::json!({"id": id, "reason": "memory branch discarded"}));
+            }
+        }
+        Ok(())
     }
 }

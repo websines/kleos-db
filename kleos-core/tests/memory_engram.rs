@@ -402,3 +402,24 @@ fn jobs_are_workflows_in_namespace_lanes() {
     q(&db, "::set_triggers kleos_engram_queue");
     assert_eq!(q(&db, "?[count(id)] := *kleos_flow_wf{id}"), before);
 }
+
+/// Discarding a branch cancels its unfinished `engram.apply` workflows
+/// (their job rows go with the branch).
+#[test]
+fn discarding_a_branch_cancels_its_engram_workflows() {
+    let db = attached();
+    db.remember("Ada lives in Lisbon.", RememberOpts { ns: ns("p"), at: Some(d(1)), ..Default::default() }).unwrap();
+    db.memory_call("fork", serde_json::json!({"from": "p", "to": "b"})).unwrap();
+    db.remember("Ada moved to Porto.", RememberOpts { ns: ns("b"), ..Default::default() }).unwrap();
+    let open = |n: &str| {
+        q(&db, &format!("?[id, status] := *kleos_flow_wf{{id, status}}, starts_with(id, 'engram:{n}:')"))
+            .into_iter()
+            .filter(|r| r[1] != DataValue::from("canceled"))
+            .count()
+    };
+    assert!(open("b") >= 1);
+    db.memory_call("discard", serde_json::json!({"ns": "b"})).unwrap();
+    assert_eq!(open("b"), 0);
+    // the parent's workflows are untouched
+    assert_eq!(open("p"), 1);
+}

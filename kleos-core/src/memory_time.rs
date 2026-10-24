@@ -406,6 +406,16 @@ static FUTURE: LazyLock<Regex> = LazyLock::new(|| {
 /// Past markers that keep a question about a weekday in the past ("did you go on Friday?").
 static PAST_Q: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?:did|was|were|had|went|been|got|saw)\b|\w+ed\b"));
 static PERFECT: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?:have|has)\b|['’]ve\b|['’]s\s+been\b"));
+/// Where a sentence splits into clauses.
+static CLAUSE_SPLIT: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)[,;:—–]|\s(?:and|but|so|because|while|although|though|whereas)\s"));
+/// A past verb in a clause.
+static PAST_CLAUSE: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?i)\b(?:was|were|had|did|went|got|saw|came|took|made|met|bought|ran|won|lost|left|began|gave|told|felt|flew|drove|wrote|spent|sold|held|threw|paid|said|sent|kept|found|built|heard|slept|fought|caught|taught|brought|thought|stood|sat|wore|ate|drank|swam|sang|rode|broke|chose|forgot|woke)\b|\b\w{3,}ed\b")
+});
+/// Present or future markers that keep a clause out of the past.
+static PRESENT_CLAUSE: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?i)\b(?:am|is|are|will|shall|going|gonna|plan|planning|scheduled|booked\s+for|interested|excited|supposed|expected)\b|['’](?:m|re|ll)\b")
+});
 static THE_BEFORE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\bthe\s+$"));
 static OF_AFTER: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)^\s+of\b"));
 static RANGE_WORD_BEFORE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\b(?:or|to)\s*$|[-–]\s*$"));
@@ -465,6 +475,14 @@ static PATTERNS: LazyLock<Vec<(Regex, Handler)>> = LazyLock::new(|| {
             format!(r"\b(?P<cue>(?i:back\s+in|in|since|until|till|through|during|throughout|from|early|late|mid|the\s+year))[\s-]+(?P<y>{Y4})\b"),
             h_year_cue,
         ),
+        // a month of a relative year: August last year, March of next year
+        (format!(r"\b(?P<m>{FULL})(?:\s+of)?\s+(?P<rel>(?i:last|this|next))\s+year\b"), h_month_rel_year),
+        // decades: the 90s, the 1990s, the '80s, the nineties
+        (r"\b(?:(?i:the)\s+)?(?P<y>(?:19|20)[0-9]0)['’]?s\b".to_string(), h_decade),
+        (r"\b(?i:the)\s+['’]?(?P<d2>[0-9]0)['’]?s\b".to_string(), h_decade),
+        (r"\b(?P<the>(?i:the))\s+(?P<w>(?i:twenties|thirties|forties|fifties|sixties|seventies|eighties|nineties))\b".to_string(), h_decade),
+        // a day of the month without a month: on the 15th, by the 3rd
+        (format!(r"\b(?P<pre>(?i:on|by|until|till|since|before|after))\s+the\s+(?P<d>{DAYN})(?:st|nd|rd|th)\b"), h_day_of_month),
         (format!(r"\b(?P<pre>(?i:last|this|next))\s+Christmas\b"), h_christmas),
         (format!(r"\bChristmas(?P<eve>\s+(?:Day|Eve))?(?:,?\s+|\s+of\s+)(?P<y>{Y4})\b"), h_christmas),
         // relative
@@ -490,6 +508,11 @@ static PATTERNS: LazyLock<Vec<(Regex, Handler)>> = LazyLock::new(|| {
             h_rel_unit,
         ),
         (r"(?i)\bthe\s+(?P<u>week|month|year)\s+(?P<w>before\s+last|after\s+next)\b".to_string(), h_rel_unit2),
+        // parts of a season: the end of the summer, early spring, late last winter
+        (
+            format!(r"\b(?P<cue>(?i:the\s+end\s+of|end\s+of|the\s+beginning\s+of|beginning\s+of|the\s+start\s+of|start\s+of|the\s+middle\s+of|middle\s+of|early|late|mid))[\s-]+(?:(?i:the)\s+)?(?:(?P<pre>(?i:last|this|next))\s+)?(?P<s>(?i:{SEASONS}))\b(?:(?:\s+of|,)?\s+(?P<y>{Y4})\b)?"),
+            h_season_part,
+        ),
         (format!(r"(?i)\b(?P<pre>this\s+past|this\s+coming|last|this|next)\s+(?P<s>{SEASONS})\b"), h_season_rel),
         (format!(r"\b(?:(?i:the)\s+)?(?P<s>(?i:{SEASONS}))(?:\s+of)?\s+(?P<y>{Y4})\b"), h_season_year),
         // durations
@@ -555,6 +578,41 @@ impl Cx<'_> {
         }
         let end = sent.as_ptr() as usize - self.t.as_ptr() as usize + sent.len();
         self.t[end..].starts_with('?') && !PAST_Q.is_match(sent)
+    }
+
+    /// The clause of the sentence around [s, e): split at commas,
+    /// semicolons and the conjunctions that join clauses.
+    fn clause(&self, s: usize, e: usize) -> &str {
+        let sent = self.sentence(s, e);
+        let off = sent.as_ptr() as usize - self.t.as_ptr() as usize;
+        let (rs, re_) = (s - off, e - off);
+        let cut = |c: &str| -> Vec<usize> {
+            let mut v = vec![];
+            for m in CLAUSE_SPLIT.find_iter(c) {
+                v.push(m.start());
+                v.push(m.end());
+            }
+            v
+        };
+        let marks = cut(sent);
+        let b = marks.iter().copied().filter(|&i| i <= rs).max().unwrap_or(0);
+        let f = marks.iter().copied().filter(|&i| i >= re_).min().unwrap_or(sent.len());
+        &sent[b..f]
+    }
+
+    /// The tense of the clause around a date: future (a future cue in the
+    /// sentence), past (a past verb in the clause and no present marker), or
+    /// unknown.
+    fn tense(&self, s: usize, e: usize) -> Tense {
+        if self.future(s, e) {
+            return Tense::Future;
+        }
+        let c = self.clause(s, e);
+        if PAST_CLAUSE.is_match(c) && !PRESENT_CLAUSE.is_match(c) {
+            Tense::Past
+        } else {
+            Tense::Unknown
+        }
     }
 
     fn the_before(&self, s: usize) -> bool {
@@ -631,11 +689,18 @@ impl Cx<'_> {
     /// triathlon on June 24th and I've recently completed a 5K", said in
     /// April, went to the June before, and LongMemEval's session dates
     /// often precede the events their messages report.)
-    fn md_year(&self, m: u32, d: u32, future: bool) -> Option<NaiveDate> {
+    ///
+    /// The tense is judged per clause: "attended the concert on July 17th",
+    /// said in February, is the July before; "I'm training for a triathlon
+    /// on June 24th and I've recently completed a 5K" keeps June ahead (the
+    /// past verb is in the other clause).
+    fn md_year(&self, m: u32, d: u32, tense: Tense) -> Option<NaiveDate> {
         let ay = self.a.year();
         let opts: Vec<NaiveDate> = (ay - 1..=ay + 1).filter_map(|y| NaiveDate::from_ymd_opt(y, m, d)).collect();
-        if future {
-            return opts.into_iter().find(|x| *x >= self.a);
+        match tense {
+            Tense::Future => return opts.into_iter().find(|x| *x >= self.a),
+            Tense::Past => return opts.into_iter().filter(|x| *x <= self.a).max(),
+            Tense::Unknown => {}
         }
         opts.into_iter()
             .min_by_key(|x| ((*x - self.a).num_days().abs(), (*x > self.a) as u8))
@@ -656,6 +721,13 @@ impl Cx<'_> {
             _ => days(week_start(self.a), t),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tense {
+    Future,
+    Past,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -706,7 +778,7 @@ fn h_month_day(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
     }
     let date = match y {
         Some(y) => NaiveDate::from_ymd_opt(y, m, d)?,
-        None => cx.md_year(m, d, cx.future(s, e))?,
+        None => cx.md_year(m, d, cx.tense(s, e))?,
     };
     Some(cand(s, e, (date, days(date, 1)), Granularity::Day, true))
 }
@@ -722,7 +794,7 @@ fn h_day_range(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
     }
     let a = match year_of(c, "y") {
         Some(y) => NaiveDate::from_ymd_opt(y, m, d1)?,
-        None => cx.md_year(m, d1, cx.future(s, e))?,
+        None => cx.md_year(m, d1, cx.tense(s, e))?,
     };
     let b = NaiveDate::from_ymd_opt(a.year(), m, d2)?;
     let mut x = cand(s, e, (a, days(b, 1)), Granularity::Day, true);
@@ -1091,6 +1163,127 @@ fn h_season_year(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
     Some(cand(s, e, season_iv(x, y)?, Granularity::Season, true))
 }
 
+/// "the end of the summer", "early spring", "late last winter": a part
+/// of a season (the first, middle or last of its three months).
+fn h_season_part(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
+    let (s, e) = whole(c);
+    let cue = norm(c.name("cue")?.as_str());
+    let x = season_name(c.name("s")?.as_str());
+    let (cs, cy) = season_of(cx.a);
+    let ay = cx.a.year();
+    let full = if let Some(y) = c.name("y").and_then(|y| y.as_str().parse::<i32>().ok()) {
+        season_iv(x, y)?
+    } else {
+        match c.name("pre").map(|p| norm(p.as_str())).as_deref() {
+            Some("last") => {
+                if cs == x {
+                    season_iv(x, cy - 1)?
+                } else {
+                    (ay - 2..=ay).rev().filter_map(|y| season_iv(x, y)).find(|iv| iv.1 <= cx.a)?
+                }
+            }
+            Some("next") => (ay - 1..=ay + 1).filter_map(|y| season_iv(x, y)).find(|iv| iv.0 > cx.a)?,
+            Some(_) => (ay - 1..=ay + 1).filter_map(|y| season_iv(x, y)).find(|iv| iv.0 <= cx.a && cx.a < iv.1).or_else(|| {
+                (ay - 1..=ay + 1).filter_map(|y| season_iv(x, y)).min_by_key(|iv| (iv.0 - cx.a).num_days().abs())
+            })?,
+            // no year: the coming one with a future cue, else the latest
+            // one that has begun
+            None => {
+                if cx.future(s, e) {
+                    (ay - 1..=ay + 1).filter_map(|y| season_iv(x, y)).find(|iv| iv.1 > cx.a)?
+                } else {
+                    (ay - 2..=ay).rev().filter_map(|y| season_iv(x, y)).find(|iv| iv.0 <= cx.a)?
+                }
+            }
+        }
+    };
+    // three months: pick the first, middle or last
+    let (y0, m0) = (full.0.year(), full.0.month());
+    let k = match cue.as_str() {
+        "the beginning of" | "beginning of" | "the start of" | "start of" | "early" => 0,
+        "the middle of" | "middle of" | "mid" => 1,
+        _ => 2,
+    };
+    let (y, m) = add_ym(y0, m0, k);
+    let iv = month_iv(y, m)?;
+    Some(cand(s, e, iv, Granularity::Month, c.name("y").is_some()))
+}
+
+/// "August last year", "March of next year".
+fn h_month_rel_year(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
+    let (s, e) = whole(c);
+    let m = month_num(c.name("m")?.as_str())?;
+    let ay = cx.a.year();
+    let y = match norm(c.name("rel")?.as_str()).as_str() {
+        "last" => ay - 1,
+        "next" => ay + 1,
+        _ => ay,
+    };
+    Some(cand(s, e, month_iv(y, m)?, Granularity::Month, false))
+}
+
+/// Decades: "the 90s", "the 1990s", "the '80s", "the nineties" (not "my
+/// twenties": an age).
+fn h_decade(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
+    let (s, e) = whole(c);
+    if !cx.edges_ok(s, e) {
+        return None;
+    }
+    let y0: i32 = if let Some(y) = c.name("y") {
+        y.as_str().parse().ok()?
+    } else if let Some(d) = c.name("d2") {
+        let d: i32 = d.as_str().parse().ok()?;
+        // '20s..'90s: the 1900s unless that decade has not started yet
+        if 2000 + d <= cx.a.year() - 10 || d == 0 || d == 10 { 2000 + d } else { 1900 + d }
+    } else {
+        let w = c.name("w")?.as_str().to_ascii_lowercase();
+        let d = match w.as_str() {
+            "twenties" => 20,
+            "thirties" => 30,
+            "forties" => 40,
+            "fifties" => 50,
+            "sixties" => 60,
+            "seventies" => 70,
+            "eighties" => 80,
+            _ => 90,
+        };
+        1900 + d
+    };
+    let a = NaiveDate::from_ymd_opt(y0, 1, 1)?;
+    let b = NaiveDate::from_ymd_opt(y0 + 10, 1, 1)?;
+    Some(cand(s, e, (a, b), Granularity::Year, true))
+}
+
+/// Nouns that make "the 15th" an ordinal, not a date.
+static ORDINAL_NOUN: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?i)^\s+(?:century|centuries|time|times|floor|place|anniversary|birthday|grade|round|street|st\b|avenue|ave\b|edition|amendment|percentile|row|level|chapter|episode|season|book|try|attempt|hole|inning|lap|pick|seed|rank|position)\b")
+});
+
+/// "on the 15th", "by the 3rd": a day of the current, previous or next
+/// month by tense (past: the latest on or before the anchor; future: the
+/// first on or after it; else the nearest).
+fn h_day_of_month(cx: &Cx<'_>, c: &Captures<'_>) -> Option<Cand> {
+    let (s0, e) = whole(c);
+    let d: u32 = c.name("d")?.as_str().parse().ok()?;
+    if ORDINAL_NOUN.is_match(cx.after(e, 16)) || cx.of_after(e) {
+        return None;
+    }
+    let pre = norm(c.name("pre")?.as_str());
+    let (ay, am) = (cx.a.year(), cx.a.month());
+    let opts: Vec<NaiveDate> = (-1..=1)
+        .filter_map(|k| {
+            let (y, m) = add_ym(ay, am, k);
+            NaiveDate::from_ymd_opt(y, m, d)
+        })
+        .collect();
+    let date = match (pre.as_str(), cx.tense(s0, e)) {
+        ("since" | "after", _) | (_, Tense::Past) => opts.iter().copied().filter(|x| *x <= cx.a).max()?,
+        ("by" | "until" | "till" | "before", _) | (_, Tense::Future) => opts.iter().copied().find(|x| *x >= cx.a)?,
+        _ => opts.iter().copied().min_by_key(|x| ((*x - cx.a).num_days().abs(), (*x > cx.a) as u8))?,
+    };
+    Some(cand(s0, e, (date, days(date, 1)), Granularity::Day, false))
+}
+
 fn duration(cx: &Cx<'_>, s: usize, e: usize, n: i64, g: Granularity) -> Option<Cand> {
     let start = shift(cx.a, g, -n)?;
     let mut x = cand(s, e, (start, days(cx.a, 1)), g, false);
@@ -1203,7 +1396,7 @@ fn maybe_temporal(t: &str) -> bool {
     [
         "day", "night", "tomorrow", "week", "month", "year", "ago", "morning", "afternoon", "evening", "summer",
         "winter", "spring", "fall", "autumn", "christmas", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug",
-        "sep", "oct", "nov", "dec", "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+        "sep", "oct", "nov", "dec", "mon", "tue", "wed", "thu", "fri", "sat", "sun", "ties", "fifties",
     ]
     .iter()
     .any(|w| l.contains(w))
@@ -1355,6 +1548,38 @@ mod tests {
     }
 
     #[test]
+    fn day_of_month_decades_relative_year_season_parts() {
+        one("I paid the rent on the 15th.", "on the 15th", "2023-04-15", "2023-04-16", "day");
+        one("The report is due by the 20th.", "by the 20th", "2023-05-20", "2023-05-21", "day");
+        one("I'll call you on the 3rd", "on the 3rd", "2023-06-03", "2023-06-04", "day");
+        none("We live on the 15th floor.");
+        none("It was my 15th birthday.");
+        one("We loved the music of the 90s.", "the 90s", "1990-01-01", "2000-01-01", "year");
+        one("In the 1980s my dad drove a Beetle.", "the 1980s", "1980-01-01", "1990-01-01", "year");
+        one("I listened to a lot of the nineties hits", "the nineties", "1990-01-01", "2000-01-01", "year");
+        none("I was broke in my twenties.");
+        let v = got("I visited Rome in August last year.", a());
+        assert!(v.iter().any(|x| x.1 == "2022-08-01" && x.2 == "2022-09-01"), "{v:?}");
+        one("We went camping at the end of the summer.", "the end of the summer", "2022-08-01", "2022-09-01", "month");
+        one("The tulips bloom in early spring", "early spring", "2023-03-01", "2023-04-01", "month");
+        one("I moved at the end of summer 2021.", "the end of summer 2021", "2021-08-01", "2021-09-01", "month");
+    }
+
+    #[test]
+    fn month_day_tense_per_clause() {
+        one_at("I attended the concert on July 17th.", at(2023, 2, 10), "July 17th", "2022-07-17", "2022-07-18", "day");
+        one_at(
+            "I'm training for a triathlon on June 24th and I've recently completed a 5K.",
+            at(2023, 4, 10),
+            "June 24th",
+            "2023-06-24",
+            "2023-06-25",
+            "day",
+        );
+        one_at("I'm excited to see them on July 17th.", at(2023, 2, 10), "July 17th", "2023-07-17", "2023-07-18", "day");
+    }
+
+    #[test]
     fn relative_days() {
         one("I went to a support group yesterday.", "yesterday", "2023-05-07", "2023-05-08", "day");
         one("Today was great", "Today", "2023-05-08", "2023-05-09", "day");
@@ -1418,13 +1643,14 @@ mod tests {
         // a capitalised name before a bare weekday is not a date
         none("For my \"Mental Health Monday\" series, I share tips.");
         none("We do Taco Tuesday at work.");
-        // a month and day without a year: the nearest one
+        // a month and day without a year in a past-tense clause: the latest
+        // one before the anchor (tense judged per clause)
         one_at(
             "I attended a charity golf tournament on July 17th.",
             at(2023, 2, 21),
             "July 17th",
-            "2023-07-17",
-            "2023-07-18",
+            "2022-07-17",
+            "2022-07-18",
             "day",
         );
         one("Hey Sam, Monday was fun.", "Monday", "2023-05-01", "2023-05-02", "day");
@@ -1641,7 +1867,6 @@ mod tests {
             "One day I'll be famous.",
             "Meet me at 5 pm.",
             "The night was cold.",
-            "I grew up in the 90s.",
             "Version 2.0.2023 is out.",
             "It costs $2019.",
             "Call me at 555-2019-2021.",
