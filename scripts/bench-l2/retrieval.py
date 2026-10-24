@@ -119,7 +119,8 @@ def ingest(db, ns, units):
     """remember() every unit in time order; return id -> [src], stats, per-call ms."""
     owner = {}
     lat = []
-    st = {"added": 0, "duplicate": 0, "superseded": 0, "pending": 0, "gated": 0, "errors": 0}
+    st = {"added": 0, "duplicate": 0, "superseded": 0, "pending": 0, "gated": 0, "errors": 0,
+          "onto_gated": 0, "onto_blocked": 0, "smalltalk": 0}
     ingest.decisions = []
     for u in units:
         if not u["text"]:
@@ -144,6 +145,9 @@ def ingest(db, ns, units):
         st["superseded"] += len(r.get("superseded") or [])
         st["pending"] += len(r.get("tentative") or [])
         st["gated"] += len(r.get("gated") or [])
+        st["onto_gated"] += len(r.get("ontology_gated") or [])
+        st["onto_blocked"] += len(r.get("ontology_blocked") or [])
+        st["smalltalk"] += sum(1 for t in r.get("types") or [] if t.get("cls") == "smalltalk")
         claims = {c.get("id"): c.get("text") for c in (r.get("claims") or [])}
         for d in r.get("decisions") or []:  # supersede / duplicate decisions that acted or wait for review
             if d.get("action") in ("supersede", "superseded", "duplicate", "pending", "auto"):
@@ -218,6 +222,9 @@ def run_lme(args, outdir):
         units = C.lme_units(x, args.unit)
         ns = "q_" + x["question_id"]
         db = open_db(args.variant, args.device)
+        if args.ontology:  # docs/specs/ontology.md
+            onto, _, untyped = args.ontology.partition(":")
+            db.ontology_call("activate", {"ns": ns, "ontos": onto.split("+"), "untyped": untyped or "decide"})
         t0 = time.perf_counter()
         owner, st, lat = ingest(db, ns, units)
         ingest_s = time.perf_counter() - t0
@@ -299,6 +306,9 @@ def run_locomo(args, outdir):
                     u["entities"] = e["entities"]
         ns = "c_" + sid
         db = open_db(args.variant, args.device)
+        if args.ontology:  # docs/specs/ontology.md
+            onto, _, untyped = args.ontology.partition(":")
+            db.ontology_call("activate", {"ns": ns, "ontos": onto.split("+"), "untyped": untyped or "decide"})
         t0 = time.perf_counter()
         owner, st, lat = ingest(db, ns, units)
         ingest_s = time.perf_counter() - t0
@@ -364,10 +374,13 @@ def main():
                     help="read time for recall: 'now' (default) or the question's date (LongMemEval), so the "
                          "recency blend sees the age a live agent would")
     ap.add_argument("--tag", default=os.environ.get("KLEOS_BENCH_TAG") or C.git_rev())
+    ap.add_argument("--ontology", default=None, help="activate an ontology per namespace: 'personal[:decide|pending|dup_only]'")
     args = ap.parse_args()
     args.shard_i, args.shard_n = map(int, args.shard.split("/"))
     unit = args.unit if args.bench != "locomo" else "turn"
     vdir = args.variant + ("@q" if args.as_of == "question" else "") + ("+ents" if args.entities == "caps" else "+gliner" if args.entities else "")
+    if args.ontology:
+        vdir += "+onto" + (("-" + args.ontology.partition(":")[2]) if ":" in args.ontology else "")
     configs = parse_configs(args.configs) or {"": {}}
     outdirs = {}
     for cname in configs:

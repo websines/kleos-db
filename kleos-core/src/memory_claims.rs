@@ -215,7 +215,7 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// Words of `s` that carry content (not function words).
-fn content_words(s: &str) -> usize {
+pub(crate) fn content_words(s: &str) -> usize {
     words(s)
         .iter()
         .filter(|w| !STOPWORDS.contains(&w.as_str()))
