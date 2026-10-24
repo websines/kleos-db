@@ -246,6 +246,29 @@ fn maintenance_makes_a_contradicted_single_valued_property_multi_valued() {
     {
         db.remember(t, at("c", d(i as i64))).unwrap();
     }
+    // prototype-only types are not evidence: the same claims typed by a
+    // prototype match alone change nothing
+    let set_by = |by: &str| {
+        db.run_script(
+            "?[ns, id, by] := *kleos_mem_type{ns, id, prop}, ns = 'c', prop = 'favorite_color', by = $by \
+             :update kleos_mem_type {ns, id => by}",
+            [("by".to_string(), kleos::DataValue::from(by))].into_iter().collect(),
+            kleos::ScriptMutability::Mutable,
+        )
+        .unwrap()
+    };
+    let orig = db
+        .run_script(
+            "?[by] := *kleos_mem_type{ns: 'c', prop: 'favorite_color', by} :limit 1",
+            Default::default(),
+            kleos::ScriptMutability::Immutable,
+        )
+        .unwrap();
+    let orig_by = orig.rows[0][0].get_str().unwrap().to_string();
+    set_by("proto");
+    let none = onto(&db, "maintain", json!({"ns": "c", "dry_run": true}));
+    assert!(!none["changes"].as_array().unwrap().iter().any(|c| c["kind"] == "cardinality"), "{none:#}");
+    set_by(&orig_by);
     let dry = onto(&db, "maintain", json!({"ns": "c", "dry_run": true}));
     assert!(dry["changes"].as_array().unwrap().iter().any(|c| c["kind"] == "cardinality" && c["prop"] == "favorite_color"), "{dry:#}");
     let out = onto(&db, "maintain", json!({"ns": "c"}));

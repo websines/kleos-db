@@ -859,10 +859,14 @@ impl<'s, S: Storage<'s>> Db<S> {
         };
         self.onto_ensure()?;
         let mut changes = vec![];
-        // typed, current claims per (prop, subject)
+        // typed, current claims per (prop, subject). Only types a cue, a rule,
+        // learning or an extractor backs count as evidence: a prototype match
+        // alone is too noisy under some embedders to flip, merge or retire a
+        // property (EmbeddingGemma 2 made `reports_to` multi-valued from
+        // prototype-only types).
         let r = self.ol_q(
-            "?[id, prop, subject, text] := *kleos_mem_type{ns: $ns, id, prop, subject}, !is_null(prop), \
-                 *kleos_mem{ns: $ns, id, text @ 'NOW'}",
+            "?[id, prop, subject, text] := *kleos_mem_type{ns: $ns, id, prop, subject, by}, !is_null(prop), \
+                 by != 'proto', by != 'none', *kleos_mem{ns: $ns, id, text @ 'NOW'}",
             vec![("ns", s(ns))],
         )?;
         let mut by_prop: BTreeMap<String, BTreeMap<String, Vec<(String, String)>>> = BTreeMap::new();
