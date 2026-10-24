@@ -587,12 +587,19 @@ impl<'a> Converter<'a> {
     /// Pages [from, end) on `threads` workers: pdfium reads run one at a
     /// time (its lock), OCR in parallel.  `each` is called in page order.
     pub fn convert_doc_parallel(&self, doc: &Doc, from: usize, end: usize, threads: usize, each: &mut (dyn FnMut(usize, Page) + Send)) -> usize {
+        self.convert_doc_streaming(doc, from, end, threads, &std::sync::atomic::AtomicBool::new(false), each)
+    }
+
+    /// As `convert_doc_parallel`, for a long stream: workers stop taking pages
+    /// once `cancel` is set, and they wait (bounded queue) while `each` is busy,
+    /// so a slow consumer holds the workers back instead of buffering the book.
+    pub fn convert_doc_streaming(&self, doc: &Doc, from: usize, end: usize, threads: usize, cancel: &std::sync::atomic::AtomicBool, each: &mut (dyn FnMut(usize, Page) + Send)) -> usize {
         let end = end.min(doc.pages);
         if end <= from {
             return 0;
         }
         let next = std::sync::atomic::AtomicUsize::new(from);
-        let (tx, rx) = std::sync::mpsc::channel::<(usize, Page)>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Page)>(2 * threads.max(1));
         std::thread::scope(|s| {
             for wi in 0..threads.max(1) {
                 let tx = tx.clone();
@@ -605,6 +612,9 @@ impl<'a> Converter<'a> {
                     let own = if w == 0 { None } else { doc.reopen_on(w).ok() };
                     let d = own.as_ref().unwrap_or(doc);
                     loop {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         if i >= end {
                             break;
@@ -620,6 +630,9 @@ impl<'a> Converter<'a> {
             let mut pending: BTreeMap<usize, Page> = BTreeMap::new();
             let mut want = from;
             for (i, p) in rx {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue; // drain so the workers can finish
+                }
                 pending.insert(i, p);
                 while let Some(p) = pending.remove(&want) {
                     each(want, p);
