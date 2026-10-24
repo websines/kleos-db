@@ -20,11 +20,12 @@ docs/specs/memory-api.md.
 import json, sys, time, statistics
 from datetime import datetime, timezone
 
-import os, random  # noqa: E401
+import hashlib, os, random  # noqa: E401
 from kleos import CozoDbPy  # noqa: E402
 
 ORACLE = os.environ.get("LME_ORACLE", "/Volumes/SSD01/caches/huggingface/hub/datasets--xiaowu0162--longmemeval-cleaned/snapshots/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_oracle.json")
 SEED = 20261023  # the decider-nano data build's seed (scripts/bench-l2/common.py)
+ENTS = json.load(open(os.environ["KU_ENTITIES"]))["items"] if os.environ.get("KU_ENTITIES") else None
 
 
 def lme_ku_split(data):
@@ -58,8 +59,12 @@ def main(which, out_path, limit, extra):
         q = data[qid]
         dates = dict(zip(q["haystack_session_ids"], q["haystack_dates"]))
         ns = f"q{qi}"
+        if ONTOLOGY:  # docs/specs/ontology.md: activate an ontology on the question's namespace
+            onto, _, untyped = ONTOLOGY.partition(":")
+            db.ontology_call("activate", {"ns": ns, "ontos": onto.split("+"), "untyped": untyped or "decide"})
         lat, per_claim = [], []
-        st = {"statements": 0, "claims": 0, "decided": 0, "added": 0, "superseded": 0, "pending": 0, "dup": 0}
+        st = {"statements": 0, "claims": 0, "decided": 0, "added": 0, "superseded": 0, "pending": 0, "dup": 0,
+              "onto_gated": 0, "onto_blocked": 0}
         pend, sups, dups = [], [], []
         sessions = sorted(zip(q["haystack_session_ids"], q["haystack_dates"], q["haystack_sessions"]), key=lambda s: micros(s[1]))
         for sid, date, sess in sessions:
@@ -67,8 +72,13 @@ def main(which, out_path, limit, extra):
             for t in sess:
                 if t["role"] != "user":
                     continue
+                kw = dict(extra)
+                if ENTS is not None:  # KU_ENTITIES: precomputed entity lists (scripts/gliner/e2e_entities.py ku)
+                    e = ENTS.get(f"{qid}/{hashlib.sha1(t['content'].encode()).hexdigest()}")
+                    if e and e["entities"]:
+                        kw["entities"] = e["entities"]
                 t0 = time.perf_counter()
-                r = db.remember(t["content"], ns=ns, at=at, source=sid, **extra)
+                r = db.remember(t["content"], ns=ns, at=at, source=sid, **kw)
                 ms = (time.perf_counter() - t0) * 1000
                 claims = r.get("claims") or [{"id": r.get("id"), "text": t["content"], "action": r["action"], "decided": True}]
                 lat.append(ms)
@@ -80,6 +90,8 @@ def main(which, out_path, limit, extra):
                 st["dup"] += sum(1 for c in claims if c["action"] == "duplicate")
                 st["superseded"] += len(r.get("superseded") or [])
                 st["pending"] += len(r.get("tentative") or [])
+                st["onto_gated"] += len(r.get("ontology_gated") or [])
+                st["onto_blocked"] += len(r.get("ontology_blocked") or [])
                 text_of = {c.get("id"): c["text"] for c in claims}
                 for d in r.get("decisions") or []:
                     rec = {"new": text_of.get(d.get("claim"), t["content"])[:300], "old": d["candidate_text"][:300],
@@ -121,7 +133,8 @@ def main(which, out_path, limit, extra):
     n = len(out)
     allst = {k: sum(r["stats"][k] for r in out) for k in out[0]["stats"]}
     print("SUMMARY", json.dumps({
-        "which": which, "n": n, "opts": extra, "decider": not NODEC,
+        "which": which, "n": n, "opts": extra, "decider": not NODEC, "ontology": ONTOLOGY,
+        "onto_gated_per_q": allst["onto_gated"] / n, "onto_blocked_per_q": allst["onto_blocked"] / n,
         "latest_first": sum(r["latest_first"] for r in out) / n,
         "stale_first": sum(r["stale_first"] for r in out) / n,
         "latest@10": sum(r["latest_in10"] for r in out) / n,
@@ -143,6 +156,8 @@ def main(which, out_path, limit, extra):
 
 
 NODEC = False
+# KLEOS_ONTOLOGY=personal[:decide|pending|dup_only]: activate an ontology per question
+ONTOLOGY = os.environ.get("KLEOS_ONTOLOGY", "")
 QWS = [0.0, 0.02, 0.05, 0.1]
 if __name__ == "__main__":
     if sys.argv[1].endswith("-nodec"):
