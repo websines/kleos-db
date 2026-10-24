@@ -476,6 +476,16 @@ The hook is one function, `memory_engram::enqueue`, called from the write-script
 
 `forget` erase runs `::erase kleos_mem` as its own statement, after the transaction that cleans up and enqueues the Engram erase job. A crash between the two leaves the memory present and its overlay being erased. Repeating the `forget` completes it, since erase is idempotent. The opposite order could have left an erased memory whose Engram rows still answer.
 
+### Changing the embedder
+
+A store keeps vectors of one model. `memory init {embedder}` records the embedder's name, its width and the model behind it (`kleos_mem_config`: `embedder`, `dim`, `embedder_model`); stores made before the model was recorded are taken to hold EmbeddingGemma v1 vectors if their embedder is a gemma. If the embedder enabled under the store's name is another model (for example `gemma` now resolving to EmbeddingGemma 2 on a store built with v1), `remember` and `recall` refuse with an error that names both fixes: enable the old model under that name (`::embedder enable gemma {model: 'embeddinggemma-300m'}`), or move the store:
+
+```
+::memory reembed {embedder: 'gemma2', batch?: 64, wait?: true, queue?: 'default'}
+```
+
+Re-embedding is a durable workflow (`kleos.memory.reembed`, built-in mode; see durable-workflows.md). Each step embeds up to `batch` memories into a shadow relation (`kleos_mem_vec_next`) inside the query, so a batch commits with its checkpoint and the history stays small; a killed process resumes with the next batch (`wait: false` leaves the work to a flow worker). The last step is one transaction: it embeds what was remembered meanwhile, copies every shadow vector into `kleos_mem_vec` keeping its `current` flag, and sets `embedder` and `embedder_model`. Before it commits, recall and remember use the old model; after it, the new one. A `remember` that embedded with the old model and commits after the switch fails an embedder assertion in its transaction and starts over with the new model. The new embedder must have the store's width (EmbeddingGemma v1 and v2 are both 768; either can be truncated to the same Matryoshka width).
+
 ### Branches
 
 `fork`, `rewind`, `merge`, `diff`, `discard` and `branches` are memory ops too (`::memory fork {from, to}`, `Db::memory_fork`, Python `memory_fork`, `POST /memory/fork`, …). A branch is a copy-on-write view of its parent. Every op above works on a branch, with reads routed through the lineage and writes to inherited memories copied up. See [memory-branches.md](memory-branches.md).

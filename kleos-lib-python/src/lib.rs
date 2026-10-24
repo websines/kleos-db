@@ -1156,7 +1156,8 @@ impl CozoDbPy {
     /// Turn a built-in embedder on under `name` (kleos fork; process-wide,
     /// like `::embedder enable`). With no keyword arguments a previously
     /// disabled embedder comes back as it was; otherwise `model` defaults to
-    /// EmbeddingGemma (`'embeddinggemma'`, int8, auto device, 768-d), or e.g.
+    /// EmbeddingGemma 2 (`'embeddinggemma'`, int8, auto device, 768-d; v1 is
+    /// `'embeddinggemma-300m'`), or e.g.
     /// `'potion-base-8M'`. Built-in models need a build with the `infer`
     /// feature.
     #[pyo3(signature = (name, model=None, precision=None, device=None, dim=None))]
@@ -1687,6 +1688,13 @@ impl CozoDbPy {
     #[pyo3(signature = (**opts))]
     pub fn memory_branches(&self, py: Python<'_>, opts: Option<&PyDict>) -> PyResult<PyObject> {
         self.memory_op(py, "branches", vec![], opts)
+    }
+    /// Move the store's vectors to another enabled embedder (a durable
+    /// workflow: batches, resumable, one-transaction switch). Options:
+    /// `batch`, `wait` (default true), `queue`.
+    #[pyo3(signature = (embedder, **opts))]
+    pub fn memory_reembed(&self, py: Python<'_>, embedder: &str, opts: Option<&PyDict>) -> PyResult<PyObject> {
+        self.memory_op(py, "reembed", vec![("embedder", json!(embedder))], opts)
     }
     pub fn multi_transact(&self, write: bool) -> PyResult<CozoDbMulTx> {
         let db = self.db_ref()?;

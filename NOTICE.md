@@ -108,6 +108,21 @@ changes; the repository also carries the base model's Apache-2.0 licence
 (`LICENSE-APACHE-base`). Like the base weights, it is read from the user's
 Hugging Face cache and is not bundled with the library.
 
+### EmbeddingGemma 2 and EmbeddingGemma (model weights, not shipped in the library)
+
+- **EmbeddingGemma 2** (`google/embeddinggemma-2`, Google DeepMind): Apache-2.0,
+  not gated. kleos's default embedder. `kleos-infer/src/egemma2.rs` is a port of
+  its text path (Gemma 4 encoder with projection-only per-layer embeddings, as in
+  transformers 5.19's `modeling_embedding_gemma2.py`, Apache-2.0); only the
+  `language_model.*` tensors are read, the vision and audio towers are not loaded.
+  Weights are downloaded from Hugging Face on enable.
+- **EmbeddingGemma** (`google/embeddinggemma-300m`): under the
+  [Gemma Terms of Use](https://ai.google.dev/gemma/terms) (gated on Hugging Face;
+  use is subject to the Gemma Prohibited Use Policy). Still selectable as
+  `embeddinggemma-300m` / `gemma-v1` for stores whose vectors were made with it;
+  kleos does not redistribute it. Gemma is provided under and subject to the Gemma
+  Terms of Use found at ai.google.dev/gemma/terms.
+
 ### GLiNER2 / GLiNER2.5 (Apache-2.0; architecture port, model weights not shipped)
 
 `kleos-infer/src/gliner.rs` is a Rust/candle port of the inference path of
