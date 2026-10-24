@@ -163,8 +163,12 @@ pub mod cypher;
 pub mod data;
 pub mod decide;
 pub mod embed;
+pub mod extract;
+#[cfg(feature = "infer")]
+pub mod extract_builtin;
 pub mod memory;
 pub mod memory_claims;
+pub mod memory_extract;
 pub mod memory_recall;
 pub mod memory_time;
 pub mod memory_engram;
@@ -1312,6 +1316,20 @@ impl DbInstance {
     /// Every enabled and disabled decider (process-wide).
     pub fn deciders(&self) -> Vec<DeciderStatus> {
         decide::deciders()
+    }
+    /// Turn an entity extractor on under `name` (or re-enable a disabled one
+    /// with an empty spec). Process-wide: see [crate::extract::enable_extractor]
+    /// and `::extractor enable`.
+    pub fn enable_extractor(&self, name: &str, spec: extract::ExtractorSpec) -> Result<()> {
+        extract::enable_extractor(name, spec)
+    }
+    /// Turn the extractor `name` off. Process-wide.
+    pub fn disable_extractor(&self, name: &str) -> Result<bool> {
+        extract::disable_extractor(name)
+    }
+    /// Every enabled and disabled extractor (process-wide).
+    pub fn extractors(&self) -> Vec<extract::ExtractorStatus> {
+        extract::extractors()
     }
     /// Decide one pair with decider `name` and a fixed template
     /// (`supersedes`, `same_entity`, `duplicate`, `contradicts`, `relation`,
