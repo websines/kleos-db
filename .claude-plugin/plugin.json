@@ -1,0 +1,26 @@
+{
+  "name": "kleos",
+  "version": "0.1.0",
+  "description": "kleos memory engine for agents: skills that teach when and how to remember, recall, store documents, inspect the ontology and use branches, plus the kleos MCP server (protocol 2026-07-28).",
+  "author": {
+    "name": "kleos"
+  },
+  "homepage": "https://github.com/websines/kleos-db",
+  "repository": "https://github.com/websines/kleos-db",
+  "license": "MPL-2.0",
+  "keywords": [
+    "memory",
+    "mcp",
+    "knowledge-graph",
+    "documents",
+    "agents"
+  ],
+  "mcpServers": {
+    "kleos": {
+      "command": "kleos",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
