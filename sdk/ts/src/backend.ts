@@ -20,6 +20,9 @@ export class KleosError extends Error {
   }
 }
 
+/** Store administration and queries outside the op families. */
+export type AdminOp = 'hybrid_search' | 'decide' | 'export' | 'import' | 'backup' | 'restore' | 'import_from_backup';
+
 /** The model registries kleos keeps per process (embedders, deciders, extractors). */
 export type ModelKind = 'embedder' | 'decider' | 'extractor';
 
@@ -32,6 +35,8 @@ export interface Backend {
   flow(op: string, args: Record<string, unknown>): Promise<any>;
   doc(op: string, args: Record<string, unknown>): Promise<any>;
   run(script: string, params: Record<string, Json>, immutable: boolean): Promise<NamedRows>;
+  /** Hybrid search, decide, export/import, backup/restore (`op`). */
+  admin(op: AdminOp, args: Record<string, unknown>): Promise<any>;
   enableModel(kind: ModelKind, name: string, spec: ModelSpec): Promise<void>;
   disableModel(kind: ModelKind, name: string): Promise<boolean>;
   /** Start an in-process workflow worker. Embedded only. */

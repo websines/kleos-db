@@ -38,15 +38,18 @@ camelCase or snake_case.
 | `db.enable_extractor("gliner")` | `await kleos.enableExtractor('gliner')` |
 | `db.embedders()` | `await kleos.embedders()` (rows) |
 | (CLI `kleos profile NAME`) | `await kleos.profile(name, { ns })` |
+| `db.hybrid_search({...})` | `await kleos.hybridSearch({...})` (no graph legs, rerank or MMR) |
+| `db.decide(name, template, a, b)` | `await kleos.decide(name, template, a, b)` |
+| `db.export_relations([...])` / `db.import_relations(d)` | `await kleos.exportRelations([...])` / `await kleos.importRelations(d)` |
+| `db.backup(path)` / `db.restore(path)` / `db.import_from_backup(path, rels)` | `await kleos.backup(path)` / `restore(path)` / `importFromBackup(path, rels)` |
 | `db.close()` | `await kleos.close()` |
 
 **Not in the TypeScript SDK yet.** Most of these are reachable through
 `run()` with the matching CozoScript system op:
 - `register_callback`, `subscribe` (live updates);
-- `hybrid_search`, `run_cypher`;
-- `decide` and `fit_decider`;
+- `run_cypher`, and hybrid search's graph legs, rerank and MMR;
+- `fit_decider`;
 - entity `resolve`, `merge` and `split`;
-- `import_relations` and `export_relations`, `backup` and `restore`;
 - `multi_transact`;
 - custom fixed rules and rerankers.
 

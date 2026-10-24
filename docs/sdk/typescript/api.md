@@ -134,6 +134,13 @@ worker.stop();
 | `enableDecider(name, spec?)` / `disableDecider(name)` | void / boolean | Spec: `{ model, path, precision, device }`. |
 | `enableExtractor(name, spec?)` / `disableExtractor(name)` | void / boolean | Spec: `{ model, path, precision, device }`. |
 | `embedders()`, `deciders()`, `extractors()` | `NamedRows` | What is enabled. |
+| `hybridSearch(query)` | `NamedRows` | Vector + text search over any relation with indexes (`relation`, `vector_index`, `query_vector`, `fts_index`, `query_text`, `limit`, `fusion`, `extra_lists`). Embedded only; graph legs, rerank and MMR via `run()`. |
+| `decide(name, template, a, b)` | `DecideResult` | One typed decision with an enabled decider (e.g. `supersedes`). Embedded only. |
+| `exportRelations(relations)` | `{ [rel]: NamedRows }` | Rows of stored relations. |
+| `importRelations(data)` | void | Put rows into existing relations (the `exportRelations` shape). |
+| `backup(path)` | void | Write a backup file (remote: inside the server's backup directory). |
+| `restore(path)` | void | Restore a backup into an empty store. Embedded only. |
+| `importFromBackup(path, relations)` | void | Copy relations (which must exist) from a backup file. |
 | `close()` | void | Close the store (embedded); a no-op for remote. |
 | `kind` | `'embedded' \| 'remote'` | Property. |
 

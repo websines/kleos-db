@@ -59,6 +59,7 @@ enum Work {
     DisableDecider { name: String },
     EnableExtractor { name: String, spec: JsonValue },
     DisableExtractor { name: String },
+    Admin { op: String, args: JsonValue },
 }
 
 /// One call run on the libuv thread pool; resolves to JSON text.
@@ -125,6 +126,118 @@ fn run_work(db: Option<DbInstance>, work: Work) -> std::result::Result<JsonValue
             kleos::extract::enable_extractor(&name, s).map(|_| JsonValue::Null).map_err(fmt)
         }
         Work::DisableExtractor { name } => kleos::extract::disable_extractor(&name).map(JsonValue::Bool).map_err(fmt),
+        Work::Admin { op, args } => admin(&need_db()?, &op, args),
+    }
+}
+
+/// Score normalisation from JSON: a name or `["range", lo, hi]` / `["tmm", lo]`.
+fn score_norm(v: &JsonValue) -> std::result::Result<kleos::ScoreNorm, String> {
+    use kleos::ScoreNorm as N;
+    if let Some(s) = v.as_str() {
+        return Ok(match s {
+            "minmax" => N::MinMax,
+            "zscore" => N::ZScore,
+            "none" => N::Raw,
+            "neg_cosine_distance" => N::NegCosineDistance,
+            "cosine_similarity" => N::CosineSimilarity,
+            "bm25" => N::Bm25,
+            o => return Err(format!("hybridSearch: unknown normalization {o:?}")),
+        });
+    }
+    let l = v.as_array().ok_or("hybridSearch: a normalization is a name or a list")?;
+    let f = |i: usize| l.get(i).and_then(|x| x.as_f64()).ok_or("hybridSearch: bad normalization bound");
+    match (l.first().and_then(|k| k.as_str()), l.len()) {
+        (Some("range"), 3) => Ok(N::Range { lo: f(1)?, hi: f(2)? }),
+        (Some("tmm"), 2) => Ok(N::Tmm { lo: f(1)? }),
+        _ => Err("hybridSearch: a list normalization is [\"range\", lo, hi] or [\"tmm\", lo]".into()),
+    }
+}
+
+/// A `HybridSearch` from JSON (snake_case fields as in Python's
+/// `hybrid_search`); graph legs, rerank and MMR are not mapped here (use
+/// CozoScript via `run` for those).
+fn hybrid_from_json(a: &JsonValue) -> std::result::Result<kleos::HybridSearch, String> {
+    let mut q = kleos::HybridSearch::default();
+    let st = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let us = |k: &str| a.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
+    if let Some(v) = st("relation") { q.relation = v; }
+    if let Some(v) = st("id_col") { q.id_col = v; }
+    q.vector_index = st("vector_index");
+    q.fts_index = st("fts_index");
+    if let Some(v) = st("query_text") { q.query_text = v; }
+    if let Some(v) = a.get("query_vector").and_then(|v| v.as_array()) {
+        q.query_vector = v.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect();
+    }
+    if let Some(v) = a.get("vector_f64").and_then(|v| v.as_bool()) { q.vector_f64 = v; }
+    if let Some(v) = us("vector_k") { q.vector_k = v; }
+    if let Some(v) = us("ef") { q.ef = v; }
+    if let Some(v) = us("fts_k") { q.fts_k = v; }
+    if let Some(v) = us("limit") { q.limit = v; }
+    if let Some(v) = a.get("rrf_k").and_then(|v| v.as_f64()) { q.rrf_k = v; }
+    if let Some(v) = a.get("detailed").and_then(|v| v.as_bool()) { q.detailed = v; }
+    if let Some(items) = a.get("extra_lists").and_then(|v| v.as_array()) {
+        for it in items {
+            let label = it.get("label").and_then(|v| v.as_str()).ok_or("extra_lists entry needs 'label'")?;
+            let body = it.get("rule_body").and_then(|v| v.as_str()).ok_or("extra_lists entry needs 'rule_body'")?;
+            q.extra_lists.push(kleos::HybridList { label: label.into(), rule_body: body.into() });
+        }
+    }
+    if let Some(f) = a.get("fusion") {
+        q.fusion = match f.as_str() {
+            Some("rrf") => kleos::Fusion::Rrf,
+            Some("weighted") => kleos::Fusion::Weighted(Default::default()),
+            Some(o) => return Err(format!("hybridSearch: unknown fusion {o:?}")),
+            None => {
+                let kind = f.get("kind").and_then(|k| k.as_str()).unwrap_or("weighted");
+                if kind == "rrf" {
+                    kleos::Fusion::Rrf
+                } else {
+                    let mut p = kleos::WeightedFusionParams::default();
+                    if let Some(w) = f.get("weights").and_then(|w| w.as_object()) {
+                        for (k, x) in w {
+                            p.weights.push((k.clone(), x.as_f64().ok_or("fusion weights are numbers")?));
+                        }
+                    }
+                    if let Some(n) = f.get("norm") { p.norm = score_norm(n)?; }
+                    if let Some(ln) = f.get("leg_norms").and_then(|v| v.as_object()) {
+                        for (k, x) in ln { p.leg_norms.push((k.clone(), score_norm(x)?)); }
+                    }
+                    kleos::Fusion::Weighted(p)
+                }
+            }
+        };
+    }
+    Ok(q)
+}
+
+/// Store administration and queries outside the JSON op families:
+/// hybrid search, decide, export/import, backup/restore.
+fn admin(db: &DbInstance, op: &str, a: JsonValue) -> std::result::Result<JsonValue, String> {
+    let fmt = |e: miette::Report| e.to_string();
+    let st = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let need = |k: &str| st(k).ok_or_else(|| format!("{op} needs '{k}'"));
+    let strs = |k: &str| -> Vec<String> {
+        a.get(k).and_then(|v| v.as_array()).map(|l| l.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()).unwrap_or_default()
+    };
+    match op {
+        "hybrid_search" => db.hybrid_search(&hybrid_from_json(&a)?).map(|r| r.into_json()).map_err(fmt),
+        "decide" => {
+            let d = db.decide(&need("name")?, &need("template")?, &need("a")?, &need("b")?).map_err(fmt)?;
+            serde_json::to_value(d).map_err(|e| e.to_string())
+        }
+        "export" => {
+            let rels = strs("relations");
+            let m = db.export_relations(rels.iter()).map_err(fmt)?;
+            Ok(JsonValue::Object(m.into_iter().map(|(k, v)| (k, v.into_json())).collect()))
+        }
+        "import" => {
+            let data = a.get("data").cloned().unwrap_or(JsonValue::Null);
+            db.import_relations_str_with_err(&data.to_string()).map(|_| JsonValue::Null).map_err(fmt)
+        }
+        "backup" => db.backup_db(need("path")?).map(|_| JsonValue::Null).map_err(fmt),
+        "restore" => db.restore_backup(need("path")?).map(|_| JsonValue::Null).map_err(fmt),
+        "import_from_backup" => db.import_from_backup(need("path")?, &strs("relations")).map(|_| JsonValue::Null).map_err(fmt),
+        other => Err(format!("unknown admin op '{other}' (hybrid_search, decide, export, import, backup, restore, import_from_backup)")),
     }
 }
 
@@ -210,6 +323,14 @@ impl KleosDb {
     pub fn doc_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
         let args = parse_json(&args_json, "args")?;
         Ok(job(Some(self.handle()?), Work::Doc { op, args }))
+    }
+
+    /// Hybrid search, decide, export/import and backup/restore (`op`), with
+    /// JSON args.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn admin_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::Admin { op, args }))
     }
 
     /// Start an in-process worker that runs due built-in workflows (document

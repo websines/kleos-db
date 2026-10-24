@@ -6,7 +6,7 @@
  * @module
  */
 import { enableScript, KleosError, scriptLiteral } from './backend.js';
-import type { Backend, ModelKind } from './backend.js';
+import type { AdminOp, Backend, ModelKind } from './backend.js';
 import type { Json, ModelSpec, NamedRows } from './types.js';
 
 /** Options of {@link HttpBackend}. */
@@ -43,14 +43,16 @@ export class HttpBackend implements Backend {
     this.timeoutMs = opts.timeoutMs;
   }
 
-  private async post(path: string, body: unknown, op: string): Promise<any> {
+  private async post(path: string, body: unknown, op: string, method: 'POST' | 'PUT' | 'GET' = 'POST'): Promise<any> {
     const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json', ...this.headers };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
     const ctrl = this.timeoutMs ? new AbortController() : undefined;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), this.timeoutMs) : undefined;
     let res: Response;
     try {
-      res = await this.fetchImpl(this.url + path, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl?.signal });
+      const init: RequestInit = { method, headers, signal: ctrl?.signal };
+      if (method !== 'GET') init.body = JSON.stringify(body);
+      res = await this.fetchImpl(this.url + path, init);
     } catch (e) {
       throw new KleosError(`${op}: request failed: ${(e as Error).message}`, { op, cause: e });
     } finally {
@@ -82,6 +84,27 @@ export class HttpBackend implements Backend {
   async doc(op: string, args: Record<string, unknown>) {
     return (await this.post(`/doc/${op}`, args, `doc.${op}`)).result;
   }
+  /** export, import, backup and import_from_backup map to the server's routes; hybrid search, decide and restore are embedded only. */
+  async admin(op: AdminOp, args: Record<string, unknown>) {
+    switch (op) {
+      case 'export': {
+        const rels = ((args.relations as string[]) ?? []).map(encodeURIComponent).join(',');
+        return (await this.post(`/export/${rels}`, null, 'admin.export', 'GET')).data;
+      }
+      case 'import':
+        await this.post('/import', args.data ?? {}, 'admin.import', 'PUT');
+        return null;
+      case 'backup':
+        await this.post('/backup', { path: args.path }, 'admin.backup');
+        return null;
+      case 'import_from_backup':
+        await this.post('/import-from-backup', { path: args.path, relations: args.relations ?? [] }, 'admin.import_from_backup');
+        return null;
+      default:
+        throw new KleosError(`${op} is not available over HTTP; use an embedded store (Kleos.open) or run() a CozoScript query`, { op: `admin.${op}` });
+    }
+  }
+
   async run(script: string, params: Record<string, Json>, immutable: boolean): Promise<NamedRows> {
     const j = await this.post('/text-query', { script, params, immutable }, 'run');
     const { ok: _ok, took: _took, ...rows } = j;
