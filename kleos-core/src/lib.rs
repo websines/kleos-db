@@ -185,6 +185,7 @@ pub(crate) mod fts;
 #[doc(hidden)]
 pub use fts::{FTS_BASE_ROW_FETCHES, FTS_LITERAL_SCANS};
 pub mod parse;
+pub mod sched;
 pub(crate) mod query;
 pub(crate) mod runtime;
 pub(crate) mod storage;
