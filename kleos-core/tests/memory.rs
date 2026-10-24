@@ -1777,3 +1777,18 @@ fn list_text_is_the_statement_by_default() {
     let p = h.iter().find(|x| x.text.starts_with("Melanie")).unwrap();
     assert!(p.claim.is_none() && p.context.is_none());
 }
+
+#[test]
+fn fts_only_recall_finds_a_single_word() {
+    // no embedder: recall runs on the text leg alone; a one-word query
+    // must find the memory that contains the word
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.memory_init(InitOpts { ontology: Some("none".into()), ..Default::default() }).unwrap();
+    let opts = || RememberOpts { ns: Some("fts".into()), ..Default::default() };
+    db.remember("We chose the billing service vendor after the review.", opts()).unwrap();
+    db.remember("The team met on Tuesday to plan the offsite.", opts()).unwrap();
+    for q in ["billing", "bill", "billing service", "service", "chose", "vendor"] {
+        let hits = db.recall(q, RecallOpts { ns: Some("fts".into()), ..Default::default() }).unwrap();
+        assert!(hits.iter().any(|h| h.text.contains("billing")), "query {q:?}: {hits:?}");
+    }
+}

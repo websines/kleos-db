@@ -9,6 +9,9 @@ to kleos.
 
 ## Unreleased
 
+### Fixed
+- **Memory text search missed words whose stem is an English stopword** (`billing` → `bill`, `running` → `run`): the memory FTS index ran the stemmer before the built-in `'en'` stopword list, which also holds content words. The index now drops a short list of function words before stemming; stores rebuild the index on first use (memory schema v8).
+
 ### Added
 - **TypeScript SDK (`sdk/ts`, package `kleos`).** See docs/sdk/typescript/.
   - **One client over two backends.** `open({ path })` runs an embedded store through the native module; `connect({ url, token })` talks to a `kleos server` over HTTP. Both have the same API and types, so switching is one line. `kleos/remote` is a fetch-only entry for serverless, edge and browser bundles.

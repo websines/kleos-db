@@ -105,7 +105,14 @@ pub const MEM_EXTRACT: &str = "kleos_mem_extract";
 /// and `kleos_mem_life`, and entity merges / review links; 4 added
 /// `kleos_mem_role`; 5 added `kleos_mem_event`; 6 added the branch
 /// relations `kleos_mem_branch`, `kleos_mem_copied` and `kleos_mem_merge`).
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
+
+/// The memory text index's analyzer. Stopwords run before the stemmer and use
+/// a short list of function words: the built-in `'en'` list (stopwords-iso)
+/// also holds content words ("bill", "run", "name", "system", "computer"),
+/// and applied after stemming it dropped stems like "billing" -> "bill", so a
+/// one-word recall for "billing" found nothing.
+const MEM_FTS_FILTERS: &str = "[Lowercase, Stopwords(['a', 'an', 'the', 'and', 'or', 'but', 'if', 'of', 'at', 'by', 'for', 'with', 'about', 'to', 'from', 'in', 'on', 'into', 'onto', 'over', 'under', 'as', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am', 'do', 'does', 'did', 'have', 'has', 'had', 'i', 'me', 'my', 'we', 'us', 'our', 'you', 'your', 'he', 'him', 'his', 'she', 'her', 'it', 'its', 'they', 'them', 'their', 'this', 'that', 'these', 'those', 'there', 'here', 'so', 'than', 'too', 'very', 'just', 'can', 'will', 'would', 'should', 'could', 'what', 'which', 'who', 'whom', 'then', 'also', 's', 't']), Stemmer('english')]";
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
@@ -1479,6 +1486,17 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("7".to_string()))?;
             cfg.version = 7;
         }
+        if cfg.version < 8 {
+            // v7 stores index text with the old analyzer (stemming before the
+            // 'en' stopword list): rebuild the index with MEM_FTS_FILTERS
+            self.mem_q(&format!("::fts drop {MEM}:fts"), vec![])?;
+            self.mem_q(
+                &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: {MEM_FTS_FILTERS}}}"),
+                vec![],
+            )?;
+            self.set_mem_config("version", Some("8".to_string()))?;
+            cfg.version = 8;
+        }
         crate::memory_engram::ready(self, &cfg)?;
         Ok(Some(cfg))
     }
@@ -1608,7 +1626,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.create_v6_relations()?;
                 self.create_v7_relations()?;
                 self.mem_q(
-                    &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: [Lowercase, Stemmer('english'), Stopwords('en')]}}"),
+                    &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: {MEM_FTS_FILTERS}}}"),
                     vec![],
                 )?;
                 self.mem_q(&format!("::index create {MEM_ENTITY}:by_norm {{ns, norm}}"), vec![])?;
