@@ -32,7 +32,7 @@
 //!   encoder, mean pooling, two dense projections, Matryoshka output).
 //!
 //! Extraction models:
-//! * [`Gliner`]: GLiNER2.5 entity extraction (`fastino/gliner2.5-base-v1`,
+//! * [`Gliner`]: GLiNER2.5 entity extraction (`Mazino0/kleos-gliner`, a fine-tune of `fastino/gliner2.5-base-v1`,
 //!   DeBERTa-v3 encoder plus the boundary span head; labels given per call).
 //!
 //! Decision models ([`Decider`]):
@@ -58,7 +58,7 @@ pub use gemma::{GemmaEmbedder, GemmaModel, GEMMA_DOCUMENT_PROMPT, GEMMA_QUERY_PR
 #[cfg(feature = "gliner")]
 pub use gliner::{
     entity_schema_words, log_bucket_position, normalize_text, resolve_flat, split_words, Gliner, GlinerSpan, GlinerStages,
-    GLINER_BATCH_TOKENS, GLINER_REPO,
+    GLINER_BASE_REPO, GLINER_BATCH_TOKENS, GLINER_REPO,
 };
 pub use hub::{ensure_hf_files, hf_cache_dir, hf_offline, resolve_hf_file};
 pub use static_embed::StaticEmbedder;

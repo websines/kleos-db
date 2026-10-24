@@ -9,8 +9,8 @@
 //! GLiNER2.5 entity extraction (the `boundary` architecture of
 //! [gliner2](https://github.com/fastino-ai/GLiNER2), Apache-2.0), entities
 //! only: given a text and a list of labels, the spans of each label with a
-//! confidence. Default checkpoint [`GLINER_REPO`] (`fastino/gliner2.5-base-v1`,
-//! Apache-2.0, a DeBERTa-v3-base encoder); any checkpoint with the same
+//! confidence. Default checkpoint [`GLINER_REPO`] (`Mazino0/kleos-gliner`, kleos's
+//! fine-tune of `fastino/gliner2.5-base-v1`, Apache-2.0, a DeBERTa-v3-base encoder); any checkpoint with the same
 //! layout loads, e.g. a local fine-tune directory.
 //!
 //! Port of gliner2 2.1.0's inference path for an entity-only schema
@@ -51,8 +51,14 @@ use crate::gemma::with_pool;
 use crate::linear::{Embedding, Linear, Loader, TensorFile};
 use crate::{hub, EngineConfig, Error, Result};
 
-/// Hugging Face repo of the default GLiNER2.5 checkpoint (Apache-2.0).
-pub const GLINER_REPO: &str = "fastino/gliner2.5-base-v1";
+/// Hugging Face repo of the default GLiNER2.5 checkpoint: kleos's fine-tune
+/// of [`GLINER_BASE_REPO`] for agent-memory entities (person, location,
+/// organization, relative; Apache-2.0).
+pub const GLINER_REPO: &str = "Mazino0/kleos-gliner";
+
+/// The upstream GLiNER2.5 base checkpoint (Apache-2.0), for open label sets
+/// such as domain ontologies.
+pub const GLINER_BASE_REPO: &str = "fastino/gliner2.5-base-v1";
 
 /// Masking sentinel of the boundary head (gliner2 `MASK_LOGIT`).
 const MASK_LOGIT: f32 = -1.0e4;

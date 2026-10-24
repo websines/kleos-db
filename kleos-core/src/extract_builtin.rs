@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use miette::{miette, Result};
 
-use kleos_infer::{DevicePref, EngineConfig, Gliner, Precision, GLINER_REPO};
+use kleos_infer::{DevicePref, EngineConfig, Gliner, Precision, GLINER_BASE_REPO, GLINER_REPO};
 
 use crate::bail;
 use crate::extract::{EntityExtractor, ExtractSpan, ExtractorSpec};
@@ -100,6 +100,7 @@ pub(crate) fn build(name: &str, spec: &ExtractorSpec) -> Result<Arc<dyn EntityEx
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| GLINER_REPO.to_string()),
+        (None, Some("gliner-base" | "gliner2.5-base")) => GLINER_BASE_REPO.to_string(),
         (None, Some(m)) => m.to_string(),
     };
     let g = Gliner::with_repo(&repo, engine)
