@@ -38,23 +38,25 @@ prop("commute", "how someone gets to work and how long it takes", cues=["commute
 prop("education", "school, degree, course or class someone takes", aliases=["studies", "degree"],
      cues=["studying", "my degree", "a course", "my class", "classes", "university", "college", "graduated", "master's", "phd"])
 # relations between people
-O("partner", "someone's partner, spouse, boyfriend or girlfriend", rng=["Person"], symmetric=True,
+O("partner", "someone's partner, spouse, boyfriend or girlfriend", rng=["Person"], symmetric=True, parents=["relative_of"],
   aliases=["spouse", "husband", "wife", "boyfriend", "girlfriend"],
   cues=["my partner", "my boyfriend", "my girlfriend", "my wife", "my husband", "my fiance", "my fiancee", "dating", "married", "engaged", "broke up"])
 prop("relationship_status", "whether someone is single, dating, married or divorced", cues=["i'm single", "got married", "got divorced", "relationship status"])
-O("sibling_of", "a brother or sister", rng=["Person"], card="many", temporal=False, symmetric=True, aliases=["sibling"],
+O("sibling_of", "a brother or sister", rng=["Person"], card="many", temporal=False, symmetric=True, parents=["relative_of"], aliases=["sibling"],
   cues=["have a sister", "have a brother", "is my sister", "is my brother", "siblings", "have two sisters", "have two brothers"])
 O("sister_of", "is the sister of", rng=["Person"], card="many", temporal=False, parents=["sibling_of"], aliases=["sister"])
 O("brother_of", "is the brother of", rng=["Person"], card="many", temporal=False, parents=["sibling_of"], aliases=["brother"])
-O("parent_of", "is a parent of", rng=["Person"], card="many", temporal=False, inverse="child_of", aliases=["parent"],
+O("parent_of", "is a parent of", rng=["Person"], card="many", temporal=False, inverse="child_of", parents=["relative_of"], aliases=["parent"],
   cues=["have a son", "have a daughter", "my son", "my daughter", "my kids", "my children", "my baby"])
-O("child_of", "is a child of", rng=["Person"], card="many", temporal=False, aliases=["child"], cues=["my mom", "my dad", "my mother", "my father", "my parents"])
+O("child_of", "is a child of", rng=["Person"], card="many", temporal=False, parents=["relative_of"], aliases=["child"], cues=["my mom", "my dad", "my mother", "my father", "my parents"])
 O("mother_of", "is the mother of", rng=["Person"], card="many", temporal=False, parents=["parent_of"], aliases=["mother", "mom"])
 O("father_of", "is the father of", rng=["Person"], card="many", temporal=False, parents=["parent_of"], aliases=["father", "dad"])
-O("aunt_of", "is an aunt of (a sister of a parent)", rng=["Person"], card="many", temporal=False, chain=["sister_of", "parent_of"])
-O("uncle_of", "is an uncle of (a brother of a parent)", rng=["Person"], card="many", temporal=False, chain=["brother_of", "parent_of"])
-O("grandparent_of", "is a grandparent of", rng=["Person"], card="many", temporal=False, chain=["parent_of", "parent_of"], aliases=["grandparent"],
+O("aunt_of", "is an aunt of (a sister of a parent)", rng=["Person"], card="many", temporal=False, chain=["sister_of", "parent_of"], parents=["relative_of"])
+O("uncle_of", "is an uncle of (a brother of a parent)", rng=["Person"], card="many", temporal=False, chain=["brother_of", "parent_of"], parents=["relative_of"])
+O("grandparent_of", "is a grandparent of", rng=["Person"], card="many", temporal=False, chain=["parent_of", "parent_of"], parents=["relative_of"], aliases=["grandparent"],
   cues=["my grandma", "my grandpa", "my grandmother", "my grandfather", "my grandparents"])
+O("relative_of", "a family member: the super-property of the kinship relations (inferred, not typed from text)", rng=["Person"], card="many", temporal=False,
+  symmetric=True, aliases=["relative", "relatives", "family member", "family members", "kin", "kinship"])
 prop("children", "how many children someone has, pregnancy", cues=["kids", "children", "pregnant", "expecting a baby"])
 prop("family", "parents, siblings and relatives and what they do", cues=["my family", "my relatives", "my cousin", "my aunt", "my uncle"])
 O("friend_of", "a friend", rng=["Person"], card="many", symmetric=True, aliases=["friend"],

@@ -178,6 +178,7 @@ pub mod flow;
 #[cfg(feature = "docs")]
 pub mod docs;
 pub mod ontology;
+pub mod ontology_units;
 pub mod ontology_type;
 pub(crate) mod ontology_ttl;
 pub mod ontology_learn;
