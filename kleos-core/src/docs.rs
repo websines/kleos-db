@@ -894,7 +894,8 @@ impl<'s, S: Storage<'s>> Db<S> {
                 return Ok(true);
             }
         };
-        match self.doc_run(&id, token, &input, &recorded, state) {
+        // background ingestion yields model time to interactive calls (chat, recall)
+        match crate::sched::with_priority(crate::sched::Priority::Bulk, || self.doc_run(&id, token, &input, &recorded, state)) {
             Ok(out) => {
                 self.flow_call("complete", json!({"id": id, "token": token, "output": out}))?;
             }

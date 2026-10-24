@@ -3252,6 +3252,7 @@ dependencies = [
  "kleos-infer",
  "kleos-rocks",
  "lazy_static",
+ "libc",
  "log",
  "miette",
  "minreq",

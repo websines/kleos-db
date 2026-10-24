@@ -27,6 +27,9 @@ pub enum Error {
     /// I/O failure.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A forward pass failed (reported to every caller batched with it).
+    #[error("inference: {0}")]
+    Model(String),
     /// JSON parse failure.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

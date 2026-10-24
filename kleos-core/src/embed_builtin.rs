@@ -122,7 +122,17 @@ fn register_gemma(
     dim: Option<usize>,
     spec: EmbedderSpec,
 ) -> Result<()> {
-    let model = GemmaModel::new(repo, engine.clone()).map_err(|e| miette!("{e}"))?;
+    // one model object per (repo, engine) in the process: several stores or
+    // enables share its weights, gate and batcher
+    let key = format!(
+        "gemma|{repo}|{}|{:?}|{}|{}",
+        engine.precision.name(),
+        engine.device,
+        engine.max_seq_len,
+        engine.max_batch_tokens
+    );
+    let model = kleos_infer::budget::shared(&key, || GemmaModel::new(repo, engine.clone()))
+        .map_err(|e| miette!("{e}"))?;
     let doc = model
         .embedder(GEMMA_DOCUMENT_PROMPT, dim)
         .map_err(|e| miette!("{e}"))?;

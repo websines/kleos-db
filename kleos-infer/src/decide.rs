@@ -60,6 +60,25 @@ pub trait Decider: Send + Sync {
     fn unload(&self) {}
 }
 
+/// A shared decider (one instance per process; see [`crate::budget::shared`]).
+impl<D: Decider + ?Sized> Decider for std::sync::Arc<D> {
+    fn model_id(&self) -> &str {
+        (**self).model_id()
+    }
+    fn max_batch(&self) -> usize {
+        (**self).max_batch()
+    }
+    fn decide(&self, reqs: &[DecideRequest], with_features: bool) -> Result<Vec<DecideAnswer>> {
+        (**self).decide(reqs, with_features)
+    }
+    fn is_loaded(&self) -> bool {
+        (**self).is_loaded()
+    }
+    fn unload(&self) {
+        (**self).unload()
+    }
+}
+
 /// Softmax over one answer's logits.
 pub fn softmax(logits: &[f32]) -> Vec<f32> {
     let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
