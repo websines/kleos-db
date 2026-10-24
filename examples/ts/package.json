@@ -1,0 +1,9 @@
+{
+  "name": "kleos-examples-ts",
+  "private": true,
+  "type": "module",
+  "description": "Runnable examples for the kleos TypeScript SDK (each guide in docs/sdk/typescript/ is tied to one of these)",
+  "dependencies": {
+    "kleos": "file:../../sdk/ts"
+  }
+}

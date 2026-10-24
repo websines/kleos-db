@@ -1,0 +1,184 @@
+# API reference
+
+Everything is exported from `kleos`; `kleos/remote` exports the same minus the
+native parts (`open`, `NativeBackend`, `loadNative`, `nativeFeatures`). All
+methods return Promises unless noted.
+
+**Conventions:**
+- **Options** accept camelCase or snake_case keys (`asOf` or `as_of`).
+- **Results** are kleos's JSON as is, so their fields are snake_case
+  (`valid_from`).
+- **Times** are microseconds since the epoch (`Date.now() * 1000`).
+- **Errors** throw [`KleosError`](#kleoserror).
+
+## Creating a client
+
+| Function | Returns | Notes |
+|---|---|---|
+| `open(opts?: { engine?: 'mem' \| 'sqlite' \| 'rocksdb'; path?: string; options?: object })` | `Kleos` (sync) | Embedded store. With `path` the engine defaults to `sqlite`, without it to `mem`. Needs the native module. |
+| `connect(opts: { url: string; token?: string; fetch?: typeof fetch; headers?: Record<string,string>; timeoutMs?: number })` | `Kleos` (sync) | Remote server over HTTP. |
+| `new Kleos(backend: Backend)` | `Kleos` | Any backend (`NativeBackend`, `HttpBackend`, or your own). |
+| `nativeFeatures()` | `string[]` (sync) | Features of the loaded native module: `infer`, `infer-metal`, `docs`, `engram`, `storage-rocksdb`. |
+
+```ts
+const kleos = open({ path: 'memory.db' });
+const remote = connect({ url: 'http://127.0.0.1:9070', token: process.env.KLEOS_TOKEN });
+```
+
+## Memory
+
+| Method | Returns | Description |
+|---|---|---|
+| `init(opts?: InitOptions)` | `MemoryConfig` | Create or read the memory configuration. Options: `embedder`, `decider`, `extractor`, `ontology` (`personal` by default, `none` to turn it off). Idempotent. |
+| `remember(text, opts?: RememberOptions)` | `RememberResult` | Store a statement (split into claims), decide supersession, attach documents. |
+| `recall(query, opts?: RecallOptions)` | `RecallHit[]` | Relevant memories, best first. |
+| `recallContext(query, opts?: ContextOptions)` | `ContextBlock` | The dated, grouped context block for a prompt, within `budget` tokens. |
+| `forget(id?, opts?: ForgetOptions)` | `ForgetResult` | Retract (default), `erase` (all versions) or `archive` one memory or a filter. |
+| `reflect(ns?, opts?)` | `ReflectResult` | Pending decisions, contradictions, recent changes. Options: `since`, `limit`. |
+| `profile(name, opts?: { ns?, budget? })` | `EntityProfile` | Ontology facts plus a context block about one entity. |
+| `set(id, opts)` | object | Change `importance`, `ttl`/`expires`, `noTtl`, `archived`. |
+| `link(a, b, rel, opts?)` | object | Typed link between memories or entities. |
+| `flush()` | `{ flushed }` | Write buffered access counts. |
+| `memory(op, args?)` | any | Any memory op by name. |
+
+```ts
+const r = await kleos.remember('I moved to Lisbon.', { ns: 'u1', entities: ['user'] });
+const hits = await kleos.recall('where do I live', { ns: 'u1', k: 5, hidePending: true });
+const ctx = await kleos.recallContext('where do I live', { ns: 'u1', budget: 600 });
+await kleos.forget(hits[0].id, { ns: 'u1', mode: 'erase' });
+```
+
+**`RememberOptions`:**
+
+| Option | Type | Meaning |
+|---|---|---|
+| `ns` | string | Namespace (default `default`) |
+| `entities` | string[] | Who the statement is about (`user`, `Anna`) |
+| `at` | µs | Valid-from (default now) |
+| `ttl` / `expires` | µs | Expiry relative to `at` / absolute |
+| `role` | `user` \| `assistant` \| `other` | Speaker; assistant and other memories never decide |
+| `split` | `auto` \| `none` | One memory per claim (default) or one for the text |
+| `attachments` | `(string \| Attachment)[]` | Documents: a path, `{ bytes, mime, name }` or `{ data_b64, mime, name }` |
+| `file` | string | A document path instead of text |
+| `priority` | `interactive` \| `bulk` | Model lane |
+| `kind`, `source`, `importance`, `k`, `decider`, `minSimilarity`, `extract` | | See the [memory API spec](../../specs/memory-api.md) |
+
+**`RememberResult`:**
+- `action` (`added` \| `duplicate` \| `documents`), `id`, `ns`, `claims`;
+- `superseded` (ids), `duplicate_of`;
+- `tentative` (pending decisions), `decisions`, `gated`;
+- `entities`, `entity_links`, `types` (ontology typing);
+- `documents` (`{ doc, name, status, chunks, … }`), `embedded`, `decider`.
+
+**`RecallOptions`:**
+
+| Option | Type | Meaning |
+|---|---|---|
+| `ns`, `k` (default 10), `kind`, `entity` | | Scope |
+| `asOf` | µs | Read the past |
+| `hidePending` | boolean | Leave out memories with a pending supersede |
+| `sources` | `('memory' \| 'docs')[]` | Memories, document chunks, or both (default) |
+| `from`, `to` / `eventFrom`, `eventTo` | µs | Valid-time / event-time windows |
+| `expand`, `graph` | | Entity-graph expansion and graph modes |
+| `vectorWeight`, `includeArchived`, `includeExpired`, `role`, `priority`, `recordAccess` | | See the spec |
+| `budget`, `showSource` | | `recallContext` only |
+
+**`RecallHit`:**
+- `id`, `text` (the whole statement for a claim), `claim`, `context`;
+- `score`, `relevance`, `recency`;
+- `valid_from`, `valid_to`, `pending_superseded_by`;
+- `kind`, `source`, `role`, `events`;
+- `doc` (`{ doc, name, page, page_end, heading }` for document chunks), `expanded`.
+
+**`ContextBlock`:** `text`, `tokens`, `budget`, `ids` and `omitted`.
+
+## Branches
+
+| Method | Returns | Description |
+|---|---|---|
+| `fork(from, to, opts?: { at? })` | `ForkResult` | Instant copy-on-write branch. |
+| `diff(a, b, opts?)` | `{ added, removed, same, pending, entities }` | What changes from `a` to `b`. |
+| `merge(from, into?, opts?: { dryRun?, keepTime?, forgets? })` | `{ statements, replayed, skipped, diff? }` | Replay the branch into `into` (default its parent). |
+| `rewind(ns, to, opts?)` | `{ retracted, restored, undo }` | State at time `to`; undo with `rewind(ns, r.undo)`. |
+| `discard(ns, opts?: { cascade? })` | object | Drop a branch's own rows. |
+| `branches(opts?: { ns?, all? })` | `BranchInfo[]` | List branches. |
+| `reembed(embedder, opts?: { batch?, wait?, queue? })` | object | Move the store to another embedder (durable, resumable). |
+
+```ts
+await kleos.fork('plan', 'plan-try');
+const preview = await kleos.merge('plan-try', 'plan', { dryRun: true });
+```
+
+## Ontology, documents, workflows
+
+| Method | Returns | Description |
+|---|---|---|
+| `ontology(op, args?)` | any | `list`, `get`, `define`, `import`, `export`, `activate`, `facts`, `infer`, `validate`, `type`, `learn`, `history`, `undo`, … ([spec](../../specs/ontology.md)) |
+| `docs(op, args?)` | any | `get`, `list`, `delete`, `reingest` ([spec](../../specs/documents.md)) |
+| `flow(op, args?)` | any | `define`, `start`, `signal`, `cancel`, `status`, `list`, `history`, `schedule`, `tick`, … ([spec](../../specs/durable-workflows.md)) |
+| `flowWorker(opts?: { queues?, pollMs?, leaseMs?, worker? })` | `FlowWorker` (sync) | In-process worker; `stop()`, `wake()`. Embedded only. |
+
+```ts
+const facts = await kleos.ontology('facts', { ns: 'u1' });
+const worker = kleos.flowWorker({ queues: ['default'] });
+await kleos.flow('start', { workflow: 'refund', id: 'r1', input: { order: '1001' } });
+worker.stop();
+```
+
+## Queries and models
+
+| Method | Returns | Description |
+|---|---|---|
+| `run(script, params?, opts?: { immutable? })` | `NamedRows` | A CozoScript query: `{ headers, rows }`. |
+| `enableEmbedder(name, spec?)` / `disableEmbedder(name)` | void / boolean | Spec: `{ model, precision, device, dim }`. |
+| `enableDecider(name, spec?)` / `disableDecider(name)` | void / boolean | Spec: `{ model, path, precision, device }`. |
+| `enableExtractor(name, spec?)` / `disableExtractor(name)` | void / boolean | Spec: `{ model, path, precision, device }`. |
+| `embedders()`, `deciders()`, `extractors()` | `NamedRows` | What is enabled. |
+| `close()` | void | Close the store (embedded); a no-op for remote. |
+| `kind` | `'embedded' \| 'remote'` | Property. |
+
+```ts
+await kleos.enableEmbedder('gemma', { model: 'embeddinggemma', precision: 'q8' });
+const rows = await kleos.run("?[count(id)] := *kleos_mem{ns: $ns, id @ 'NOW'}", { ns: 'u1' }, { immutable: true });
+```
+
+Models are process-wide in an embedded store. Remotely, the enable and
+disable calls run `::embedder enable …` and its siblings on the server.
+
+## MCP client
+
+| Export | Description |
+|---|---|
+| `new McpClient({ transport, clientInfo?, onInputRequired?, tasks? })` | Stateless client (protocol `MCP_PROTOCOL_VERSION` = `2026-07-28`). |
+| `new McpHttpTransport({ url, token?, fetch?, headers? })` | `POST /mcp` with `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers. |
+| `new McpStdioTransport({ command?, args?, env? })` | Spawns `kleos mcp` (Node only). |
+| `client.discover()` | `server/discover`. |
+| `client.listTools()`, `listResources()`, `readResource(uri)` | Lists and reads. |
+| `client.callTool(name, args)` | `ToolResult` or `McpTask`; answers `input_required` through `onInputRequired`. |
+| `client.call(name, args)` | The structured result; throws on `isError`. |
+| `client.getTask(id)`, `cancelTask(id)`, `waitTask(id, opts?)` | Tasks extension. |
+| `acceptAll` | An `onInputRequired` handler that confirms everything. |
+
+```ts
+const client = new McpClient({ transport: new McpHttpTransport({ url, token }), onInputRequired: acceptAll });
+const r = await client.call('recall', { query: 'deploy key', ns: 'ops' });
+```
+
+## KleosError
+
+Every failure is a `KleosError` (`instanceof Error`) with:
+
+| Field | Meaning |
+|---|---|
+| `message` | kleos's message, e.g. `unknown memory op 'x'`, `database closed` |
+| `op` | The op that failed: `memory.remember`, `flow.start`, `run`, `mcp.tools/call` |
+| `status` | HTTP status, for remote calls |
+| `cause` | The underlying error |
+
+```ts
+try {
+  await kleos.recall('x');
+} catch (e) {
+  if (e instanceof KleosError) console.error(e.op, e.message);
+}
+```

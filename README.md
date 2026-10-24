@@ -205,6 +205,34 @@ On a 2020 Mac Mini with the RocksDB persistent storage engine (CozoDB supports m
 For more numbers and further details, we have a writeup
 about performance [here](https://docs.cozodb.org/en/latest/releases/v0.3.html).
 
+## Agents: CLI, MCP server and skills
+
+The standalone binary (`kleos`, built as `kleos-bin`) gives agents three ways
+in, all over the same store ([spec](docs/specs/mcp-cli-skills.md)):
+
+```bash
+# CLI: embedded store (--db) or a running server (--url); --json for agents
+kleos remember "We chose Postgres for billing." --db ~/.local/share/kleos/m.db --ns acme
+kleos recall "which database for billing" --ns acme --budget 600
+kleos doc add ./contract.pdf --ns acme
+
+# MCP (protocol 2026-07-28, stateless), over stdio or Streamable HTTP
+kleos mcp --db ~/.local/share/kleos/m.db
+kleos server --mcp            # POST /mcp behind the server's auth
+```
+
+- **MCP tools:** `recall`, `remember`, `forget`, `reflect`, `entity_profile`,
+  `doc_add`, `doc_status`, `flow`, `branch` (and a read-only `query` with
+  `--allow-query`). Destructive calls confirm through MCP's multi round-trip
+  requests; large documents return a task (`io.modelcontextprotocol/tasks`).
+  Clients of earlier MCP revisions (`initialize`) are served too.
+- **Skills:** [`skills/`](skills) holds SKILL.md files that teach an agent when
+  and how to remember, recall, store documents, inspect the ontology and use
+  branches. The repository is a Claude Code plugin
+  (`.claude-plugin/plugin.json`) bundling the skills and the MCP server.
+- **Config:** `~/.config/kleos/config.json` (or `$KLEOS_CONFIG`) sets the
+  default `db`/`url`, `ns`, embedders and `::memory init` options.
+
 ## Getting started
 
 Usually, to learn a database, you need to install it first.

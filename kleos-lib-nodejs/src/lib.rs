@@ -5,798 +5,325 @@
  * If a copy of the MPL was not distributed with this file,
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
+
+//! Native Node.js binding for kleos (napi-rs). The `kleos` TypeScript SDK
+//! (`sdk/ts`) wraps it; it is not meant to be used directly.
+//!
+//! Everything crosses the boundary as JSON text: arguments go in as JSON,
+//! results come back as JSON, and errors are thrown with a JSON message
+//! `{"ok": false, "message": ...}`. The memory, ontology, flow and document
+//! APIs are already JSON-in/JSON-out in kleos-core (`DbInstance::memory_call`
+//! and friends, the same functions the HTTP server and Python call), so the
+//! binding stays a thin layer.
+//!
+//! Every call that touches the store or a model runs as an [`AsyncTask`] on
+//! the libuv thread pool and resolves a Promise: the Node event loop is
+//! never blocked.
+
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
-use crossbeam::channel::Sender;
-use lazy_static::lazy_static;
-use miette::{miette, Result};
-use neon::prelude::*;
-use neon::types::buffer::TypedArray;
-use serde_json::json;
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+use serde_json::{json, Value as JsonValue};
 
-use kleos::*;
+use kleos::{DataValue, DbInstance, FlowWorker, FlowWorkerOpts, ScriptMutability};
 
-fn rows2js<'a>(cx: &mut impl Context<'a>, rows: &[Vec<DataValue>]) -> JsResult<'a, JsArray> {
-    let coll = cx.empty_array();
-    for (j, row) in rows.iter().enumerate() {
-        let cur = cx.empty_array();
-        for (i, el) in row.iter().enumerate() {
-            let el = value2js(cx, el)?;
-            cur.set(cx, i as u32, el)?;
-        }
-        coll.set(cx, j as u32, cur)?;
+fn js_err(message: impl std::fmt::Display) -> Error {
+    Error::new(Status::GenericFailure, json!({"ok": false, "message": message.to_string()}).to_string())
+}
+
+fn report_err(e: miette::Report) -> Error {
+    js_err(e.to_string())
+}
+
+fn parse_json(text: &str, what: &str) -> Result<JsonValue> {
+    if text.trim().is_empty() {
+        return Ok(JsonValue::Null);
     }
-    Ok(coll)
+    serde_json::from_str(text).map_err(|e| js_err(format!("{what}: invalid JSON: {e}")))
 }
 
-fn named_rows2js<'a>(cx: &mut impl Context<'a>, nr: &NamedRows) -> JsResult<'a, JsObject> {
-    let ret = cx.empty_object();
-    if let Some(rows) = &nr.next {
-        let converted = named_rows2js(cx, rows)?;
-        ret.set(cx, "next", converted)?;
-    };
-    let headers = cx.empty_array();
-    for (i, header) in nr.headers.iter().enumerate() {
-        let converted = cx.string(header);
-        headers.set(cx, i as u32, converted)?;
-    }
-    ret.set(cx, "headers", headers)?;
-    let rows = rows2js(cx, &nr.rows)?;
-    ret.set(cx, "rows", rows)?;
-    Ok(ret)
+const DB_CLOSED: &str = "database closed";
+
+/// What an [`AsyncTask`] does off the event loop.
+enum Work {
+    Script { script: String, params: BTreeMap<String, DataValue>, immutable: bool },
+    Memory { op: String, args: JsonValue },
+    Ontology { op: String, args: JsonValue },
+    Flow { op: String, args: JsonValue },
+    Doc { op: String, args: JsonValue },
+    EnableEmbedder { name: String, spec: JsonValue },
+    DisableEmbedder { name: String },
+    EnableDecider { name: String, spec: JsonValue },
+    DisableDecider { name: String },
+    EnableExtractor { name: String, spec: JsonValue },
+    DisableExtractor { name: String },
 }
 
-fn js2value<'a>(
-    cx: &mut impl Context<'a>,
-    val: Handle<'a, JsValue>,
-    coll: &mut DataValue,
-) -> JsResult<'a, JsUndefined> {
-    if val.downcast::<JsNull, _>(cx).is_ok() {
-        *coll = DataValue::Null;
-    } else if let Ok(n) = val.downcast::<JsNumber, _>(cx) {
-        let n = n.value(cx);
-        *coll = DataValue::from(n);
-    } else if let Ok(b) = val.downcast::<JsBoolean, _>(cx) {
-        let b = b.value(cx);
-        *coll = DataValue::from(b);
-    } else if val.downcast::<JsUndefined, _>(cx).is_ok() {
-        *coll = DataValue::Null;
-    } else if let Ok(s) = val.downcast::<JsString, _>(cx) {
-        let s = s.value(cx);
-        *coll = DataValue::Str(s.into());
-    } else if let Ok(l) = val.downcast::<JsArray, _>(cx) {
-        let n = l.len(cx);
-        let mut ret = Vec::with_capacity(n as usize);
-        for i in 0..n {
-            let v: Handle<JsValue> = l.get(cx, i)?;
-            let mut target = DataValue::Bot;
-            js2value(cx, v, &mut target)?;
-            ret.push(target);
+/// One call run on the libuv thread pool; resolves to JSON text.
+pub struct Job {
+    db: Option<DbInstance>,
+    work: Option<Work>,
+}
+
+fn str_field(spec: &JsonValue, k: &str) -> Option<String> {
+    spec.get(k).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn run_work(db: Option<DbInstance>, work: Work) -> std::result::Result<JsonValue, String> {
+    let need_db = || db.clone().ok_or_else(|| DB_CLOSED.to_string());
+    let fmt = |e: miette::Report| e.to_string();
+    match work {
+        Work::Script { script, params, immutable } => {
+            let db = need_db()?;
+            let m = if immutable { ScriptMutability::Immutable } else { ScriptMutability::Mutable };
+            db.run_script(&script, params, m).map(|rows| rows.into_json()).map_err(fmt)
         }
-        *coll = DataValue::List(ret);
-    } else if let Ok(b) = val.downcast::<JsBuffer, _>(cx) {
-        let d = b.as_slice(cx);
-        *coll = DataValue::Bytes(d.to_vec());
-    } else if let Ok(obj) = val.downcast::<JsObject, _>(cx) {
-        let names = obj.get_own_property_names(cx)?;
-        let mut coll_inner = serde_json::Map::default();
-        for i in 0..names.len(cx) {
-            let name = names.get::<JsString, _, _>(cx, i)?.value(cx);
-            let v = obj.get::<JsValue, _, _>(cx, &*name)?;
-            let mut target = DataValue::Bot;
-            js2value(cx, v, &mut target)?;
-            coll_inner.insert(name, serde_json::Value::from(target));
-        }
-        *coll = DataValue::Json(JsonData(json!(coll_inner)));
-    } else {
-        let err = cx.string("Javascript value cannot be converted.");
-        return cx.throw(err);
-    }
-    Ok(cx.undefined())
-}
-
-fn json2js<'a>(cx: &mut impl Context<'a>, val: &serde_json::Value) -> JsResult<'a, JsValue> {
-    Ok(match val {
-        serde_json::Value::Null => cx.null().as_value(cx),
-        serde_json::Value::Bool(b) => cx.boolean(*b).as_value(cx),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                cx.number(i as f64).as_value(cx)
-            } else if let Some(f) = n.as_f64() {
-                cx.number(f).as_value(cx)
-            } else {
-                cx.undefined().as_value(cx)
-            }
-        }
-        serde_json::Value::String(s) => cx.string(s).as_value(cx),
-        serde_json::Value::Array(l) => {
-            let target_l = cx.empty_array();
-            for (i, el) in l.iter().enumerate() {
-                let el = json2js(cx, el)?;
-                target_l.set(cx, i as u32, el)?;
-            }
-            target_l.as_value(cx)
-        }
-        serde_json::Value::Object(m) => {
-            let target_m = cx.empty_object();
-            for (k, v) in m.iter() {
-                let k = cx.string(k);
-                let v = json2js(cx, v)?;
-                target_m.set(cx, k, v)?;
-            }
-            target_m.as_value(cx)
-        }
-    })
-}
-
-fn value2js<'a>(cx: &mut impl Context<'a>, val: &DataValue) -> JsResult<'a, JsValue> {
-    Ok(match val {
-        DataValue::Null => cx.null().as_value(cx),
-        DataValue::Bool(b) => cx.boolean(*b).as_value(cx),
-        DataValue::Num(n) => match n {
-            Num::Int(i) => cx.number(*i as f64).as_value(cx),
-            Num::Float(f) => cx.number(*f).as_value(cx),
-        },
-        DataValue::Str(s) => cx.string(s).as_value(cx),
-        DataValue::Bytes(b) => {
-            let b = b.clone();
-            JsBuffer::external(cx, b).as_value(cx)
-        }
-        DataValue::Uuid(uuid) => cx.string(uuid.0.to_string()).as_value(cx),
-        DataValue::Regex(rx) => cx.string(rx.0.to_string()).as_value(cx),
-        DataValue::List(l) => {
-            let target_l = cx.empty_array();
-            for (i, el) in l.iter().enumerate() {
-                let el = value2js(cx, el)?;
-                target_l.set(cx, i as u32, el)?;
-            }
-            target_l.as_value(cx)
-        }
-        DataValue::Set(l) => {
-            let target_l = cx.empty_array();
-            for (i, el) in l.iter().enumerate() {
-                let el = value2js(cx, el)?;
-                target_l.set(cx, i as u32, el)?;
-            }
-            target_l.as_value(cx)
-        }
-        DataValue::Validity(vld) => {
-            let target_l = cx.empty_array();
-            let ts = cx.number(vld.timestamp.0 .0 as f64);
-            target_l.set(cx, 0, ts)?;
-            let a = cx.boolean(vld.is_assert.0);
-            target_l.set(cx, 1, a)?;
-            target_l.as_value(cx)
-        }
-        DataValue::Bot => cx.undefined().as_value(cx),
-        DataValue::Vec(v) => {
-            let target_l = cx.empty_array();
-            match v {
-                Vector::F32(a) => {
-                    for (i, el) in a.iter().enumerate() {
-                        let el = cx.number(*el as f64);
-                        target_l.set(cx, i as u32, el)?;
-                    }
-                }
-                Vector::F64(a) => {
-                    for (i, el) in a.iter().enumerate() {
-                        let el = cx.number(*el);
-                        target_l.set(cx, i as u32, el)?;
-                    }
-                }
-            }
-            target_l.as_value(cx)
-        }
-        DataValue::Json(JsonData(j)) => json2js(cx, j)?,
-    })
-}
-
-fn js2params<'a>(
-    cx: &mut impl Context<'a>,
-    js_params: Handle<'a, JsObject>,
-    collector: &mut BTreeMap<String, DataValue>,
-) -> JsResult<'a, JsUndefined> {
-    let keys = js_params.get_own_property_names(cx)?;
-    let n_keys = keys.len(cx);
-    for i in 0..n_keys {
-        let key: Handle<JsString> = keys.get(cx, i)?;
-        let key_str = key.value(cx);
-        let val: Handle<JsValue> = js_params.get(cx, key)?;
-        let mut value = DataValue::Bot;
-        js2value(cx, val, &mut value)?;
-        collector.insert(key_str, value);
-    }
-    Ok(cx.undefined())
-}
-
-fn js2rows<'a>(
-    cx: &mut impl Context<'a>,
-    rows: Handle<'a, JsArray>,
-    collector: &mut Vec<Vec<DataValue>>,
-) -> JsResult<'a, JsUndefined> {
-    let n_rows = rows.len(cx);
-    collector.reserve(n_rows as usize);
-    for i in 0..n_rows {
-        let row = rows.get::<JsArray, _, _>(cx, i)?;
-        let n_cols = row.len(cx);
-        let mut ret_row = Vec::with_capacity(n_cols as usize);
-        for j in 0..n_cols {
-            let col = row.get::<JsValue, _, _>(cx, j)?;
-            let mut val = DataValue::Bot;
-            js2value(cx, col, &mut val)?;
-            ret_row.push(val);
-        }
-        collector.push(ret_row);
-    }
-    Ok(cx.undefined())
-}
-
-fn js2stored<'a>(
-    cx: &mut impl Context<'a>,
-    named_rows: Handle<'a, JsObject>,
-    collector: &mut NamedRows,
-) -> JsResult<'a, JsUndefined> {
-    let headers_js = named_rows.get::<JsArray, _, _>(cx, "headers")?;
-    let l = headers_js.len(cx);
-    let mut headers = Vec::with_capacity(l as usize);
-    for i in 0..l {
-        let v = headers_js.get::<JsString, _, _>(cx, i)?.value(cx);
-        headers.push(v);
-    }
-    let rows_js = named_rows.get::<JsArray, _, _>(cx, "rows")?;
-    let mut rows = vec![];
-    js2rows(cx, rows_js, &mut rows)?;
-    collector.headers = headers;
-    collector.rows = rows;
-    Ok(cx.undefined())
-}
-
-fn params2js<'a>(
-    cx: &mut impl Context<'a>,
-    params: &BTreeMap<String, DataValue>,
-) -> JsResult<'a, JsObject> {
-    let obj = cx.empty_object();
-    for (k, v) in params {
-        let val = value2js(cx, v)?;
-        obj.set(cx, k as &str, val)?;
-    }
-    Ok(obj)
-}
-
-#[derive(Default)]
-struct Handles {
-    nxt_db_id: AtomicU32,
-    dbs: Mutex<BTreeMap<u32, DbInstance>>,
-    cb_idx: AtomicU32,
-    current_cbs: Mutex<BTreeMap<u32, Sender<Result<NamedRows>>>>,
-    nxt_tx_id: AtomicU32,
-    txs: Mutex<BTreeMap<u32, Arc<MultiTransaction>>>,
-}
-
-lazy_static! {
-    static ref HANDLES: Handles = Handles::default();
-}
-
-fn open_db(mut cx: FunctionContext) -> JsResult<JsNumber> {
-    let engine = cx.argument::<JsString>(0)?.value(&mut cx);
-    let path = cx.argument::<JsString>(1)?.value(&mut cx);
-    let options = cx.argument::<JsString>(2)?.value(&mut cx);
-    match DbInstance::new(&engine, path, &options) {
-        Ok(db) => {
-            let id = HANDLES.nxt_db_id.fetch_add(1, Ordering::AcqRel);
-            let mut dbs = HANDLES.dbs.lock().unwrap();
-            dbs.insert(id, db);
-            Ok(cx.number(id))
-        }
-        Err(err) => {
-            let s = cx.string(format!("{err:?}"));
-            cx.throw(s)
-        }
-    }
-}
-
-fn close_db(mut cx: FunctionContext) -> JsResult<JsBoolean> {
-    let id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
-    let db = {
-        let mut dbs = HANDLES.dbs.lock().unwrap();
-        dbs.remove(&id)
-    };
-    Ok(cx.boolean(db.is_some()))
-}
-
-macro_rules! get_db {
-    ($cx:expr) => {{
-        let id = $cx.argument::<JsNumber>(0)?.value(&mut $cx) as u32;
-        let db = {
-            let db_ref = {
-                let dbs = HANDLES.dbs.lock().unwrap();
-                dbs.get(&id).cloned()
-            };
-            match db_ref {
-                None => {
-                    let s = $cx.string("database already closed");
-                    $cx.throw(s)?
-                }
-                Some(db) => db,
-            }
-        };
-        db
-    }};
-}
-
-macro_rules! get_tx {
-    ($cx:expr) => {{
-        let id = $cx.argument::<JsNumber>(0)?.value(&mut $cx) as u32;
-        let tx = {
-            let tx_ref = {
-                let txs = HANDLES.txs.lock().unwrap();
-                txs.get(&id).cloned()
-            };
-            match tx_ref {
-                None => {
-                    let s = $cx.string("transaction closed");
-                    $cx.throw(s)?
-                }
-                Some(tx) => tx,
-            }
-        };
-        tx
-    }};
-}
-
-macro_rules! remove_tx {
-    ($cx:expr) => {{
-        let id = $cx.argument::<JsNumber>(0)?.value(&mut $cx) as u32;
-        let tx = {
-            let tx_ref = {
-                let mut txs = HANDLES.txs.lock().unwrap();
-                txs.remove(&id)
-            };
-            match tx_ref {
-                None => {
-                    let s = $cx.string("transaction closed");
-                    $cx.throw(s)?
-                }
-                Some(tx) => tx,
-            }
-        };
-        tx
-    }};
-}
-
-fn multi_transact(mut cx: FunctionContext) -> JsResult<JsNumber> {
-    let db = get_db!(cx);
-    let write = cx.argument::<JsBoolean>(1)?.value(&mut cx);
-    let tx = db.multi_transaction(write);
-    let id = HANDLES.nxt_tx_id.fetch_add(1, Ordering::AcqRel);
-    HANDLES.txs.lock().unwrap().insert(id, Arc::new(tx));
-    Ok(cx.number(id))
-}
-
-fn abort_tx(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let tx = remove_tx!(cx);
-    match tx.abort() {
-        Ok(_) => Ok(cx.undefined()),
-        Err(err) => {
-            let msg = cx.string(err.to_string());
-            cx.throw(msg)
-        }
-    }
-}
-
-fn commit_tx(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let tx = remove_tx!(cx);
-    match tx.commit() {
-        Ok(_) => Ok(cx.undefined()),
-        Err(err) => {
-            let msg = cx.string(err.to_string());
-            cx.throw(msg)
-        }
-    }
-}
-
-fn query_db(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let db = get_db!(cx);
-    let query = cx.argument::<JsString>(1)?.value(&mut cx);
-    let params_js = cx.argument::<JsObject>(2)?;
-    let mut params = BTreeMap::new();
-    js2params(&mut cx, params_js, &mut params)?;
-
-    let callback = cx.argument::<JsFunction>(3)?.root(&mut cx);
-    let immutable = cx.argument::<JsBoolean>(4)?.value(&mut cx);
-
-    let channel = cx.channel();
-
-    rayon::spawn(move || {
-        let result = db.run_script(
-            &query,
-            params,
-            if immutable {
-                ScriptMutability::Immutable
-            } else {
-                ScriptMutability::Mutable
-            },
-        );
-        channel.send(move |mut cx| {
-            let callback = callback.into_inner(&mut cx);
-            let this = cx.undefined();
-            match result {
-                Ok(nr) => {
-                    let js_vals = named_rows2js(&mut cx, &nr)?.as_value(&mut cx);
-                    let err = cx.undefined().as_value(&mut cx);
-                    callback.call(&mut cx, this, vec![err, js_vals])?;
-                }
-                Err(err) => {
-                    let reports = format_error_as_json(err, Some(&query)).to_string();
-                    let err = cx.string(&reports).as_value(&mut cx);
-                    callback.call(&mut cx, this, vec![err])?;
-                }
-            }
-            Ok(())
-        });
-    });
-
-    Ok(cx.undefined())
-}
-
-fn query_tx(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let tx = get_tx!(cx);
-    let query = cx.argument::<JsString>(1)?.value(&mut cx);
-    let params_js = cx.argument::<JsObject>(2)?;
-    let mut params = BTreeMap::new();
-    js2params(&mut cx, params_js, &mut params)?;
-
-    let callback = cx.argument::<JsFunction>(3)?.root(&mut cx);
-
-    let channel = cx.channel();
-    match tx
-        .sender
-        .send(TransactionPayload::Query((query.clone(), params)))
-    {
-        Ok(_) => {
-            rayon::spawn(move || {
-                let result = tx.receiver.recv();
-                channel.send(move |mut cx| {
-                    let callback = callback.into_inner(&mut cx);
-                    let this = cx.undefined();
-                    match result {
-                        Ok(Ok(nr)) => {
-                            let js_vals = named_rows2js(&mut cx, &nr)?.as_value(&mut cx);
-                            let err = cx.undefined().as_value(&mut cx);
-                            callback.call(&mut cx, this, vec![err, js_vals])?;
-                        }
-                        Ok(Err(err)) => {
-                            let reports = format_error_as_json(err, Some(&query)).to_string();
-                            let err = cx.string(&reports).as_value(&mut cx);
-                            callback.call(&mut cx, this, vec![err])?;
-                        }
-                        Err(err) => {
-                            let err = cx.string(err.to_string()).as_value(&mut cx);
-                            callback.call(&mut cx, this, vec![err])?;
-                        }
-                    }
-                    Ok(())
-                });
-            });
-
-            Ok(cx.undefined())
-        }
-        Err(err) => {
-            let msg = cx.string(err.to_string());
-            cx.throw(msg)
-        }
-    }
-}
-
-fn backup_db(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let db = get_db!(cx);
-    let path = cx.argument::<JsString>(1)?.value(&mut cx);
-    let callback = cx.argument::<JsFunction>(2)?.root(&mut cx);
-    let channel = cx.channel();
-
-    rayon::spawn(move || {
-        let result = db.backup_db(&path);
-        channel.send(move |mut cx| {
-            let callback = callback.into_inner(&mut cx);
-            let this = cx.undefined();
-            if let Err(msg) = result {
-                let reports = format_error_as_json(msg, None).to_string();
-                let err = cx.string(&reports).as_value(&mut cx);
-                callback.call(&mut cx, this, vec![err])?;
-            } else {
-                callback.call(&mut cx, this, vec![])?;
-            }
-
-            Ok(())
-        });
-    });
-
-    Ok(cx.undefined())
-}
-
-fn restore_db(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let db = get_db!(cx);
-    let path = cx.argument::<JsString>(1)?.value(&mut cx);
-    let callback = cx.argument::<JsFunction>(2)?.root(&mut cx);
-    let channel = cx.channel();
-
-    rayon::spawn(move || {
-        let result = db.restore_backup(&path);
-        channel.send(move |mut cx| {
-            let callback = callback.into_inner(&mut cx);
-            let this = cx.undefined();
-            if let Err(msg) = result {
-                let reports = format_error_as_json(msg, None).to_string();
-                let err = cx.string(&reports).as_value(&mut cx);
-                callback.call(&mut cx, this, vec![err])?;
-            } else {
-                callback.call(&mut cx, this, vec![])?;
-            }
-            Ok(())
-        });
-    });
-
-    Ok(cx.undefined())
-}
-
-fn export_relations(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let db = get_db!(cx);
-    let rels = cx.argument::<JsArray>(1)?;
-    let mut relations = vec![];
-    for i in 0..rels.len(&mut cx) {
-        let r = rels.get::<JsString, _, _>(&mut cx, i)?.value(&mut cx);
-        relations.push(r);
-    }
-    let callback = cx.argument::<JsFunction>(2)?.root(&mut cx);
-    let channel = cx.channel();
-
-    rayon::spawn(move || {
-        let result = db.export_relations(relations.iter());
-        channel.send(move |mut cx| {
-            let callback = callback.into_inner(&mut cx);
-            let this = cx.undefined();
-            match result {
-                Ok(ret) => {
-                    let u = cx.undefined().as_value(&mut cx);
-                    let data = cx.empty_object();
-                    for (k, v) in ret {
-                        let nv = named_rows2js(&mut cx, &v)?;
-                        data.set(&mut cx, &k as &str, nv)?;
-                    }
-                    let data = data.as_value(&mut cx);
-                    callback.call(&mut cx, this, vec![u, data])?;
-                }
-                Err(msg) => {
-                    let reports = format_error_as_json(msg, None).to_string();
-                    let err = cx.string(&reports).as_value(&mut cx);
-                    callback.call(&mut cx, this, vec![err])?;
-                }
-            }
-            Ok(())
-        });
-    });
-
-    Ok(cx.undefined())
-}
-
-fn import_relations(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let db = get_db!(cx);
-    let data = cx.argument::<JsObject>(1)?;
-    let callback = cx.argument::<JsFunction>(2)?.root(&mut cx);
-    let channel = cx.channel();
-    let mut rels = BTreeMap::new();
-    let names = data.get_own_property_names(&mut cx)?;
-    for name in names.to_vec(&mut cx)? {
-        let name = name
-            .downcast_or_throw::<JsString, _>(&mut cx)?
-            .value(&mut cx);
-        let val = data.get::<JsObject, _, _>(&mut cx, &name as &str)?;
-        let mut nr = NamedRows::default();
-        js2stored(&mut cx, val, &mut nr)?;
-        rels.insert(name, nr);
-    }
-
-    rayon::spawn(move || {
-        let result = db.import_relations(rels);
-        channel.send(move |mut cx| {
-            let callback = callback.into_inner(&mut cx);
-            let this = cx.undefined();
-            if let Err(msg) = result {
-                let reports = format_error_as_json(msg, None).to_string();
-                let err = cx.string(&reports).as_value(&mut cx);
-                callback.call(&mut cx, this, vec![err])?;
-            } else {
-                callback.call(&mut cx, this, vec![])?;
-            }
-
-            Ok(())
-        });
-    });
-
-    Ok(cx.undefined())
-}
-
-fn import_from_backup(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let db = get_db!(cx);
-    let path = cx.argument::<JsString>(1)?.value(&mut cx);
-    let rels = cx.argument::<JsArray>(2)?;
-    let mut relations = vec![];
-    for i in 0..rels.len(&mut cx) {
-        let r = rels.get::<JsString, _, _>(&mut cx, i)?.value(&mut cx);
-        relations.push(r);
-    }
-
-    let callback = cx.argument::<JsFunction>(3)?.root(&mut cx);
-    let channel = cx.channel();
-
-    rayon::spawn(move || {
-        let result = db.import_from_backup(path, &relations);
-        channel.send(move |mut cx| {
-            let callback = callback.into_inner(&mut cx);
-            let this = cx.undefined();
-            if let Err(msg) = result {
-                let reports = format_error_as_json(msg, None).to_string();
-                let err = cx.string(&reports).as_value(&mut cx);
-                callback.call(&mut cx, this, vec![err])?;
-            } else {
-                callback.call(&mut cx, this, vec![])?;
-            }
-
-            Ok(())
-        });
-    });
-
-    Ok(cx.undefined())
-}
-
-fn register_callback(mut cx: FunctionContext) -> JsResult<JsNumber> {
-    let db = get_db!(cx);
-    let name = cx.argument::<JsString>(1)?.value(&mut cx);
-    let capacity = cx.argument::<JsNumber>(3)?.value(&mut cx);
-    let capacity = if capacity < 0. {
-        None
-    } else {
-        Some(capacity as usize)
-    };
-    let callback = Arc::new(cx.argument::<JsFunction>(2)?.root(&mut cx));
-    let channel = cx.channel();
-
-    let (rid, recv) = db.register_callback(&name, capacity);
-    rayon::spawn(move || {
-        for (op, new, old) in recv {
-            let cb = callback.clone();
-            channel.send(move |mut cx| {
-                let callback = cb.to_inner(&mut cx);
-                let op = cx.string(op.as_str()).as_value(&mut cx);
-                let new = rows2js(&mut cx, &new.rows)?.as_value(&mut cx);
-                let old = rows2js(&mut cx, &old.rows)?.as_value(&mut cx);
-                let this = cx.undefined();
-
-                callback.call(&mut cx, this, vec![op, new, old])?;
-                Ok(())
-            });
-        }
-    });
-    Ok(cx.number(rid))
-}
-
-fn unregister_callback(mut cx: FunctionContext) -> JsResult<JsBoolean> {
-    let db = get_db!(cx);
-    let id = cx.argument::<JsNumber>(1)?.value(&mut cx) as u32;
-    let removed = db.unregister_callback(id);
-    Ok(cx.boolean(removed))
-}
-
-fn register_named_rule(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let db = get_db!(cx);
-    let name = cx.argument::<JsString>(1)?.value(&mut cx);
-    let arity = cx.argument::<JsNumber>(2)?.value(&mut cx) as usize;
-    let callback = Arc::new(cx.argument::<JsFunction>(3)?.root(&mut cx));
-    let channel = cx.channel();
-    let (rule_impl, recv) = SimpleFixedRule::rule_with_channel(arity);
-    if let Err(err) = db.register_fixed_rule(name, rule_impl) {
-        let msg = cx.string(err.to_string());
-        return cx.throw(msg);
-    }
-    rayon::spawn(move || {
-        for (inputs, options, sender) in recv {
-            let id = HANDLES.cb_idx.fetch_add(1, Ordering::AcqRel);
+        Work::Memory { op, args } => need_db()?.memory_call(&op, args).map_err(fmt),
+        Work::Ontology { op, args } => need_db()?.ontology_call(&op, args).map_err(fmt),
+        Work::Flow { op, args } => need_db()?.flow_call(&op, args).map_err(fmt),
+        Work::Doc { op, args } => {
+            let db = need_db()?;
+            #[cfg(feature = "docs")]
             {
-                HANDLES.current_cbs.lock().unwrap().insert(id, sender);
+                db.doc_call(&op, args).map_err(fmt)
             }
-            let cb = callback.clone();
-            channel.send(move |mut cx| {
-                let callback = cb.to_inner(&mut cx);
-                let inputs_js = cx.empty_array();
-                for (i, input) in inputs.into_iter().enumerate() {
-                    let input_js = rows2js(&mut cx, &input.rows)?;
-                    inputs_js.set(&mut cx, i as u32, input_js)?;
-                }
-                let inputs_js = inputs_js.as_value(&mut cx);
-                let options_js = params2js(&mut cx, &options)?.as_value(&mut cx);
-                let this = cx.undefined();
-                let ret_id = cx.number(id).as_value(&mut cx);
-                callback.call(&mut cx, this, vec![ret_id, inputs_js, options_js])?;
-
-                Ok(())
-            });
+            #[cfg(not(feature = "docs"))]
+            {
+                let _ = (db, op, args);
+                Err("documents need the native module built with the `docs` feature".to_string())
+            }
         }
-    });
-
-    Ok(cx.undefined())
+        Work::EnableEmbedder { name, spec } => {
+            let s = kleos::embed::EmbedderSpec {
+                model: str_field(&spec, "model"),
+                precision: str_field(&spec, "precision"),
+                device: str_field(&spec, "device"),
+                dim: spec.get("dim").and_then(|v| v.as_u64()).map(|d| d as usize),
+            };
+            kleos::embed::enable_embedder(&name, s).map(|_| JsonValue::Null).map_err(fmt)
+        }
+        Work::DisableEmbedder { name } => kleos::embed::disable_embedder(&name).map(JsonValue::Bool).map_err(fmt),
+        Work::EnableDecider { name, spec } => {
+            let s = kleos::decide::DeciderSpec {
+                model: str_field(&spec, "model"),
+                path: str_field(&spec, "path"),
+                precision: str_field(&spec, "precision"),
+                device: str_field(&spec, "device"),
+            };
+            kleos::decide::enable_decider(&name, s).map(|_| JsonValue::Null).map_err(fmt)
+        }
+        Work::DisableDecider { name } => kleos::decide::disable_decider(&name).map(JsonValue::Bool).map_err(fmt),
+        Work::EnableExtractor { name, spec } => {
+            let s = kleos::extract::ExtractorSpec {
+                model: str_field(&spec, "model"),
+                path: str_field(&spec, "path"),
+                precision: str_field(&spec, "precision"),
+                device: str_field(&spec, "device"),
+            };
+            kleos::extract::enable_extractor(&name, s).map(|_| JsonValue::Null).map_err(fmt)
+        }
+        Work::DisableExtractor { name } => kleos::extract::disable_extractor(&name).map(JsonValue::Bool).map_err(fmt),
+    }
 }
 
-fn respond_to_named_rule_invocation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let ret_id = cx.argument::<JsNumber>(0)?.value(&mut cx) as u32;
-    let sender = {
-        match HANDLES.current_cbs.lock().unwrap().remove(&ret_id) {
-            None => {
-                let msg = cx.string("fixed rule invocation sender should only be used once");
-                return cx.throw(msg);
-            }
-            Some(s) => s,
+impl Task for Job {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let work = self.work.take().ok_or_else(|| js_err("task already ran"))?;
+        match run_work(self.db.clone(), work) {
+            Ok(v) => Ok(v.to_string()),
+            Err(m) => Err(js_err(m)),
         }
-    };
-
-    let send_err = |err| {
-        let _ = sender.send(Err(miette!("Javascript fixed rule failed")));
-        err
-    };
-
-    let payload = cx.argument::<JsValue>(1)?;
-    if let Ok(msg) = payload.downcast::<JsString, _>(&mut cx) {
-        let _ = sender.send(Err(miette!(msg.value(&mut cx))));
-        return Ok(cx.undefined());
     }
 
-    let data = payload.downcast_or_throw(&mut cx).map_err(send_err)?;
-    let mut rows = vec![];
-    js2rows(&mut cx, data, &mut rows).map_err(send_err)?;
-    let nr = NamedRows::new(vec![], rows);
-    if let Err(err) = sender.send(Ok(nr)) {
-        let msg = err.to_string();
-        let msg = cx.string(msg);
-        return cx.throw(msg);
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
     }
-    Ok(cx.undefined())
 }
 
-fn unregister_named_rule(mut cx: FunctionContext) -> JsResult<JsBoolean> {
-    let db = get_db!(cx);
-    let name = cx.argument::<JsString>(1)?.value(&mut cx);
-    let removed = match db.unregister_fixed_rule(&name) {
-        Ok(b) => b,
-        Err(msg) => {
-            let msg = cx.string(msg.to_string());
-            return cx.throw(msg);
+fn job(db: Option<DbInstance>, work: Work) -> AsyncTask<Job> {
+    AsyncTask::new(Job { db, work: Some(work) })
+}
+
+/// A kleos store opened in this process.
+#[napi]
+pub struct KleosDb {
+    db: Arc<RwLock<Option<DbInstance>>>,
+}
+
+#[napi]
+impl KleosDb {
+    /// Open a store: `engine` is `mem`, `sqlite` or `rocksdb`; `path` is the
+    /// file or directory (ignored for `mem`); `options` is engine options
+    /// as JSON text (usually `{}`).
+    #[napi(constructor)]
+    pub fn new(engine: String, path: String, options: String) -> Result<Self> {
+        let options = if options.trim().is_empty() { "{}".to_string() } else { options };
+        let db = DbInstance::new(&engine, &path, &options).map_err(report_err)?;
+        Ok(Self { db: Arc::new(RwLock::new(Some(db))) })
+    }
+
+    fn handle(&self) -> Result<DbInstance> {
+        self.db.read().unwrap().clone().ok_or_else(|| js_err(DB_CLOSED))
+    }
+
+    /// Run a CozoScript query; resolves to `{headers, rows, next?}` as JSON.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn run_script(&self, script: String, params_json: String, immutable: bool) -> Result<AsyncTask<Job>> {
+        let params = match parse_json(&params_json, "params")? {
+            JsonValue::Null => BTreeMap::new(),
+            JsonValue::Object(m) => m.into_iter().map(|(k, v)| (k, DataValue::from(v))).collect(),
+            _ => return Err(js_err("params must be an object")),
+        };
+        Ok(job(Some(self.handle()?), Work::Script { script, params, immutable }))
+    }
+
+    /// A memory-API op (`remember`, `recall`, `forget`, `reflect`, `init`,
+    /// `fork`, `merge`, `reembed`, ...): `DbInstance::memory_call`.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn memory_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::Memory { op, args }))
+    }
+
+    /// An ontology op: `DbInstance::ontology_call`.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn ontology_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::Ontology { op, args }))
+    }
+
+    /// A durable-workflow op: `DbInstance::flow_call`.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn flow_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::Flow { op, args }))
+    }
+
+    /// A document admin op (`get`, `list`, `delete`, `reingest`): needs the
+    /// `docs` feature.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn doc_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::Doc { op, args }))
+    }
+
+    /// Start an in-process worker that runs due built-in workflows (document
+    /// ingestion, Engram jobs, schedules). `opts_json`: `{queues, pollMs,
+    /// leaseMs, worker}`.
+    #[napi]
+    pub fn flow_worker(&self, opts_json: String) -> Result<FlowWorkerHandle> {
+        let o = parse_json(&opts_json, "opts")?;
+        let mut opts = FlowWorkerOpts::default();
+        if let Some(q) = o.get("queues").and_then(|v| v.as_array()) {
+            opts.queues = q.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect();
         }
-    };
-    Ok(cx.boolean(removed))
+        if let Some(p) = o.get("pollMs").and_then(|v| v.as_u64()) {
+            opts.poll_ms = p;
+        }
+        if let Some(l) = o.get("leaseMs").and_then(|v| v.as_i64()) {
+            opts.lease_ms = l;
+        }
+        opts.worker = o.get("worker").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let w = self.handle()?.flow_worker(opts);
+        Ok(FlowWorkerHandle { worker: Mutex::new(Some(w)) })
+    }
+
+    /// Close the store. Calls after this reject with "database closed".
+    /// Returns false when it was already closed.
+    #[napi]
+    pub fn close(&self) -> bool {
+        self.db.write().unwrap().take().is_some()
+    }
 }
 
-#[neon::main]
-fn main(mut cx: ModuleContext) -> NeonResult<()> {
-    cx.export_function("open_db", open_db)?;
-    cx.export_function("close_db", close_db)?;
-    cx.export_function("query_db", query_db)?;
-    cx.export_function("backup_db", backup_db)?;
-    cx.export_function("restore_db", restore_db)?;
-    cx.export_function("export_relations", export_relations)?;
-    cx.export_function("import_relations", import_relations)?;
-    cx.export_function("import_from_backup", import_from_backup)?;
-    cx.export_function("register_callback", register_callback)?;
-    cx.export_function("unregister_callback", unregister_callback)?;
-    cx.export_function("register_named_rule", register_named_rule)?;
-    cx.export_function(
-        "respond_to_named_rule_invocation",
-        respond_to_named_rule_invocation,
-    )?;
-    cx.export_function("unregister_named_rule", unregister_named_rule)?;
-    cx.export_function("abort_tx", abort_tx)?;
-    cx.export_function("commit_tx", commit_tx)?;
-    cx.export_function("multi_transact", multi_transact)?;
-    cx.export_function("query_tx", query_tx)?;
-    Ok(())
+/// A running in-process workflow worker.
+#[napi]
+pub struct FlowWorkerHandle {
+    worker: Mutex<Option<FlowWorker>>,
+}
+
+#[napi]
+impl FlowWorkerHandle {
+    /// Wake the worker now.
+    #[napi]
+    pub fn wake(&self) {
+        if let Some(w) = self.worker.lock().unwrap().as_ref() {
+            w.wake();
+        }
+    }
+    /// Stop the worker and wait for its current tick. Idempotent.
+    #[napi]
+    pub fn stop(&self) {
+        if let Some(w) = self.worker.lock().unwrap().take() {
+            w.stop();
+        }
+    }
+}
+
+/// Turn the built-in or named embedder on (downloads the model on first
+/// use). `spec_json`: `{model, precision, device, dim}`. Process-wide.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn enable_embedder(name: String, spec_json: String) -> Result<AsyncTask<Job>> {
+    let spec = parse_json(&spec_json, "spec")?;
+    Ok(job(None, Work::EnableEmbedder { name, spec }))
+}
+
+/// Turn an embedder off and unload it. Resolves to `true`/`false` JSON.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn disable_embedder(name: String) -> AsyncTask<Job> {
+    job(None, Work::DisableEmbedder { name })
+}
+
+/// Turn a decider on. `spec_json`: `{model, path, precision, device}`.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn enable_decider(name: String, spec_json: String) -> Result<AsyncTask<Job>> {
+    let spec = parse_json(&spec_json, "spec")?;
+    Ok(job(None, Work::EnableDecider { name, spec }))
+}
+
+/// Turn a decider off.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn disable_decider(name: String) -> AsyncTask<Job> {
+    job(None, Work::DisableDecider { name })
+}
+
+/// Turn an entity extractor (GLiNER) on. `spec_json`: `{model, path,
+/// precision, device}`.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn enable_extractor(name: String, spec_json: String) -> Result<AsyncTask<Job>> {
+    let spec = parse_json(&spec_json, "spec")?;
+    Ok(job(None, Work::EnableExtractor { name, spec }))
+}
+
+/// Turn an extractor off.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn disable_extractor(name: String) -> AsyncTask<Job> {
+    job(None, Work::DisableExtractor { name })
+}
+
+/// Features this native module was built with.
+#[napi]
+pub fn features() -> Vec<String> {
+    let mut f = vec![];
+    if cfg!(feature = "infer") {
+        f.push("infer".to_string());
+    }
+    if cfg!(feature = "infer-metal") {
+        f.push("infer-metal".to_string());
+    }
+    if cfg!(feature = "docs") {
+        f.push("docs".to_string());
+    }
+    if cfg!(feature = "engram") {
+        f.push("engram".to_string());
+    }
+    if cfg!(feature = "storage-rocksdb") {
+        f.push("storage-rocksdb".to_string());
+    }
+    f
 }
