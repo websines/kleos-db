@@ -280,18 +280,36 @@ impl<'a> SessionTx<'a> {
                         }
                     }
 
+                    // A rayon call from a non-worker thread always hands the
+                    // job to the pool and blocks until a worker picks it up,
+                    // even for one rule set; on a busy machine that wake-up can
+                    // cost more than a small rule's evaluation. A single rule
+                    // set has nothing to run in parallel, so it runs inline.
                     #[cfg(feature = "rayon")]
-                    let execs = prog
-                        .par_iter()
+                    let parallel = prog
+                        .iter()
                         .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
-                        .map(execution);
+                        .nth(1)
+                        .is_some();
+                    #[cfg(feature = "rayon")]
+                    let execs: Vec<_> = if !parallel {
+                        prog.iter()
+                            .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
+                            .map(execution)
+                            .collect()
+                    } else {
+                        prog.par_iter()
+                            .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
+                            .map(execution)
+                            .collect()
+                    };
                     #[cfg(not(feature = "rayon"))]
                     let execs = prog
                         .iter()
                         .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
                         .map(execution);
 
-                    for res in execs.collect::<Vec<_>>() {
+                    for res in execs {
                         let (k, new_store) = res?;
                         to_merge.insert(k, new_store);
                     }
@@ -372,17 +390,35 @@ impl<'a> SessionTx<'a> {
                         }
                     }
 
+                    // A rayon call from a non-worker thread always hands the
+                    // job to the pool and blocks until a worker picks it up,
+                    // even for one rule set; on a busy machine that wake-up can
+                    // cost more than a small rule's evaluation. A single rule
+                    // set has nothing to run in parallel, so it runs inline.
                     #[cfg(feature = "rayon")]
-                    let execs = prog
-                        .par_iter()
+                    let parallel = prog
+                        .iter()
                         .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
-                        .map(execution);
+                        .nth(1)
+                        .is_some();
+                    #[cfg(feature = "rayon")]
+                    let execs: Vec<_> = if !parallel {
+                        prog.iter()
+                            .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
+                            .map(execution)
+                            .collect()
+                    } else {
+                        prog.par_iter()
+                            .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
+                            .map(execution)
+                            .collect()
+                    };
                     #[cfg(not(feature = "rayon"))]
                     let execs = prog
                         .iter()
                         .filter(|(symb, _)| !(limiter_enabled && symb.is_prog_entry()))
                         .map(execution);
-                    for res in execs.collect::<Vec<_>>() {
+                    for res in execs {
                         let (k, new_store) = res?;
                         to_merge.insert(k, new_store);
                     }

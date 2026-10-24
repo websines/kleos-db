@@ -108,6 +108,22 @@ changes; the repository also carries the base model's Apache-2.0 licence
 (`LICENSE-APACHE-base`). Like the base weights, it is read from the user's
 Hugging Face cache and is not bundled with the library.
 
+### GLiNER2 / GLiNER2.5 (Apache-2.0; architecture port, model weights not shipped)
+
+`kleos-infer/src/gliner.rs` is a Rust/candle port of the inference path of
+[gliner2](https://github.com/fastino-ai/GLiNER2) 2.1.0 (Apache-2.0, Fastino AI) for
+its `boundary` architecture (GLiNER2.5): the word splitter regex, the schema
+encoding, the boundary encoder, the shared candidate pool and scorer, and the
+`flat` overlap resolution, written from a reading of that code. No Python code
+is copied. The default checkpoint
+[`fastino/gliner2.5-base-v1`](https://huggingface.co/fastino/gliner2.5-base-v1)
+(Apache-2.0) is downloaded at run time, never bundled; kleos's own fine-tune of
+it is a local checkpoint (not published). The encoder is DeBERTa-v3-base
+([microsoft/DeBERTa](https://github.com/microsoft/DeBERTa), MIT); the
+disentangled attention follows Hugging Face transformers' `deberta_v2`
+implementation (Apache-2.0). The GLiNER2 paper (arXiv 2507.18546) describes
+training data annotated and generated with GPT-4o.
+
 ### EngramEdit (MIT; method, no code copied)
 
 `scripts/engram/engramedit.py` implements the editing method of EngramEdit

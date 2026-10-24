@@ -40,6 +40,7 @@ use crate::decide::{self, rules, Band, Decision, Template};
 use crate::embed;
 use crate::entity::{EntityConfig, Mention, Outcome, ResolveOptions, ENTITY_LINKS, ENTITY_MERGES};
 use crate::memory_claims;
+use crate::memory_extract;
 use crate::memory_recall;
 use crate::memory_time;
 use crate::memory_engram::{self as engram_hook, Job};
@@ -91,11 +92,15 @@ pub const MEM_ROLE: &str = "kleos_mem_role";
 /// "since 2019") resolved against when it was said (its `at`), one row per
 /// expression (`memory_time`). Written in `remember`'s transaction.
 pub const MEM_EVENT: &str = "kleos_mem_event";
+/// Spans an entity extractor found in each memory, with raw scores and the
+/// extractor version (schema v7): `{ns, id, n => label, start, end, text,
+/// score, kept, eid, extractor, at}`.
+pub const MEM_EXTRACT: &str = "kleos_mem_extract";
 /// Current schema version (2 added `kleos_mem_ns`; 3 added `kleos_mem_access`
 /// and `kleos_mem_life`, and entity merges / review links; 4 added
 /// `kleos_mem_role`; 5 added `kleos_mem_event`; 6 added the branch
 /// relations `kleos_mem_branch`, `kleos_mem_copied` and `kleos_mem_merge`).
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const DEFAULT_NS: &str = "default";
 const DEFAULT_KIND: &str = "fact";
@@ -552,6 +557,9 @@ pub struct InitOpts {
     pub embedder: Option<String>,
     /// Decider used by `remember` when none is passed per call.
     pub decider: Option<String>,
+    /// Entity extractor (an enabled `::extractor` name) `remember` uses
+    /// when no entities are passed; `''` detaches.
+    pub extractor: Option<String>,
     /// Registered Engram model whose overlay follows the memories
     /// (`remember` / `forget` enqueue Engram jobs); `''` detaches.
     #[cfg(feature = "engram")]
@@ -604,6 +612,20 @@ pub struct RememberOpts {
     /// never take part in supersede / duplicate decisions: what the
     /// assistant said does not replace what the user said.
     pub role: Option<String>,
+    /// Automatic entities (docs/specs/memory-api.md, "Automatic entities"):
+    /// with no `entities` passed and an extractor configured (`extractor`
+    /// here, else the store's), the extractor finds them. Default on; false
+    /// turns it off for this call, true requires an extractor.
+    pub extract: Option<bool>,
+    /// Extractor name for this call; default the store's (`::memory init
+    /// {extractor}`).
+    pub extractor: Option<String>,
+    /// `statement` (default): one extractor call per statement, spans
+    /// assigned to claims by offset; `claim`: one call per claim.
+    pub extract_granularity: Option<String>,
+    /// Per-label score thresholds overriding the defaults
+    /// (`memory_extract::DEFAULT_THRESHOLDS`).
+    pub extract_thresholds: Option<BTreeMap<String, f32>>,
 }
 
 /// Options of [`Db::recall`].
@@ -854,6 +876,26 @@ pub struct EntityLink {
     pub p: f64,
 }
 
+/// An entity edge `remember` wrote from automatic entities: a kinship or
+/// role relation, `src -[rel]-> dst` (`user -[sister]-> user's sister`), in
+/// `kleos_mem_link` with `decided_by: gliner-rule`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemEdge {
+    /// Entity row of the possessor.
+    pub src: String,
+    /// Its name.
+    pub src_name: String,
+    /// The relation: one lower-case word (`sister`, `mother`, `boss`).
+    pub rel: String,
+    /// Entity row of the relative.
+    pub dst: String,
+    /// Its name (`<possessor>'s <relation>`).
+    pub dst_name: String,
+    /// Confidence: the extractor score of the relative span (the lower of it
+    /// and the paired name's, when a name came with it).
+    pub p: f64,
+}
+
 /// What [`Db::remember`] did.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RememberResult {
@@ -875,6 +917,12 @@ pub struct RememberResult {
     pub entities: Vec<String>,
     /// How each entity name was resolved.
     pub entity_links: Vec<EntityLink>,
+    /// Entity edges written from automatic entities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<MemEdge>,
+    /// The extractor version, when entities were extracted automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor: Option<String>,
     /// Candidates whose `supersedes` check was skipped: both statements
     /// have entities and share none (different subjects).
     pub gated: Vec<String>,
@@ -1066,6 +1114,9 @@ pub struct MemConfig {
     pub dim: Option<usize>,
     /// Default decider.
     pub decider: Option<String>,
+    /// Entity extractor for automatic entities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor: Option<String>,
     /// Attached Engram model (feature `engram`).
     #[cfg(feature = "engram")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1123,6 +1174,11 @@ struct EntityPlan {
     merges: Vec<DataValue>,
     /// New `kleos_entity_link` review rows.
     links: Vec<DataValue>,
+    /// New `kleos_mem_link` entity edges from automatic entities
+    /// `[ns, src, rel, dst, created, p, decided_by]`.
+    edges: Vec<DataValue>,
+    /// The same edges, as reported.
+    edge_out: Vec<MemEdge>,
     out: Vec<EntityLink>,
     /// Per entry of `out`: the canonical entities that name may also be.
     maybe_of: Vec<BTreeSet<String>>,
@@ -1268,6 +1324,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             match r[0].get_str() {
                 Some("embedder") => cfg.embedder = v,
                 Some("decider") => cfg.decider = v,
+                Some("extractor") => cfg.extractor = v.filter(|x| !x.is_empty()),
                 Some("dim") => cfg.dim = v.and_then(|x| x.parse().ok()),
                 #[cfg(feature = "engram")]
                 Some("engram") => cfg.engram = v,
@@ -1307,8 +1364,32 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("6".to_string()))?;
             cfg.version = 6;
         }
+        if cfg.version < 7 {
+            // v6 stores predate automatic entities
+            self.create_v7_relations()?;
+            self.set_mem_config("version", Some("7".to_string()))?;
+            cfg.version = 7;
+        }
         crate::memory_engram::ready(self, &cfg)?;
         Ok(Some(cfg))
+    }
+
+    fn create_v7_relations(&'s self) -> Result<()> {
+        let exists = self
+            .run_script("::relations", Default::default(), ScriptMutability::Immutable)?
+            .rows
+            .iter()
+            .any(|r| r.first().and_then(|v| v.get_str()) == Some(MEM_EXTRACT));
+        if !exists {
+            self.mem_q(
+                &format!(
+                    "{{:create {MEM_EXTRACT} {{ns: String, id: String, n: Int => label: String, start: Int, end: Int, text: String, \
+                      score: Float, kept: Bool, eid: String?, extractor: String, at: Int}}}}"
+                ),
+                vec![],
+            )?;
+        }
+        Ok(())
     }
 
     fn create_v5_relations(&'s self) -> Result<()> {
@@ -1400,6 +1481,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.create_v4_relations()?;
                 self.create_v5_relations()?;
                 self.create_v6_relations()?;
+                self.create_v7_relations()?;
                 self.mem_q(
                     &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: [Lowercase, Stemmer('english'), Stopwords('en')]}}"),
                     vec![],
@@ -1420,6 +1502,16 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.set_mem_config("decider", Some(d.clone()))?;
                 cfg.decider = Some(d);
             }
+        }
+        if let Some(x) = opts.extractor {
+            let x = x.trim().to_string();
+            if !x.is_empty() && crate::extract::get_extractor(&x).is_none() {
+                bail!("extractor '{x}' is not enabled; enable it with `::extractor enable {x}` before `::memory init {{extractor: '{x}'}}`");
+            }
+            if cfg.extractor.as_deref().unwrap_or("") != x {
+                self.set_mem_config("extractor", Some(x.clone()))?;
+            }
+            cfg.extractor = if x.is_empty() { None } else { Some(x) };
         }
         if let Some(e) = opts.embedder {
             self.attach_embedder(&mut cfg, &e)?;
@@ -1960,6 +2052,150 @@ impl<'s, S: Storage<'s>> Db<S> {
             .collect())
     }
 
+    /// Automatic entities into the entity plan: each claim's entities, the
+    /// kinship/role edges, and the merge of a name into the relative node it
+    /// was given with ("my sister Anna"): the side created by this call folds
+    /// into the other's canonical entity; two existing different entities get
+    /// a review link instead of a merge.
+    fn plan_extracted(
+        &self,
+        sc: &Scope,
+        x: &memory_extract::AutoEntities,
+        ents: &mut EntityPlan,
+        claim_ents: &mut [Vec<usize>],
+    ) {
+        let ns = sc.ns();
+        let by_norm: BTreeMap<String, usize> =
+            ents.out.iter().enumerate().map(|(i, e)| (norm_name(&e.name), i)).collect();
+        let ei_of = |n: usize| by_norm.get(&norm_name(&x.names[n])).copied();
+        for (ci, ns_) in x.claim_names.iter().enumerate() {
+            for &n in ns_ {
+                if let (Some(ei), Some(slot)) = (ei_of(n), claim_ents.get_mut(ci)) {
+                    if !slot.contains(&ei) {
+                        slot.push(ei);
+                    }
+                }
+            }
+        }
+        let now = now_micros();
+        for e in &x.edges {
+            let (Some(a), Some(b)) = (ei_of(e.src), ei_of(e.dst)) else { continue };
+            let (src, dst) = (&ents.out[a], &ents.out[b]);
+            ents.edges.push(DataValue::List(vec![
+                s(ns),
+                s(&src.eid),
+                s(&e.rel),
+                s(&dst.eid),
+                DataValue::from(now),
+                DataValue::from(e.p as f64),
+                s("gliner-rule"),
+            ]));
+            ents.edge_out.push(MemEdge {
+                src: src.eid.clone(),
+                src_name: src.name.clone(),
+                rel: e.rel.clone(),
+                dst: dst.eid.clone(),
+                dst_name: dst.name.clone(),
+                p: e.p as f64,
+            });
+        }
+        for (node, name, p) in &x.same {
+            let (Some(a), Some(b)) = (ei_of(*node), ei_of(*name)) else { continue };
+            let (na, nb) = (&ents.out[a], &ents.out[b]);
+            if na.canonical == nb.canonical {
+                continue;
+            }
+            let fresh = |e: &EntityLink| e.created && e.canonical == e.eid;
+            let fold = match (fresh(na), fresh(nb)) {
+                (_, true) => Some((nb.eid.clone(), na.canonical.clone())),
+                (true, false) => Some((na.eid.clone(), nb.canonical.clone())),
+                (false, false) => None,
+            };
+            match fold {
+                Some((from, into)) => ents.merges.push(DataValue::List(vec![
+                    s(MEM_ENTITY),
+                    s(&from),
+                    DataValue::Validity(Validity::from((now, true))),
+                    s(&into),
+                    DataValue::from(*p as f64),
+                    s("gliner-rule"),
+                    s("named with its relation in one statement"),
+                ])),
+                None => ents.links.push(DataValue::List(vec![
+                    s(MEM_ENTITY),
+                    s(&na.eid),
+                    s(&nb.eid),
+                    DataValue::from(*p as f64),
+                    s(Band::Tentative.name()),
+                    s("gliner-rule"),
+                    s("pending"),
+                    DataValue::from(now),
+                ])),
+            }
+        }
+    }
+
+    /// Automatic entities of a statement (docs/specs/memory-api.md,
+    /// "Automatic entities"), or `None` when entities were passed, the call
+    /// turned extraction off, or no extractor is configured.
+    fn auto_for(
+        &self,
+        cfg: &MemConfig,
+        text: &str,
+        claims: &[String],
+        opts: &RememberOpts,
+    ) -> Result<Option<memory_extract::AutoEntities>> {
+        if !opts.entities.is_empty() || opts.extract == Some(false) {
+            return Ok(None);
+        }
+        let Some(name) = opts.extractor.clone().or_else(|| cfg.extractor.clone()) else {
+            if opts.extract == Some(true) {
+                bail!("`remember` option extract: true needs an extractor (`::memory init {{extractor: ...}}` or the `extractor` option)");
+            }
+            return Ok(None);
+        };
+        let Some(ex) = crate::extract::get_extractor(&name) else {
+            if opts.extract == Some(true) || opts.extractor.is_some() {
+                bail!("extractor '{name}' is not enabled; enable it with `::extractor enable {name}`");
+            }
+            return Ok(None);
+        };
+        // first-person words are the user's in the user's own statements
+        let subject = match opts.role.as_deref() {
+            None | Some("user") => Some("user"),
+            _ => None,
+        };
+        let thr = opts.extract_thresholds.clone().unwrap_or_default();
+        Ok(Some(match opts.extract_granularity.as_deref() {
+            None | Some("statement") => memory_extract::auto_entities(&*ex, text, claims, subject, &thr)?,
+            Some("claim") => {
+                let mut all = memory_extract::AutoEntities {
+                    claim_names: vec![vec![]; claims.len()],
+                    version: ex.version(),
+                    ..Default::default()
+                };
+                for (ci, c) in claims.iter().enumerate() {
+                    let one = memory_extract::auto_entities(&*ex, c, std::slice::from_ref(c), subject, &thr)?;
+                    let map: Vec<usize> = one.names.iter().map(|n| all.name(n)).collect();
+                    all.claim_names[ci] = one.claim_names[0].iter().map(|&i| map[i]).collect();
+                    all.spans.extend(one.spans.into_iter().map(|mut sp| {
+                        sp.claim = Some(ci);
+                        sp.name = sp.name.map(|i| map[i]);
+                        sp
+                    }));
+                    all.edges.extend(one.edges.into_iter().map(|mut e| {
+                        e.src = map[e.src];
+                        e.dst = map[e.dst];
+                        e
+                    }));
+                    all.same.extend(one.same.into_iter().map(|(a, b, p)| (map[a], map[b], p)));
+                }
+                all
+            }
+            Some(x) => bail!("`remember` option extract_granularity must be 'statement' or 'claim', got '{x}'"),
+        }))
+    }
+
     /// The read-only half of `remember`: per claim, the candidates, the
     /// decisions (batched across all claims: one decider call per template)
     /// and the actions they imply. Nothing is written.
@@ -1973,6 +2209,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         opts: &RememberOpts,
         auto: bool,
         floor: f64,
+        extracted: Option<&memory_extract::AutoEntities>,
     ) -> Result<Plan> {
         let ns = sc.ns();
         let k = opts.k.unwrap_or(DEFAULT_K).max(1);
@@ -1982,22 +2219,31 @@ impl<'s, S: Storage<'s>> Db<S> {
         // entities: resolve the statement's names once; a name is linked to
         // the claims that mention it, or to every claim when none does
         // (the subject, e.g. `user`, is rarely written out)
-        let view = if opts.entities.is_empty() {
+        let names: &[String] = match extracted {
+            Some(x) => &x.names,
+            None => &opts.entities,
+        };
+        let view = if names.is_empty() {
             EntityView::default()
         } else {
             self.entity_view(sc)?
         };
-        let ents = self.plan_entities(sc, &opts.entities, decider.as_deref(), &view)?;
+        let mut ents = self.plan_entities(sc, names, decider.as_deref(), &view)?;
         let mut claim_ents: Vec<Vec<usize>> = vec![vec![]; claims.len()];
-        for (ei, e) in ents.out.iter().enumerate() {
-            let hit: Vec<usize> = if multi {
-                (0..claims.len()).filter(|&c| mentions_name(&claims[c].1, &e.name)).collect()
-            } else {
-                vec![]
-            };
-            let to: Vec<usize> = if hit.is_empty() { (0..claims.len()).collect() } else { hit };
-            for c in to {
-                claim_ents[c].push(ei);
+        if let Some(x) = extracted {
+            // automatic entities: each claim gets what the policy assigned it
+            self.plan_extracted(sc, x, &mut ents, &mut claim_ents);
+        } else {
+            for (ei, e) in ents.out.iter().enumerate() {
+                let hit: Vec<usize> = if multi {
+                    (0..claims.len()).filter(|&c| mentions_name(&claims[c].1, &e.name)).collect()
+                } else {
+                    vec![]
+                };
+                let to: Vec<usize> = if hit.is_empty() { (0..claims.len()).collect() } else { hit };
+                for c in to {
+                    claim_ents[c].push(ei);
+                }
             }
         }
 
@@ -2378,6 +2624,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         // this process or another, plans again and sees the winner. `at`
         // defaults to the planning time, so the statement committed later is
         // also the later one in valid time.
+        let claim_texts: Vec<String> = claims.iter().map(|c| c.1.clone()).collect();
+        let extracted = self.auto_for(&cfg, text, &claim_texts, &opts)?;
         let gate = ns_gate(&ns);
         let mut attempt = 0;
         let mut res = loop {
@@ -2386,7 +2634,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             let local = gate.seq();
             let seen = self.ns_head(&ns)?;
             let at = opts.at.unwrap_or_else(now_micros);
-            let plan = self.plan_remember(&cfg, &sc, &claims, at, &opts, auto, floor)?;
+            let plan = self.plan_remember(&cfg, &sc, &claims, at, &opts, auto, floor, extracted.as_ref())?;
             let commit = match held {
                 Some(c) => c,
                 None => gate.commit(),
@@ -2418,10 +2666,12 @@ impl<'s, S: Storage<'s>> Db<S> {
             let mut sources = vec![];
             let mut audit_rows = vec![];
             let mut mentions: Vec<DataValue> = vec![];
+            let mut extract_rows: Vec<DataValue> = vec![];
             // (mem id, old it ended, text, entity names) of each added claim
             let mut jobs: Vec<(Vec<String>, Vec<String>, String, Vec<String>)> = vec![];
             let mut out: Vec<ClaimResult> = vec![];
-            for cp in &plans {
+            let first_added = plans.iter().position(|cp| cp.duplicate.is_none());
+            for (ci, cp) in plans.iter().enumerate() {
                 let mem_id = match cp.duplicate {
                     Some((i, _)) => cp.cands[i].id.clone(),
                     None => cp.id.clone(),
@@ -2480,11 +2730,42 @@ impl<'s, S: Storage<'s>> Db<S> {
                             mine.push(c.id.clone());
                         }
                     }
-                    let names: Vec<String> = if multi {
+                    let names: Vec<String> = if multi || extracted.is_some() {
                         cp.ents.iter().map(|&e| ents.out[e].name.clone()).collect()
                     } else {
                         opts.entities.clone()
                     };
+                    if let Some(x) = &extracted {
+                        // the raw spans of this claim (unplaced ones go with
+                        // the first added claim), with scores and version
+                        let by_norm: BTreeMap<String, &EntityLink> =
+                            ents.out.iter().map(|e| (norm_name(&e.name), e)).collect();
+                        let mut n = 0i64;
+                        for sp in x.spans.iter().filter(|sp| {
+                            sp.claim == Some(ci) || (sp.claim.is_none() && first_added == Some(ci))
+                        }) {
+                            let eid = sp
+                                .name
+                                .and_then(|i| by_norm.get(&norm_name(&x.names[i])))
+                                .map(|e| s(&e.eid))
+                                .unwrap_or(DataValue::Null);
+                            extract_rows.push(DataValue::List(vec![
+                                s(&ns),
+                                s(&mem_id),
+                                DataValue::from(n),
+                                s(&sp.label),
+                                DataValue::from(sp.start as i64),
+                                DataValue::from(sp.end as i64),
+                                s(&sp.text),
+                                DataValue::from(sp.score as f64),
+                                DataValue::Bool(sp.kept),
+                                eid,
+                                s(&x.version),
+                                DataValue::from(at),
+                            ]));
+                            n += 1;
+                        }
+                    }
                     jobs.push((vec![mem_id.clone()], mine, cp.text.clone(), names));
                 } else {
                     cr.action = "duplicate".to_string();
@@ -2621,6 +2902,24 @@ impl<'s, S: Storage<'s>> Db<S> {
                       :put {ENTITY_LINKS} {{relation, a, b => p, band, decided_by, status, at}}}}"
                 ));
                 p.push(("elinks", DataValue::List(ents.links.clone())));
+            }
+            if !ents.edges.is_empty() {
+                script.push_str(&format!(
+                    "{{?[ns, src, rel, dst, created, p, decided_by] <- $edges \
+                      :put {MEM_LINK} {{ns, src, rel, dst => created, p, decided_by}}}}"
+                ));
+                p.push(("edges", DataValue::List(ents.edges.clone())));
+                res.edges = ents.edge_out.clone();
+            }
+            if !extract_rows.is_empty() {
+                script.push_str(&format!(
+                    "{{?[ns, id, n, label, start, end, text, score, kept, eid, extractor, at] <- $extracts \
+                      :put {MEM_EXTRACT} {{ns, id, n => label, start, end, text, score, kept, eid, extractor, at}}}}"
+                ));
+                p.push(("extracts", DataValue::List(extract_rows)));
+            }
+            if let Some(x) = &extracted {
+                res.extractor = Some(x.version.clone());
             }
             if !mentions.is_empty() {
                 script.push_str(&format!(
@@ -3734,6 +4033,7 @@ impl<'s, S: Storage<'s>> Db<S> {
              {{?[ns, id] := *{MEM_LIFE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_LIFE} {{ns, id}}}}\
              {{?[ns, id] := *{MEM_ROLE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_ROLE} {{ns, id}}}}\
              {{?[ns, id, n] := *{MEM_EVENT}{{ns, id, n}}, ns = $ns, id in $ids :rm {MEM_EVENT} {{ns, id, n}}}}\
+             {{?[ns, id, n] := *{MEM_EXTRACT}{{ns, id, n}}, ns = $ns, id in $ids :rm {MEM_EXTRACT} {{ns, id, n}}}}\
              {{?[ns, id] := *{MEM_COPIED}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_COPIED} {{ns, id}}}}\
              {{gone[x] := x in $eids, not *{MEM_ENTITY}{{ns: $ns, eid: x}}\n\
                ?[relation, from, vt] := *{ENTITY_MERGES}{{relation, from, vt, into}}, relation = $erel, gone[from]\n\
