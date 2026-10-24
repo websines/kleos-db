@@ -1381,6 +1381,8 @@ impl<'s, S: Storage<'s>> Db<S> {
 
     pub(crate) fn memory_config(&'s self) -> Result<Option<MemConfig>> {
         self.mem_config()
+    }
+
     /// The store's memory embedder, if any.
     pub(crate) fn mem_embedder_name(&'s self) -> Result<Option<String>> {
         Ok(self.mem_config()?.and_then(|c| c.embedder))

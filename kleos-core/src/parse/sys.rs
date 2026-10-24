@@ -660,6 +660,7 @@ pub(crate) fn parse_sys(
         Rule::doc_op => match parse_flow_op(inner, param_pool)? {
             SysOp::Flow(v, a) => SysOp::Doc(v, a),
             other => other,
+        },
         Rule::ontology_op => match parse_flow_op(inner, param_pool)? {
             SysOp::Flow(v, a) => SysOp::Ontology(v, a),
             _ => unreachable!(),
