@@ -41,6 +41,9 @@ const GRAPH_SEEDS: usize = 10;
 const PPR_MAX_MEMS: usize = 2000;
 /// New memories a graph mode may add to the pool.
 const GRAPH_MAX_NEW: usize = 20;
+/// An entity or node with more memories than this is a hub: cut from the
+/// PageRank graph.
+const HUB_DEGREE: usize = 60;
 /// Hits whose subjects and facts seed the inferred expansion.
 const INFER_FROM: usize = 5;
 
@@ -601,7 +604,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let mut mems: BTreeSet<String> = pool_ids.iter().cloned().collect();
         for (e, ids) in &by_ent {
-            if ids.len() > EXPAND_MAX_DEGREE * 4 {
+            if ids.len() > HUB_DEGREE {
                 continue;
             }
             for id in ids {
@@ -612,13 +615,33 @@ impl<'s, S: Storage<'s>> Db<S> {
                 g.edge(&m(id), &format!("e:{e}"), 1.0);
             }
         }
-        for (id, n) in self.about_nodes(sc, &onodes)? {
-            if mems.len() >= PPR_MAX_MEMS && !mems.contains(&id) {
+        let about = self.about_nodes(sc, &onodes)?;
+        let mut node_deg: BTreeMap<&str, usize> = BTreeMap::new();
+        for (_, n) in &about {
+            *node_deg.entry(n.as_str()).or_default() += 1;
+        }
+        for (id, n) in &about {
+            if node_deg[n.as_str()] > HUB_DEGREE || (mems.len() >= PPR_MAX_MEMS && !mems.contains(id)) {
                 continue;
             }
             mems.insert(id.clone());
-            g.edge(&m(&id), &format!("n:{n}"), 1.0);
+            g.edge(&m(id), &format!("n:{n}"), 1.0);
         }
+        // hubs (a speaker every memory mentions, `user` in a one-user store)
+        // carry no information and flatten the walk: cut them (HippoRAG
+        // weighs phrase nodes by specificity for the same reason)
+        let mut hubs: BTreeSet<String> = BTreeSet::new();
+        for (e, ids) in &by_ent {
+            if ids.len() > HUB_DEGREE {
+                hubs.insert(format!("e:{e}"));
+            }
+        }
+        for (n, d) in &node_deg {
+            if *d > HUB_DEGREE {
+                hubs.insert(format!("n:{n}"));
+            }
+        }
+        g.cut(&hubs);
         // claims of one statement are one passage
         let mut by_stmt: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for id in &mems {
@@ -629,11 +652,15 @@ impl<'s, S: Storage<'s>> Db<S> {
                 g.edge(&m(&w[0]), &m(&w[1]), 1.0);
             }
         }
-        // restart distribution: the hits by relevance, plus the query's
-        // nodes and entities
+        // restart distribution: every pool row by relevance (HippoRAG 2
+        // seeds all passages with their dense scores), plus the query's
+        // nodes and entities; a row with no edges keeps its own mass
         let mut restart: BTreeMap<String, f64> = BTreeMap::new();
-        let total: f64 = seeds.iter().map(|x| x.1).sum::<f64>().max(1e-9);
-        for (id, v) in &seeds {
+        let pool_rel: Vec<(String, f64)> =
+            rows.iter().filter_map(|r| Some((cell_str(&r[0])?, r[1].get_float().unwrap_or(0.0).max(0.0)))).collect();
+        let total: f64 = pool_rel.iter().map(|x| x.1).sum::<f64>().max(1e-9);
+        for (id, v) in &pool_rel {
+            g.node(&m(id));
             *restart.entry(m(id)).or_default() += v / total;
         }
         let q: Vec<String> = qnodes
@@ -650,7 +677,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         let pr = g.ppr(&restart, PPR_DAMPING, PPR_ITERS);
         // memory scores, scaled to the top relevance
-        let top_rel = seeds.iter().map(|x| x.1).fold(0.0, f64::max).max(1e-9);
+        let top_rel = pool_rel.iter().map(|x| x.1).fold(0.0, f64::max).max(1e-9);
+        mems.extend(pool_rel.iter().map(|x| x.0.clone()));
         let mut mscore: Vec<(String, f64)> = mems
             .iter()
             .filter_map(|id| g.idx.get(&m(id)).map(|&i| (id.clone(), pr[i])))
@@ -709,6 +737,21 @@ impl Graph {
         self.idx.insert(k.to_string(), i);
         self.adj.push(vec![]);
         i
+    }
+
+    /// Remove the edges of `nodes` (they stay, with no neighbours).
+    fn cut(&mut self, nodes: &BTreeSet<String>) {
+        let ids: BTreeSet<usize> = nodes.iter().filter_map(|k| self.idx.get(k).copied()).collect();
+        if ids.is_empty() {
+            return;
+        }
+        for (i, a) in self.adj.iter_mut().enumerate() {
+            if ids.contains(&i) {
+                a.clear();
+            } else {
+                a.retain(|(j, _)| !ids.contains(j));
+            }
+        }
     }
 
     fn edge(&mut self, a: &str, b: &str, w: f64) {

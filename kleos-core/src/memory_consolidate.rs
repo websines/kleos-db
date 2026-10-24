@@ -307,8 +307,11 @@ impl<'s, S: Storage<'s>> Db<S> {
         if self.consol_exists(crate::ontology::MEM_TYPE) {
             for r in self
                 .mem_q(
+                    // cue- or rule-backed types only: a prototype match alone
+                    // is too loose to state a fact about someone
                     &format!(
-                        "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop}}, cls = 'fact', !is_null(subject), !is_null(prop)",
+                        "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop, by}}, cls = 'fact', !is_null(subject), \
+                           !is_null(prop), by != 'proto'",
                         crate::ontology::MEM_TYPE
                     ),
                     vec![("ns", s(ns))],
@@ -316,9 +319,26 @@ impl<'s, S: Storage<'s>> Db<S> {
                 .rows
             {
                 if let (Some(id), Some(sub), Some(p)) = (cell_str(&r[0]), cell_str(&r[1]), cell_str(&r[2])) {
-                    claims.push((id, graph_node(&sub), p));
+                    // a leading-name guess ("name:x") counts only for a
+                    // known entity or ontology node
+                    let guess = sub.starts_with("name:");
+                    claims.push((id, graph_node(&sub), p + if guess { "\u{0}" } else { "" }));
                 }
             }
+            // known names: entities and ontology nodes
+            let mut known: BTreeSet<String> = facts.iter().flat_map(|f| [f.0.clone(), f.2.clone()]).collect();
+            if let Ok(view) = self.entity_view(&sc) {
+                known.extend(view.rows.values().map(|(n, _)| graph_node(n)));
+            }
+            claims.retain_mut(|(_, node, p)| {
+                if let Some(base) = p.strip_suffix('\u{0}') {
+                    let ok = known.contains(node.as_str()) && !NOT_NAMES.contains(&node.as_str());
+                    *p = base.to_string();
+                    ok
+                } else {
+                    !NOT_NAMES.contains(&node.as_str())
+                }
+            });
         }
         let mut ids: Vec<String> = claims.iter().map(|c| c.0.clone()).collect();
         ids.extend(fact_mems);
@@ -749,6 +769,13 @@ impl<'s, S: Storage<'s>> Db<S> {
         let _ = every;
     }
 }
+
+/// Sentence openers a leading-name guess can mistake for a name.
+const NOT_NAMES: &[&str] = &[
+    "those", "these", "this", "that", "there", "it", "they", "we", "you", "he", "she", "here", "what", "when",
+    "which", "who", "why", "how", "my", "our", "your", "their", "his", "her", "its", "the", "a", "an", "yes", "no",
+    "wow", "oh", "hey", "thanks", "thank", "sure", "well", "so", "and", "but", "also", "just",
+];
 
 fn json_obj() -> serde_json::Map<String, JsonValue> {
     serde_json::Map::new()
