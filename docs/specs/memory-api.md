@@ -267,7 +267,7 @@ Options:
 - `record_access`: count the returned memories as accessed. Default true; read-only `::memory recall` scripts never count;
 - diversity: `diversity` (default true), `max_per_statement` (default 1), `max_per_source` (default 0, no cap), `mmr_weight` (default 0), `pool` (see "Diversity");
 - `expand` (default false) and `expand_weight` (default 0.5): entity-graph expansion (see "Entity expansion");
-- `graph` (`off` default, `inferred`, `ppr`) and `graph_weight` (default 0.3): graph recall over inferred ontology links and personalized PageRank (see "Graph recall"); hits it added or raised carry `via`;
+- `graph` (`ppr` default, `inferred`, `off`) and `graph_weight` (default 0.3): graph recall over inferred ontology links and personalized PageRank (see "Graph recall"); hits it added or raised carry `via`;
 - `profiles` (default true): entity profiles ahead of the memories in the context block (docs/specs/consolidation.md);
 - `assistant_weight` (default 0.05) and `role` (a filter): see "Speaker roles";
 - `from`, `to` (µs): only memories whose validity starts in `[from, to)` (see "Valid-from filters");
@@ -601,6 +601,11 @@ becomes `(1 − graph_weight) × relevance + graph_weight × PPR` (PPR scaled to
 the top relevance; `graph_weight` default 0.3), and up to 20 memories outside
 the pool join with `graph_weight × PPR` (`via: graph`). It also runs the
 `inferred` expansion.
+
+**Default.** `ppr` (which includes `inferred`) is on by default: the user's
+choice, accepting the measured trade-offs (LongMemEval multi-session retrieval
+and QA up, LoCoMo multi-hop slightly down, recall p50 about 21 → 64 ms;
+docs/benchmarks/memory.md). `graph: 'off'` opts out.
 
 Both modes skip when `entity` is set. Graph rows are subject to the same
 filters (kind, validity, archive, expiry) and to the diversity selection.

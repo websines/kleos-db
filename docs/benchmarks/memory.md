@@ -838,6 +838,8 @@ hybrid weight by 8 R@5 points on LoCoMo (0.775 vs 0.695).
 
 ## Graph recall and consolidation (wave6/graph, 2026-10-25)
 
+*Defaults since 2026-10-25 (the user's choice, not the measured best): `graph: 'ppr'` (with the inferred expansion) and automatic consolidation (profiles and summaries in the context block) are on by default. Trade-offs below: LongMemEval multi-session retrieval and QA up, LoCoMo multi-hop slightly down, recall p50 about 21 → 64 ms, context about +38% tokens.*
+
 *EmbeddingGemma 2 (the default) on Metal, GLM-4.7-Flash reader and judge, ontology
 on (personal pack), decider off. LoCoMo: all 10 conversations, GLiNER entities
 from `.bench-data/gliner-e2e/locomo_entities.json`, retrieval on 1,986

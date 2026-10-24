@@ -28,8 +28,10 @@ use super::*;
 
 /// Recall graph modes.
 pub(crate) const GRAPH_MODES: &[&str] = &["off", "inferred", "ppr"];
-/// Default graph mode (chosen by measurement, docs/benchmarks/memory.md).
-pub(crate) const DEFAULT_GRAPH_MODE: &str = "off";
+/// Default graph mode: `ppr`, which also runs the inferred-link expansion
+/// (the user's choice; trade-offs in docs/benchmarks/memory.md). `graph:
+/// 'off'` opts out.
+pub(crate) const DEFAULT_GRAPH_MODE: &str = "ppr";
 /// Share of the PPR score in a `ppr` re-rank.
 pub(crate) const DEFAULT_GRAPH_WEIGHT: f64 = 0.3;
 /// Restart probability complement (HippoRAG 2 uses 0.5).
