@@ -6,7 +6,9 @@
 //! under $20M funding or revenue, and not for use competitive with Datalab's
 //! API.  They are downloaded on first use, never bundled.
 
+pub mod convnet;
 pub mod cv;
+pub mod fastnn;
 pub mod lm;
 pub mod models;
 pub mod order;

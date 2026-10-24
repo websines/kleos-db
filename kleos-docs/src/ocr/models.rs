@@ -171,3 +171,81 @@ impl Model {
             .collect()
     }
 }
+
+/// A recognizer: the hand-written CPU path ([`super::fastnn::RecNet`]) or,
+/// when that refuses the graph or `KLEOS_OCR_TRACT=1`, tract.
+pub enum Net {
+    Tract(Model),
+    Native { net: Arc<super::fastnn::RecNet>, full: bool },
+}
+
+/// Whether tract is forced for the recognizers (the reference path).
+pub fn tract_forced() -> bool {
+    std::env::var("KLEOS_OCR_TRACT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+}
+
+impl Net {
+    /// The native recognizer for `path`, or None (tract forced, or a graph it
+    /// does not implement; the reason goes to stderr once).
+    pub fn native(path: &Path) -> Option<Arc<super::fastnn::RecNet>> {
+        if tract_forced() {
+            return None;
+        }
+        match super::fastnn::RecNet::load(path) {
+            Ok(n) => Some(Arc::new(n)),
+            Err(e) => {
+                eprintln!("kleos-docs: {} on tract ({e})", path.display());
+                None
+            }
+        }
+    }
+
+    /// `native` when given, else tract with the first `outputs` outputs.
+    pub fn load(path: &Path, native: Option<&Arc<super::fastnn::RecNet>>, outputs: Option<usize>) -> Result<Self, ModelError> {
+        match native {
+            Some(n) => Ok(Net::Native { net: n.clone(), full: outputs.is_none() }),
+            None => Ok(Net::Tract(Model::load_outputs(path, outputs)?)),
+        }
+    }
+
+    pub fn run(&self, inputs: Vec<Input>) -> Result<Vec<Output>, ModelError> {
+        match self {
+            Net::Tract(m) => m.run(inputs),
+            Net::Native { net, full } => {
+                let mut it = inputs.into_iter();
+                match (it.next(), it.next()) {
+                    (Some(Input::F32(s, x)), Some(Input::I64(_, w))) if s.len() == 4 && s[1] == 1 => net.run(s[0], s[2], s[3], &x, &w, *full),
+                    _ => Err(ModelError::Run("rec (native)".into(), "expected x [b,1,h,w] and widths [b]".into())),
+                }
+            }
+        }
+    }
+}
+
+/// A 2-D net (the detector, the orientation model): the hand-written
+/// interpreter ([`super::convnet::ConvNet`]) or, when that refuses the graph
+/// or `KLEOS_OCR_TRACT=1`, tract optimized per input shape.
+pub enum Net2D {
+    Tract(ShapedModel),
+    Native(super::convnet::ConvNet),
+}
+
+impl Net2D {
+    pub fn load(path: &Path) -> Result<Self, ModelError> {
+        if !tract_forced() {
+            match super::convnet::ConvNet::load(path) {
+                Ok(n) => return Ok(Net2D::Native(n)),
+                Err(e) => eprintln!("kleos-docs: {} on tract ({e})", path.display()),
+            }
+        }
+        Ok(Net2D::Tract(ShapedModel::load(path)?))
+    }
+
+    /// One f32 input of `shape`; every output as (shape, data).
+    pub fn run(&self, shape: &[usize], data: Vec<f32>) -> Result<Vec<(Vec<usize>, Vec<f32>)>, ModelError> {
+        match self {
+            Net2D::Tract(m) => m.run(shape, data),
+            Net2D::Native(n) => n.run(shape, data),
+        }
+    }
+}

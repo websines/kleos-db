@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::cv::{self, Border, Gray};
 use super::lm::{beam_search, NgramLm};
-use super::models::{Input, Model, ModelError, ShapedModel};
+use std::sync::Arc;
+
+use super::models::{Input, Model, ModelError, Net, Net2D};
 use super::order::{self, Block, Bx, BLOCK_CLASSES, GRID_LABELS};
 use super::prep;
 use super::text::{self, Vocab};
@@ -240,9 +242,10 @@ fn orient_input(gray: &Gray) -> Vec<f32> {
 struct Group {
     name: String,
     /// greedy outputs only (ids, conf, lengths)
-    model: Model,
+    model: Net,
     /// every output (with the LM's blank / top-k), for batches the LM reads
-    full: Option<Model>,
+    full: Option<Net>,
+    native: Option<Arc<super::fastnn::RecNet>>,
     vocab: Vocab,
 }
 
@@ -255,11 +258,11 @@ struct Lm {
 
 /// The loaded OCR models and settings.
 pub struct Ocr {
-    det: ShapedModel,
-    rec: Model,
-    rec_full: Option<Model>,
+    det: Net2D,
+    rec: Net,
+    rec_full: Option<Net>,
     order: Option<Model>,
-    orient: Option<Model>,
+    orient: Option<Net2D>,
     script: Option<Model>,
     groups: Vec<Group>,
     script_groups: Vec<String>,
@@ -296,17 +299,20 @@ impl Ocr {
         let meta_s = std::fs::read_to_string(need("meta.json")?).map_err(|e| ModelError::Load("meta.json".into(), e.to_string()))?;
         let meta: serde_json::Value = serde_json::from_str(&meta_s).map_err(|e| ModelError::Load("meta.json".into(), e.to_string()))?;
         let vocab = Vocab::from_json(meta["vocab"].as_str().unwrap_or("")).map_err(|e| ModelError::Load("meta.json".into(), e))?;
-        let det = ShapedModel::load(&need("det.onnx")?)?;
-        let rec = Model::load_outputs(&need("rec.onnx")?, Some(3))?;
+        let det = Net2D::load(&need("det.onnx")?)?;
+        let rec_path = need("rec.onnx")?;
+        let rec_native = Net::native(&rec_path);
+        let rec = Net::load(&rec_path, rec_native.as_ref(), Some(3))?;
         let order = opt("order.onnx").map(|p| Model::load(&p)).transpose()?;
-        let orient = opt("orient.onnx").map(|p| Model::load(&p)).transpose()?;
+        let orient = opt("orient.onnx").map(|p| Net2D::load(&p)).transpose()?;
         let mut groups = vec![];
         if let Some(obj) = meta.as_object() {
             for k in obj.keys().filter(|k| k.starts_with("vocab_")) {
                 let g = &k["vocab_".len()..];
                 if let Some(p) = opt(&format!("rec_{g}.onnx")) {
                     let v = Vocab::from_json(obj[k].as_str().unwrap_or("")).map_err(|e| ModelError::Load(k.clone(), e))?;
-                    groups.push(Group { name: g.to_string(), model: Model::load_outputs(&p, Some(3))?, full: None, vocab: v });
+                    let native = Net::native(&p);
+                    groups.push(Group { name: g.to_string(), model: Net::load(&p, native.as_ref(), Some(3))?, full: None, native, vocab: v });
                 }
             }
         }
@@ -329,10 +335,10 @@ impl Ocr {
             }
         }
         // the full recognizers (with the LM outputs) only where an LM is
-        let rec_full = if lms.contains_key("base") { Some(Model::load(&need("rec.onnx")?)?) } else { None };
+        let rec_full = if lms.contains_key("base") { Some(Net::load(&rec_path, rec_native.as_ref(), None)?) } else { None };
         for g in groups.iter_mut() {
             if lms.contains_key(&g.name) {
-                g.full = Some(Model::load(&dir.join(format!("rec_{}.onnx", g.name)))?);
+                g.full = Some(Net::load(&dir.join(format!("rec_{}.onnx", g.name)), g.native.as_ref(), None)?);
             }
         }
         Ok(Ocr {
@@ -429,14 +435,14 @@ impl Ocr {
         par_map(&idx, self.threads, |&i| prep::crop_line(gray, &boxes[i][..4], self.height, window, dark.map(|d| d[i])))
     }
 
-    fn full_of(&self, w: Which) -> Option<&Model> {
+    fn full_of(&self, w: Which) -> Option<&Net> {
         match w {
             Which::Base => self.rec_full.as_ref(),
             Which::Group(g) => self.groups[g].full.as_ref(),
         }
     }
 
-    fn model_of(&self, w: Which) -> &Model {
+    fn model_of(&self, w: Which) -> &Net {
         match w {
             Which::Base => &self.rec,
             Which::Group(g) => &self.groups[g].model,
@@ -735,8 +741,8 @@ impl Ocr {
 
     fn orientation(&self, gray: &Gray) -> Result<i32, ModelError> {
         let Some(om) = &self.orient else { return Ok(0) };
-        let r = om.run(vec![Input::F32(vec![1, 1, ORIENT_SIDE, ORIENT_SIDE], orient_input(gray))])?;
-        let p = r[0].f32();
+        let r = om.run(&[1, 1, ORIENT_SIDE, ORIENT_SIDE], orient_input(gray))?;
+        let p = r.into_iter().next().map(|o| o.1).unwrap_or_default();
         let k = order::argmax_f32(&p);
         Ok(if p[k] > ORIENT_MIN { k as i32 } else { 0 })
     }
