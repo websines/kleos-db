@@ -1958,8 +1958,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         if !fq.is_empty() {
             let filter = if lineage { "is_in(ns, $lin)" } else { "ns == $ns" };
+            // a principal's scopes: BM25 statistics over them only
+            let prefixes = if sc.union { ", prefixes: $lin" } else { "" };
             legs.push(format!(
-                "l[lid, id, score] := ~{MEM}:fts{{ns, id | query: $fq, k: {fetch}, bind_score: s, filter: {filter}}}, lid = 'text', score = s"
+                "l[lid, id, score] := ~{MEM}:fts{{ns, id | query: $fq, k: {fetch}, bind_score: s, filter: {filter}{prefixes}}}, lid = 'text', score = s"
             ));
             p.push(("fq", s(&fq)));
         }

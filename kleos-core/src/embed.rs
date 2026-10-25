@@ -695,10 +695,40 @@ fn model_tag(model_id: &str) -> [u8; 8] {
     t
 }
 
+thread_local! {
+    /// The cache partition of the calling principal (tenancy): its workspace
+    /// and ScopeSet. Empty outside principal calls.
+    static CACHE_SCOPE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Run `f` with embedding-cache entries keyed by `scope` as well
+/// (docs/specs/tenancy.md): principals with different ScopeSets never share
+/// cached vectors, so cache timing reveals nothing across scopes.
+pub fn with_cache_scope<R>(scope: &str, f: impl FnOnce() -> R) -> R {
+    let prev = CACHE_SCOPE.with(|c| std::mem::replace(&mut *c.borrow_mut(), scope.to_string()));
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                CACHE_SCOPE.with(|c| *c.borrow_mut() = p);
+            }
+        }
+    }
+    let _r = Restore(Some(prev));
+    f()
+}
+
 fn cache_key(model_id: &str, text: &str) -> CacheKey {
     let mut h = Sha256::new();
     h.update((model_id.len() as u64).to_le_bytes());
     h.update(model_id.as_bytes());
+    CACHE_SCOPE.with(|c| {
+        let c = c.borrow();
+        if !c.is_empty() {
+            h.update((c.len() as u64).to_le_bytes());
+            h.update(c.as_bytes());
+        }
+    });
     h.update(text.as_bytes());
     let d = h.finalize();
     let mut k = [0u8; 24];

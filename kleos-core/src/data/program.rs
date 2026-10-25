@@ -1198,6 +1198,11 @@ pub(crate) struct FtsSearch {
     pub(crate) candidates: Option<Arc<FxHashSet<Tuple>>>,
     // pub(crate) lax_mode: bool,
     pub(crate) filter: Option<Expr>,
+    /// kleos fork (tenancy): the values of the first key column a matching
+    /// row may have (`prefixes: [...]`). Postings outside them are skipped,
+    /// and BM25's `N` and document frequencies are counted over these key
+    /// ranges only, so scores reveal nothing of other scopes.
+    pub(crate) prefixes: Option<Vec<DataValue>>,
     pub(crate) span: SourceSpan,
 }
 
@@ -1513,6 +1518,13 @@ impl SearchInput {
         };
 
         let filter = self.parameters.remove("filter");
+        let prefixes = match self.parameters.remove("prefixes") {
+            None => None,
+            Some(expr) => match expr.eval_to_const()? {
+                DataValue::List(l) => Some(l),
+                _ => bail!("FTS `prefixes` must be a list of first-key values"),
+            },
+        };
 
         let candidates = match self.parameters.remove("candidates") {
             None => None,
@@ -1608,6 +1620,7 @@ impl SearchInput {
             candidates,
             // lax_mode,
             filter,
+            prefixes,
             span: self.span,
         }));
 

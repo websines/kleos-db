@@ -177,6 +177,14 @@ where
     /// are the memory API's, with `scope` instead of `ns`.
     pub fn memory_call_as(&self, ctx: &PrincipalContext, op: &str, args: JsonValue) -> Result<JsonValue> {
         let ss = self.tenant_session(ctx)?;
+        // cached embeddings are partitioned by workspace and ScopeSet
+        let (scopes, org) = self.scope_set(&ss, "read")?;
+        let key = format!("{}|{}", ss.ws, scope_set_hash(&scopes.iter().map(|k| k.ns()).collect::<Vec<_>>(), org));
+        crate::embed::with_cache_scope(&key, || self.memory_call_as_in(&ss, op, args))
+    }
+
+    fn memory_call_as_in(&self, ss: &Session, op: &str, args: JsonValue) -> Result<JsonValue> {
+        let ss = ss.clone();
         let mut a = obj(op, args)?;
         if a.contains_key("ns") {
             bail!("principal {op}: name a 'scope', not an 'ns'");

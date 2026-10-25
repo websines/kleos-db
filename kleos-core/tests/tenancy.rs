@@ -427,6 +427,43 @@ fn selective_scope_set_finds_every_visible_memory() {
 }
 
 #[test]
+fn bm25_statistics_and_embedding_cache_are_per_scope_set() {
+    // BM25 over `prefixes` scores as if the other key ranges did not exist
+    let db = DbInstance::new("mem", "", "").unwrap();
+    let run = |q: &str| db.run_script(q, Default::default(), ScriptMutability::Mutable).unwrap();
+    run(":create t {ns: String, id: Int => text: String}");
+    run("::fts create t:fts {extractor: text, tokenizer: Simple}");
+    run("?[ns, id, text] <- [['a', 1, 'zebra lion'], ['a', 2, 'tiger lion']] :put t {ns, id => text}");
+    let score = |extra: &str| {
+        let r = run(&format!("?[id, s] := ~t:fts{{ns, id | query: 'zebra', k: 5, bind_score: s{extra}}}"));
+        r.rows[0][1].get_float().unwrap()
+    };
+    let alone = score("");
+    let rows: Vec<String> = (0..40).map(|i| format!("['b', {i}, 'zebra lion']")).collect();
+    run(&format!("?[ns, id, text] <- [{}] :put t {{ns, id => text}}", rows.join(", ")));
+    assert!((score("") - alone).abs() > 1e-6, "the other scope moves unfiltered scores");
+    assert!((score(", prefixes: ['a']") - alone).abs() < 1e-9);
+    // cached embeddings are not shared across cache scopes
+    struct Count(std::sync::atomic::AtomicUsize);
+    impl Embedder for Count {
+        fn embed(&self, texts: &[&str]) -> miette::Result<Vec<Vec<f32>>> {
+            self.0.fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+        fn dim(&self) -> usize {
+            2
+        }
+    }
+    let c = Arc::new(Count(Default::default()));
+    embed::register_embedder("tn_count", c.clone()).unwrap();
+    for scope in ["ws1|a", "ws1|a", "ws1|b"] {
+        embed::with_cache_scope(scope, || embed::embed_texts("tn_count", &["a unique cache probe"]).unwrap());
+    }
+    embed::unregister_embedder("tn_count");
+    assert_eq!(c.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[test]
 fn cozoscript_ops() {
     let w = World::new("script");
     let run = |s: &str| w.db.run_script(s, Default::default(), ScriptMutability::Mutable).unwrap();
