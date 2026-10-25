@@ -196,6 +196,7 @@ where
                 out
             }
             "promote" => self.pm_promote(&ss, a)?,
+            "flow" | "doc" | "ontology" => self.pm_area(&ss, op, a)?,
             "approve" | "reject" => self.pm_approve(&ss, op, a)?,
             "fork" | "merge" | "discard" | "diff" => self.pm_branch(&ss, op, a)?,
             "scopes" => {
@@ -205,7 +206,7 @@ where
             }
             other => bail!(
                 "unknown principal op '{other}': expected remember, recall, context, forget, set, link, reflect, consolidate, \
-                 promote, approve, reject, fork, merge, discard, diff or scopes"
+                 promote, approve, reject, fork, merge, discard, diff, flow, doc, ontology or scopes"
             ),
         };
         Ok(out)
@@ -367,6 +368,47 @@ where
         }
         self.audit_op(ss, op, json!({"ids": done, "scopes": by_ns.keys().collect::<Vec<_>>()}), None, json!({"effect": "allow"}))?;
         Ok(if op == "forget" { json!({"mode": mode, "ids": done}) } else { json!({"ids": done}) })
+    }
+
+    /// Workflows, documents and ontologies of the session's partition
+    /// (`{op: <sub-op>, scope?, …}`): the addressed namespace is a scope
+    /// (default the workspace scope), read ops need read on it, the others
+    /// write.
+    fn pm_area(&self, ss: &Session, op: &str, mut a: Map<String, JsonValue>) -> Result<JsonValue> {
+        let sub = take_str(&mut a, "op").ok_or_else(|| miette::miette!("principal {op} needs 'op' (the {op} operation)"))?;
+        let reads: &[&str] = match op {
+            "flow" => &["status", "list", "history", "stats", "schedules"],
+            "doc" => &["get", "list"],
+            _ => &["get", "list", "export", "facts", "infer", "validate", "type", "gate", "proposals", "history"],
+        };
+        let action = if reads.contains(&sub.as_str()) { "read" } else { "write" };
+        let want = take_str(&mut a, "scope");
+        let k = match want.as_deref() {
+            None => ScopeKey::Workspace,
+            Some(w) => self.scope_of(ss, Some(w), false)?,
+        };
+        if !self.authz(ss)?.allows(action, &k)? {
+            bail!("scope '{}' not found", k.ns());
+        }
+        if op != "flow" {
+            a.insert("ns".into(), json!(k.ns()));
+        }
+        self.ensure_part_store(ss.part.as_deref())?;
+        let v = self.session_view(ss, ss.part.as_deref(), None, action == "write")?;
+        let args = JsonValue::Object(a);
+        let out = match op {
+            "flow" => v.flow_call(&sub, args)?,
+            #[cfg(feature = "docs")]
+            "doc" => v.doc_call(&sub, args)?,
+            #[cfg(not(feature = "docs"))]
+            "doc" => {
+                let _ = args;
+                bail!("documents need kleos built with the `docs` feature")
+            }
+            _ => v.ontology_call(&sub, args)?,
+        };
+        self.audit_op(ss, &format!("{op}.{sub}"), json!({"scope": k.ns()}), None, json!({"effect": "allow"}))?;
+        Ok(out)
     }
 
     /// Promotion: a copy with provenance into a broader scope.

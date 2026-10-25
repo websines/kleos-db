@@ -120,6 +120,12 @@ pub(crate) struct ServerArgs {
     /// Offer the read-only `query` tool over MCP.
     #[clap(long, default_value_t = false)]
     mcp_allow_query: bool,
+    /// Principal mode (docs/specs/tenancy.md): a JSON config naming this
+    /// resource and the trusted token issuers. `/memory/:op` and `/mcp`
+    /// then accept JWT access tokens and API keys and run as that principal;
+    /// `/.well-known/oauth-protected-resource` serves RFC 9728 metadata.
+    #[clap(long)]
+    tenancy: Option<String>,
 }
 
 #[derive(Clone)]
@@ -150,12 +156,16 @@ enum Principal {
     Local,
     Admin,
     Bearer([u8; 32]),
+    /// A tenancy principal (its id).
+    Tenant(String),
 }
 
 #[derive(Clone)]
 struct AuthContext {
     mutability: ScriptMutability,
     principal: Principal,
+    /// Principal mode: the authenticated principal context.
+    tenant: Option<Arc<kleos::tenancy::PrincipalContext>>,
 }
 
 struct TransactionLease {
@@ -188,6 +198,14 @@ struct MyAuth {
     allowed_origin: String,
     auth_guard: String,
     token_table: Option<Arc<(String, DbInstance)>>,
+    /// Principal mode: the config and the store that resolves credentials.
+    tenancy: Option<Arc<(kleos_bin::auth::TenancyConfig, DbInstance)>>,
+}
+
+/// Paths a tenancy principal may reach; everything else (raw scripts,
+/// import/export, backups) stays with the admin secret.
+fn tenant_path_ok(path: &str) -> bool {
+    path.starts_with("/memory/") || path == "/mcp" || path.starts_with("/tenant/")
 }
 
 fn has_forbidden_insecure_request(request: &Request<Body>, allowed_origin: &str) -> bool {
@@ -228,6 +246,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
         let allowed_origin = self.allowed_origin.clone();
         let auth_guard = self.auth_guard.clone();
         let token_table = self.token_table.clone();
+        let tenancy = self.tenancy.clone();
         Box::pin(async move {
             if skip_auth {
                 // Loopback is not an authentication boundary for browsers. Reject
@@ -243,8 +262,53 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                 request.extensions_mut().insert(AuthContext {
                     mutability: ScriptMutability::Mutable,
                     principal: Principal::Local,
+                    tenant: None,
                 });
                 return Ok(request);
+            }
+
+            // principal mode: a JWT access token or an API key (never the
+            // admin secret, which keeps its own meaning)
+            let bearer = request
+                .headers()
+                .get("Authorization")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer "))
+                .map(|t| t.trim().to_string());
+            if let (Some(tn), Some(tok)) = (&tenancy, &bearer) {
+                if auth_guard.is_empty() || tok != &auth_guard {
+                    let (cfg, db) = (tn.0.clone(), tn.1.clone());
+                    let headers = request.headers().clone();
+                    let t2 = tok.clone();
+                    let res = spawn_blocking(move || {
+                        let h = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|x| x.to_string());
+                        kleos_bin::auth::authenticate(&cfg, &db, &t2, &h)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(kleos_bin::auth::AuthError { status: 500, error: "server_error", description: e.to_string() }));
+                    match res {
+                        Ok(ctx) => {
+                            if !tenant_path_ok(request.uri().path()) {
+                                return Err(Response::builder().status(StatusCode::FORBIDDEN).body(Body::empty()).unwrap());
+                            }
+                            let mutability =
+                                if kleos_bin::auth::may_write(&ctx) { ScriptMutability::Mutable } else { ScriptMutability::Immutable };
+                            let id = ctx.human.clone().or(ctx.agent.clone()).or(ctx.service.clone()).unwrap_or_default();
+                            request.extensions_mut().insert(mutability);
+                            request.extensions_mut().insert(AuthContext { mutability, principal: Principal::Tenant(id), tenant: Some(Arc::new(ctx)) });
+                            return Ok(request);
+                        }
+                        // a token-table token is not a tenancy credential: fall through
+                        Err(e) if token_table.is_none() || tok.starts_with("kl_") || tok.matches('.').count() == 2 => {
+                            return Err(Response::builder()
+                                .status(StatusCode::from_u16(e.status).unwrap_or(StatusCode::UNAUTHORIZED))
+                                .header(header::WWW_AUTHENTICATE, tn.0.challenge(&allowed_origin, Some(&e)))
+                                .body(Body::empty())
+                                .unwrap());
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
 
             // Token-table bearer auth, evaluated INDEPENDENTLY of any query string.
@@ -270,6 +334,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                             ScriptMutability::Immutable
                         },
                         principal: bearer_principal(token),
+                        tenant: None,
                     }),
                     Err(err) => {
                         eprintln!("Error: {}", err);
@@ -289,6 +354,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                                     return (v == auth_guard.as_str()).then_some(AuthContext {
                                         mutability: ScriptMutability::Mutable,
                                         principal: Principal::Admin,
+                                        tenant: None,
                                     });
                                 }
                             }
@@ -303,7 +369,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                         .and_then(|h| h.to_str().ok())
                         .and_then(|h| h.strip_prefix("Bearer "))
                         .filter(|t| !auth_guard.is_empty() && *t == auth_guard.as_str())
-                        .map(|_| AuthContext { mutability: ScriptMutability::Mutable, principal: Principal::Admin });
+                        .map(|_| AuthContext { mutability: ScriptMutability::Mutable, principal: Principal::Admin, tenant: None });
                     query_grant.or(admin_bearer).or_else(bearer_grant)
                 }
                 Some(data) => match data.to_str() {
@@ -312,6 +378,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                             Some(AuthContext {
                                 mutability: ScriptMutability::Mutable,
                                 principal: Principal::Admin,
+                                tenant: None,
                             })
                         } else {
                             None
@@ -325,10 +392,11 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                 request.extensions_mut().insert(auth);
                 Ok(request)
             } else {
-                let unauthorized_response = Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .body(Body::empty())
-                    .unwrap();
+                let mut unauthorized_response = Response::builder().status(StatusCode::UNAUTHORIZED);
+                if let Some(tn) = &tenancy {
+                    unauthorized_response = unauthorized_response.header(header::WWW_AUTHENTICATE, tn.0.challenge(&allowed_origin, None));
+                }
+                let unauthorized_response = unauthorized_response.body(Body::empty()).unwrap();
 
                 Err(unauthorized_response)
             }
@@ -532,11 +600,19 @@ pub(crate) async fn server_main(args: ServerArgs) {
         }
     };
 
+    let tenancy: Option<kleos_bin::auth::TenancyConfig> = args.tenancy.as_ref().map(|p| {
+        let c = kleos_bin::auth::TenancyConfig::load(p).unwrap_or_else(|e| panic!("--tenancy: {e}"));
+        db.tenant_call("enable", serde_json::Value::Null).unwrap_or_else(|e| panic!("--tenancy: {e:?}"));
+        eprintln!("principal mode: resource {} ({} issuers)", c.resource, c.issuers.len());
+        c
+    });
+    let metadata = Arc::new(tenancy.as_ref().map(|c| c.metadata()));
     let auth_obj = MyAuth {
         skip_auth,
         allowed_origin: server_origin.clone(),
         auth_guard,
         token_table: args.token_table.map(|t| Arc::new((t, db.clone()))),
+        tenancy: tenancy.clone().map(|c| Arc::new((c, db.clone()))),
     };
 
     let mcp = args.mcp.then(|| {
@@ -604,6 +680,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
     let app = Router::new()
         .route("/text-query", post(text_query))
         .route("/memory/:op", post(memory_op))
+        .route("/tenant/:op", post(tenant_op))
         .route("/mcp", post(mcp_post).get(mcp_not_allowed).delete(mcp_not_allowed))
         .route("/flow/:op", post(flow_op))
         .route("/doc/:op", post(doc_op))
@@ -625,6 +702,18 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .layer(AsyncRequireAuthorizationLayer::new(auth_obj))
         .fallback(not_found)
         .route("/", get(root))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(move || {
+                let m = metadata.clone();
+                async move {
+                    match m.as_ref() {
+                        Some(v) => (StatusCode::OK, Json(v.clone())),
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error": "principal mode is off"}))),
+                    }
+                }
+            }),
+        )
         .layer(cors)
         .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::disable());
@@ -867,10 +956,24 @@ async fn text_query(
 /// principal.
 async fn memory_op(
     Extension(mutability): Extension<ScriptMutability>,
+    Extension(auth): Extension<AuthContext>,
     State(st): State<DbState>,
     Path(op): Path<String>,
     Json(args): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // principal mode: the op runs as the authenticated principal
+    if let Some(ctx) = auth.tenant.clone() {
+        let reads = ["recall", "context", "reflect", "diff", "scopes"];
+        if matches!(mutability, ScriptMutability::Immutable) && !reads.contains(&op.as_str()) {
+            return (StatusCode::FORBIDDEN, json!({"ok": false, "message": format!("memory {op} needs write access")}).into());
+        }
+        let result = spawn_blocking(move || st.db.memory_call_as(&ctx, &op, args)).await;
+        return match result {
+            Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+            Ok(Err(err)) => (StatusCode::BAD_REQUEST, json!({"ok": false, "message": err.to_string()}).into()),
+            Err(err) => internal_error(err),
+        };
+    }
     if matches!(mutability, ScriptMutability::Immutable) && !["recall", "reflect", "diff", "branches"].contains(&op.as_str()) {
         return (
             StatusCode::FORBIDDEN,
@@ -906,6 +1009,45 @@ fn principal_name(p: &Principal) -> String {
         Principal::Local => "local".into(),
         Principal::Admin => "admin".into(),
         Principal::Bearer(h) => h.iter().map(|b| format!("{b:02x}")).collect(),
+        Principal::Tenant(id) => format!("tenant:{id}"),
+    }
+}
+
+/// Tenancy admin ops (docs/specs/tenancy.md): `POST /tenant/:op`. The admin
+/// secret may run any; a principal must be an admin of the workspace's org
+/// (and its own credential must allow `admin`).
+async fn tenant_op(
+    Extension(auth): Extension<AuthContext>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let result = spawn_blocking(move || -> miette::Result<serde_json::Value> {
+        match (&auth.principal, auth.tenant.as_deref()) {
+            (Principal::Admin | Principal::Local, _) => st.db.tenant_call(&op, args),
+            (_, Some(ctx)) => {
+                let who = ctx.human.clone().ok_or_else(|| miette!("tenant ops need a human principal"))?;
+                if ctx.token.as_ref().and_then(|t| t.actions.as_ref()).is_some_and(|a| !a.iter().any(|x| x == "admin")) {
+                    miette::bail!("this credential does not allow admin ops");
+                }
+                let org = args.get("org").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| {
+                    st.db.tenant_call("list", json!({"kind": "principal"})).ok().and_then(|v| {
+                        v.as_array()?.iter().find(|p| p["id"] == who.as_str()).and_then(|p| p["org"].as_str().map(String::from))
+                    }).unwrap_or_default()
+                });
+                if !st.db.is_org_admin(&who, &org)? {
+                    miette::bail!("'{who}' is not an admin of org '{org}'");
+                }
+                st.db.tenant_call(&op, args)
+            }
+            _ => miette::bail!("tenant ops need the admin secret or a tenancy principal"),
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (StatusCode::FORBIDDEN, json!({"ok": false, "message": err.to_string()}).into()),
+        Err(err) => internal_error(err),
     }
 }
 
@@ -962,6 +1104,7 @@ async fn mcp_post(
         principal: principal_name(&auth.principal),
         read_only: matches!(auth.mutability, ScriptMutability::Immutable),
         legacy: None,
+        as_principal: auth.tenant.as_deref().cloned(),
     };
     if let Some(bv) = &body_version {
         // modern request: the mirrored headers are required and must match
