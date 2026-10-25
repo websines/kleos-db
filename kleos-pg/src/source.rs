@@ -558,7 +558,6 @@ impl Connector {
         let mut batch: Vec<Tx> = vec![];
         let mut batch_changes = 0usize;
         let mut batch_started: Option<Instant> = None;
-        let mut pending: Option<Vec<Tx>> = None;
         let mut inflight: usize = 0;
         let mut cur: Option<Tx> = None;
         let mut parts: u32 = 0;
@@ -566,21 +565,26 @@ impl Connector {
         let mut last_poll = Instant::now();
         let mut last_tables = Instant::now();
         let mut committed_batches: u32 = 0;
+        let mut last_lag_check = Instant::now();
+        let mut last_lag_alert: Option<Instant> = None;
         let mut exit: Option<Exit> = None;
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let ledger = cfg.writeback.ledger.clone();
         loop {
             // leaving: drain the batch and wait for the writer before the last ack
             let draining = exit.is_some();
-            if draining && cur.is_none() && pending.is_none() && batch.is_empty() && inflight == 0 {
+            if draining && cur.is_none() && batch.is_empty() && inflight == 0 {
                 send_status(stream.as_mut(), received.max(flushed), flushed).await?;
                 return Ok(exit.unwrap());
             }
-            if draining && pending.is_none() && !batch.is_empty() && cur.is_none() {
-                pending = Some(std::mem::take(&mut batch));
-                batch_changes = 0;
-                batch_started = None;
-            }
+            // group commit: the batch goes to the writer when it is full, old
+            // enough, or we are leaving; while the writer is busy it keeps
+            // growing (up to max_changes), so a slow commit carries more work
+            let full = batch_changes >= cfg.batch.max_changes;
+            let due = !batch.is_empty()
+                && (full || draining || batch_started.map_or(false, |t| t.elapsed() >= Duration::from_millis(cfg.batch.max_ms)));
+            // read while the batch has room (and always finish a transaction)
+            let read = (!full || cur.is_some()) && !(draining && cur.is_none());
             tokio::select! {
                 biased;
                 d = done.recv() => match d {
@@ -606,12 +610,14 @@ impl Connector {
                     Some(Done::Error(e)) => return Err(miette!("{e}")),
                     None => return Err(miette!("the kleos writer stopped")),
                 },
-                permit = work.reserve(), if pending.is_some() => {
+                permit = work.reserve(), if due => {
                     let permit = permit.map_err(|_| miette!("the kleos writer stopped"))?;
-                    permit.send(Work::Txs(pending.take().unwrap()));
+                    permit.send(Work::Txs(std::mem::take(&mut batch)));
+                    batch_changes = 0;
+                    batch_started = None;
                     inflight += 1;
                 }
-                msg = stream.next(), if pending.is_none() && !(draining && cur.is_none()) => {
+                msg = stream.next(), if read => {
                     let Some(msg) = msg else { return Err(miette!("replication stream ended")) };
                     match msg.map_err(conn::pg_err)? {
                         ReplicationMessage::XLogData(body) => {
@@ -636,14 +642,9 @@ impl Connector {
                                     } else if tx.is_empty() && tx.echo.is_none() && parts == 0 {
                                         last_seen = last_seen.max(c.end_lsn());
                                     } else {
-                                        batch_changes += tx.len();
+                                        batch_changes += tx.len().max(1);
                                         batch.push(tx);
                                         batch_started.get_or_insert_with(Instant::now);
-                                        if batch_changes >= cfg.batch.max_changes {
-                                            pending = Some(std::mem::take(&mut batch));
-                                            batch_changes = 0;
-                                            batch_started = None;
-                                        }
                                     }
                                     self.shared.set(|l| l.received_lsn = Some(fmt_lsn(received)));
                                 }
@@ -715,10 +716,10 @@ impl Connector {
                                         part: Some((parts, false)),
                                     };
                                     if tx.lsn > ctx.applied_lsn {
+                                        // a part fills the batch: it goes as soon as the writer is free
+                                        batch_changes += part.len().max(cfg.batch.max_changes);
                                         batch.push(part);
-                                        pending = Some(std::mem::take(&mut batch));
-                                        batch_changes = 0;
-                                        batch_started = None;
+                                        batch_started.get_or_insert_with(Instant::now);
                                     }
                                 }
                             }
@@ -728,7 +729,7 @@ impl Connector {
                                 last_seen = last_seen.max(k.wal_end());
                             }
                             if k.reply() == 1 {
-                                let ack = if cur.is_none() && batch.is_empty() && pending.is_none() && inflight == 0 { flushed.max(last_seen) } else { flushed };
+                                let ack = if cur.is_none() && batch.is_empty() && inflight == 0 { flushed.max(last_seen) } else { flushed };
                                 send_status(stream.as_mut(), received.max(ack), ack).await?;
                                 acked_sent = ack;
                                 last_status = Instant::now();
@@ -738,19 +739,34 @@ impl Connector {
                     }
                 }
                 _ = tick.tick() => {
-                    if batch_started.map_or(false, |t| t.elapsed() >= Duration::from_millis(cfg.batch.max_ms)) && pending.is_none() {
-                        pending = Some(std::mem::take(&mut batch));
-                        batch_changes = 0;
-                        batch_started = None;
-                    }
                     // idle: nothing of ours is in flight, so WAL seen so far is done
-                    let idle = cur.is_none() && batch.is_empty() && pending.is_none() && inflight == 0;
+                    let idle = cur.is_none() && batch.is_empty() && inflight == 0;
                     let ack = if idle { flushed.max(last_seen) } else { flushed };
                     if last_status.elapsed() >= Duration::from_secs(cfg.status_secs.max(1)) || (ack > acked_sent && last_status.elapsed() >= Duration::from_millis(500)) {
                         send_status(stream.as_mut(), received.max(ack), ack).await?;
                         acked_sent = ack;
                         last_status = Instant::now();
                         self.shared.set(|l| l.acked_lsn = Some(fmt_lsn(ack)));
+                    }
+                    // lag alerts: checked every 30 s, logged at most every 5 minutes
+                    if last_lag_check.elapsed() >= Duration::from_secs(30) {
+                        last_lag_check = Instant::now();
+                        if let Ok(v) = conn::server_version(pg).await {
+                            if let Ok(Some(si)) = admin::slot_info(pg, &cfg.slot(), v).await {
+                                let bytes = si.lag_bytes.unwrap_or(0);
+                                let last = self.shared.live.lock().unwrap().last_commit_ts;
+                                let secs = match last {
+                                    Some(t) if bytes > 0 => (store::now_us() - t) / 1_000_000,
+                                    _ => 0,
+                                };
+                                if (bytes > cfg.lag_alert.bytes || secs > cfg.lag_alert.seconds)
+                                    && last_lag_alert.map_or(true, |t| t.elapsed() >= Duration::from_secs(300))
+                                {
+                                    last_lag_alert = Some(Instant::now());
+                                    self.log("warn", &format!("replication lag {bytes} bytes, {secs}s (alert thresholds {} bytes, {}s)", cfg.lag_alert.bytes, cfg.lag_alert.seconds)).await;
+                                }
+                            }
+                        }
                     }
                     if exit.is_none() {
                         if self.shared.stopping() {

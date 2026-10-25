@@ -599,8 +599,8 @@ impl Sink {
                     if let (Some(b), Some(n)) = (b, nv) {
                         let text = display(&b);
                         if !text.trim().is_empty() {
-                            let label = self.label_of(tm, n).unwrap_or_else(|| key.to_string());
-                            let body = format!("{} {} ({} {}) {}: {}", tm.class, label, short(&tm.table), key, mapping::humanize(&c.name), text);
+                            let label = self.label_of(tm, n);
+                            let body = format!("{} {}: {}", lead(tm, key, label.as_deref()), mapping::humanize(&c.name), text);
                             let id = mem_id(&entity, &c.name, at);
                             self.new_memory(out, &id, &body, "pg_text", &format!("pg:{src}/{}/{key}#{}", tm.table, c.name), at, None, old_id.as_deref(), by);
                             mems.insert(c.name.clone(), json!(id));
@@ -762,10 +762,7 @@ impl Sink {
             let shown = self.labels.get(&target).cloned().unwrap_or(k);
             parts.push(format!("{name}: {shown}"));
         }
-        let head = match label {
-            Some(l) => format!("{} {} ({} {})", tm.class, l, short(&tm.table), key),
-            None => format!("{} {} ({})", tm.class, key, short(&tm.table)),
-        };
+        let head = lead(tm, key, label);
         if parts.is_empty() {
             format!("{head}.")
         } else {
@@ -919,6 +916,24 @@ impl Sink {
             .run_script(&script, p, kleos::ScriptMutability::Mutable)
             .map_err(|e| miette!("pg {}: kleos write failed: {e}", self.cfg.source))?;
         Ok(())
+    }
+}
+
+/// How a memory names its row: the label, led by the class unless the label
+/// already starts with it, and the key unless the label holds it
+/// (`Customer Acme Corp (#42)`, `Account 37`, `Ticket 9 about invoices`).
+/// Each word once, so text search weighs the words a question shares with
+/// the row rather than repeated ones.
+fn lead(tm: &TableMap, key: &str, label: Option<&str>) -> String {
+    match label {
+        None => format!("{} {key}", tm.class),
+        Some(l) => {
+            let mut s = if l.to_lowercase().starts_with(&tm.class.to_lowercase()) { l.to_string() } else { format!("{} {l}", tm.class) };
+            if !l.contains(key) {
+                s.push_str(&format!(" (#{key})"));
+            }
+            s
+        }
     }
 }
 

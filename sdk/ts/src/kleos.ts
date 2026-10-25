@@ -186,6 +186,25 @@ export class Kleos {
     return this.backend.doc(op, snakeKeys(args));
   }
 
+  /**
+   * A Postgres connector op (docs/specs/pg-connector.md): `status` (lag,
+   * slot, per-table sync state, alerts), `resync`, `map`, `approve`,
+   * `query` (live SQL joining Postgres tables with kleos facts), `init`,
+   * `drop_slot`. Remote only: connectors run in `kleos server --pg-cdc`.
+   *
+   * ```ts
+   * const [s] = await kleos.pg('status');
+   * if (s.alerts.length) console.warn(s.alerts);
+   * const r = await kleos.pg('query', { sql: "SELECT name FROM pg.public.customers WHERE plan = 'pro' LIMIT 5" });
+   * ```
+   */
+  pg(op: string, args?: Record<string, unknown>): Promise<any> {
+    if (!this.backend.pg) {
+      return Promise.reject(new KleosError('the Postgres connector runs in a kleos server (--pg-cdc): use connect({ url })', { op: `pg.${op}` }));
+    }
+    return this.backend.pg(op, snakeKeys(args));
+  }
+
   /** A durable-workflow op: `define`, `start`, `signal`, `cancel`, `status`, `list`, `history`, `schedule`, ... */
   flow(op: string, args?: Record<string, unknown>): Promise<any> {
     return this.backend.flow(op, args ?? {});

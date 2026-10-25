@@ -26,6 +26,8 @@ query = [
     "dep:datafusion-federation",
     "dep:secrecy",
 ]
+## Benchmark only: the RocksDB engine for `examples/pg_bench --engine rocksdb`.
+bench-rocksdb = ["kleos/storage-rocksdb"]
 
 [dependencies]
 kleos = { version = "0.18.0", path = "../kleos-core", default-features = false }

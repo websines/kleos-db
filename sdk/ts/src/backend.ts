@@ -41,6 +41,8 @@ export interface Backend {
   disableModel(kind: ModelKind, name: string): Promise<boolean>;
   /** Start an in-process workflow worker. Embedded only. */
   flowWorker?(opts: FlowWorkerOptions): FlowWorker;
+  /** The Postgres connector's ops (`POST /pg/:op`). Remote only: the connector runs in `kleos server --pg-cdc`. */
+  pg?(op: string, args: Record<string, unknown>): Promise<any>;
   close(): Promise<void>;
 }
 

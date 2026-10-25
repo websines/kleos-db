@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kleos-pg"
+version = "0.1.0"
+description = "Client for kleos's Postgres connector: replication status and lag alerts, resync, mapping review, live SQL over Postgres joined with kleos memory, and connector configs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MPL-2.0" }
+keywords = ["kleos", "postgres", "cdc", "agents", "memory"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/websines/kleos-db"
+Repository = "https://github.com/websines/kleos-db"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kleos_pg"]

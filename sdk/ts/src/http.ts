@@ -84,6 +84,9 @@ export class HttpBackend implements Backend {
   async doc(op: string, args: Record<string, unknown>) {
     return (await this.post(`/doc/${op}`, args, `doc.${op}`)).result;
   }
+  async pg(op: string, args: Record<string, unknown>) {
+    return (await this.post(`/pg/${op}`, args, `pg.${op}`)).result;
+  }
   /** export, import, backup and import_from_backup map to the server's routes; hybrid search, decide and restore are embedded only. */
   async admin(op: AdminOp, args: Record<string, unknown>) {
     switch (op) {

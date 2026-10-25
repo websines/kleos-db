@@ -122,8 +122,9 @@ fn main() {
     let dbname = "kbench";
     pg(&rt, &base, &format!(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{dbname}' AND pid <> pg_backend_pid();
-         SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database = '{dbname}' AND NOT active;
-         DROP DATABASE IF EXISTS {dbname}; CREATE DATABASE {dbname};"));
+         SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database = '{dbname}' AND NOT active;"));
+    pg(&rt, &base, &format!("DROP DATABASE IF EXISTS {dbname}"));
+    pg(&rt, &base, &format!("CREATE DATABASE {dbname}"));
     let url = match base.rsplit_once('/') {
         Some((h, _)) => format!("{h}/{dbname}"),
         None => base.clone(),
@@ -298,7 +299,7 @@ fn main() {
         let hits = db.memory_call("recall", json!({"query": q, "k": 5, "record_access": false})).unwrap();
         rl.push(tq.elapsed().as_secs_f64() * 1000.0);
         let texts: Vec<String> = hits.as_array().unwrap().iter().map(|h| h["text"].as_str().unwrap_or("").to_string()).collect();
-        let me = format!("Account {a} (accounts {a})");
+        let me = format!("Account {a}:");
         if texts.first().map_or(false, |t| t.contains(&me) && t.contains(&want)) {
             top1 += 1;
         }
@@ -309,6 +310,22 @@ fn main() {
             stale1 += 1;
         }
     }
+    // the same questions without graph recall (`graph: 'off'`)
+    let mut rl_off = vec![];
+    let mut top1_off = 0;
+    for i in 0..sample.min(50) {
+        let a = 1 + (i * 37) % accounts;
+        let want = format!("plan: tier2{}", ["silver", "gold", "platinum"][(i % 3) as usize]);
+        let tq = Instant::now();
+        let hits = db.memory_call("recall", json!({"query": format!("What is the current plan of Account {a}?"), "k": 5, "record_access": false, "graph": "off"})).unwrap();
+        rl_off.push(tq.elapsed().as_secs_f64() * 1000.0);
+        if hits[0]["text"].as_str().map_or(false, |t| t.contains(&format!("Account {a}:")) && t.contains(&want)) {
+            top1_off += 1;
+        }
+    }
+    let roff50 = pct(&mut rl_off, 0.5);
+    eprintln!("recall graph off: p50 {roff50:.1} ms, top-1 {top1_off}/{}", sample.min(50));
+    report.insert("recall_graph_off".into(), json!({"p50_ms": roff50, "current_top1": top1_off, "questions": sample.min(50)}));
     let ctx = db.memory_call("recall", json!({"query": "What is the current plan of Account 1?", "format": "context", "k": 3})).unwrap();
     let rp50 = pct(&mut rl, 0.5);
     let rp95 = pct(&mut rl, 0.95);
@@ -330,6 +347,24 @@ fn main() {
     let rq50 = pct(&mut rl2, 0.5);
     eprintln!("recall with chat facts in the namespace: p50 {rq50:.1} ms");
     report.insert("recall_with_chat_facts_p50_ms".into(), json!(rq50));
+
+    // live queries (feature `query`): a filtered Postgres scan, and a join with kleos facts
+    #[cfg(feature = "query")]
+    {
+        let q1 = "SELECT name, plan FROM pg.public.accounts WHERE region = 'EU' ORDER BY id LIMIT 5";
+        let tq = Instant::now();
+        let r1 = kleos_pg::pg_call(&db, "query", json!({"source": "crm", "sql": q1, "explain": true})).unwrap();
+        let t1q = tq.elapsed().as_secs_f64() * 1000.0;
+        let q2 = "SELECT a.name, a.plan AS pg_plan, f.o AS kleos_plan FROM pg.public.accounts a JOIN kleos.facts f \
+                  ON f.s = concat('pg:crm/public.accounts/', CAST(a.id AS VARCHAR)) WHERE f.p = 'accounts.plan' AND a.id <= 100";
+        let tq = Instant::now();
+        let r2 = kleos_pg::pg_call(&db, "query", json!({"source": "crm", "sql": q2})).unwrap();
+        let t2q = tq.elapsed().as_secs_f64() * 1000.0;
+        let agree = r2["rows"].as_array().map_or(0, |a| a.iter().filter(|r| r[1] == r[2]).count());
+        eprintln!("live query: filtered scan {t1q:.0} ms; join with kleos facts {t2q:.0} ms ({} rows, {agree} agree)", r2["rows"].as_array().map_or(0, |a| a.len()));
+        report.insert("live_query".into(), json!({"filtered_scan_ms": t1q, "join_ms": t2q, "join_rows": r2["rows"].as_array().map_or(0, |a| a.len()),
+            "join_rows_agreeing": agree, "scan_plan": r1["plan"]}));
+    }
 
     // 5. write-back exactly once under injected crashes
     let k = 40;
