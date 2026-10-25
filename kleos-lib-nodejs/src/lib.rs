@@ -20,10 +20,13 @@
 //! the libuv thread pool and resolves a Promise: the Node event loop is
 //! never blocked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde_json::{json, Value as JsonValue};
 
@@ -158,8 +161,7 @@ fn score_norm(v: &JsonValue) -> std::result::Result<kleos::ScoreNorm, String> {
 }
 
 /// A `HybridSearch` from JSON (snake_case fields as in Python's
-/// `hybrid_search`); graph legs, rerank and MMR are not mapped here (use
-/// CozoScript via `run` for those).
+/// `hybrid_search`, graph legs, rerank and MMR included).
 fn hybrid_from_json(a: &JsonValue) -> std::result::Result<kleos::HybridSearch, String> {
     let mut q = kleos::HybridSearch::default();
     let st = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -185,6 +187,59 @@ fn hybrid_from_json(a: &JsonValue) -> std::result::Result<kleos::HybridSearch, S
             let body = it.get("rule_body").and_then(|v| v.as_str()).ok_or("extra_lists entry needs 'rule_body'")?;
             q.extra_lists.push(kleos::HybridList { label: label.into(), rule_body: body.into() });
         }
+    }
+    if let Some(items) = a.get("graph_legs").and_then(|v| v.as_array()) {
+        // every known key optional (defaults as in Rust); unknown keys are
+        // rejected, as in Python, so a typo never runs a leg with defaults
+        const KNOWN: [&str; 15] = [
+            "label", "edge_relation", "from_col", "to_col", "seeds", "max_hops", "undirected", "max_nodes", "max_cost",
+            "weight_col", "graph", "seed_from_legs", "gate_relation", "gate_cols", "admit",
+        ];
+        for it in items {
+            let o = it.as_object().ok_or("graph_legs entries are objects")?;
+            if let Some(k) = o.keys().find(|k| !KNOWN.contains(&k.as_str())) {
+                return Err(format!("graph_legs entry has unknown key {k:?}; known keys: {}", KNOWN.join(", ")));
+            }
+            let gs = |k: &str| o.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let gb = |k: &str| o.get(k).and_then(|v| v.as_bool());
+            let mut leg = kleos::GraphLeg::default();
+            if let Some(v) = gs("label") { leg.label = v; }
+            if let Some(v) = gs("edge_relation") { leg.edge_relation = v; }
+            if let Some(v) = gs("from_col") { leg.from_col = v; }
+            if let Some(v) = gs("to_col") { leg.to_col = v; }
+            if let Some(v) = o.get("seeds").and_then(|v| v.as_array()) {
+                leg.seeds = v.iter().cloned().map(DataValue::from).collect();
+            }
+            if let Some(v) = o.get("max_hops").and_then(|v| v.as_u64()) { leg.max_hops = v as usize; }
+            if let Some(v) = gb("undirected") { leg.undirected = v; }
+            if let Some(v) = o.get("max_nodes").and_then(|v| v.as_u64()) { leg.max_nodes = Some(v as usize); }
+            if let Some(v) = o.get("max_cost").and_then(|v| v.as_f64()) { leg.max_cost = Some(v); }
+            leg.weight_col = gs("weight_col").or(leg.weight_col);
+            leg.graph = gs("graph").or(leg.graph);
+            if let Some(v) = gb("seed_from_legs") { leg.seed_from_legs = v; }
+            leg.gate_relation = gs("gate_relation").or(leg.gate_relation);
+            if let Some(v) = o.get("gate_cols").and_then(|v| v.as_array()) {
+                leg.gate_cols = v.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect();
+            }
+            leg.admit = gs("admit").or(leg.admit);
+            q.graph_legs.push(leg);
+        }
+    }
+    if let Some(r) = a.get("rerank").filter(|v| !v.is_null()) {
+        let mut p = kleos::RerankParams::default();
+        if let Some(v) = r.get("model").and_then(|v| v.as_str()) { p.model = v.into(); }
+        if let Some(v) = r.get("top_n").and_then(|v| v.as_u64()) { p.top_n = v as usize; }
+        if let Some(v) = r.get("text_field").and_then(|v| v.as_str()) { p.text_field = v.into(); }
+        if let Some(v) = r.get("query").and_then(|v| v.as_str()) { p.query = Some(v.into()); }
+        if let Some(v) = r.get("batch_size").and_then(|v| v.as_u64()) { p.batch_size = v as usize; }
+        q.rerank = Some(p);
+    }
+    if let Some(m) = a.get("mmr").filter(|v| !v.is_null()) {
+        let mut p = kleos::MmrParams::default();
+        if let Some(v) = m.get("lambda").and_then(|v| v.as_f64()) { p.lambda = v; }
+        if let Some(v) = m.get("k").and_then(|v| v.as_u64()) { p.k = v as usize; }
+        if let Some(v) = m.get("embedding_col").and_then(|v| v.as_str()) { p.embedding_col = v.into(); }
+        q.mmr = Some(p);
     }
     if let Some(f) = a.get("fusion") {
         q.fusion = match f.as_str() {
@@ -266,10 +321,58 @@ fn job(db: Option<DbInstance>, work: Work) -> AsyncTask<Job> {
     AsyncTask::new(Job { db, work: Some(work) })
 }
 
+/// A JS function `(event: string) => void` called from any thread.
+type EventFn = ThreadsafeFunction<String, (), String, Status, false>;
+/// A JS function `(query, docs) => number[]` called from the thread pool.
+type RerankFn = ThreadsafeFunction<FnArgs<(String, Vec<String>)>, Vec<f64>, FnArgs<(String, Vec<String>)>, Status, false, true>;
+
+/// A JS reranker as a kleos `Reranker` (`hybridSearch({rerank: {model}})`).
+/// The store calls it from a libuv worker thread and waits for the result;
+/// the function runs on the JS thread and must return the scores
+/// synchronously.
+struct JsReranker(RerankFn);
+
+impl kleos::Reranker for JsReranker {
+    fn rerank(&self, query: &str, docs: &[&str]) -> miette::Result<Vec<f32>> {
+        let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<Vec<f64>, String>>();
+        let args: FnArgs<(String, Vec<String>)> = (query.to_string(), docs.iter().map(|d| d.to_string()).collect()).into();
+        let st = self.0.call_with_return_value(args, ThreadsafeFunctionCallMode::Blocking, move |r: Result<Vec<f64>>, _env| {
+            let _ = tx.send(r.map_err(|e| e.to_string()));
+            Ok(())
+        });
+        if st != Status::Ok {
+            miette::bail!("reranker: the JavaScript function could not be called ({st:?})");
+        }
+        let scores = rx
+            .recv_timeout(Duration::from_secs(300))
+            .map_err(|_| miette::miette!("reranker: no answer from the JavaScript function"))?
+            .map_err(|e| miette::miette!("reranker: {e}"))?;
+        if scores.len() != docs.len() {
+            miette::bail!("reranker: expected {} scores, got {}", docs.len(), scores.len());
+        }
+        Ok(scores.into_iter().map(|x| x as f32).collect())
+    }
+}
+
 /// A kleos store opened in this process.
 #[napi]
 pub struct KleosDb {
     db: Arc<RwLock<Option<DbInstance>>>,
+    /// relation watches (callback ids) and live subscriptions (stop flags),
+    /// ended by `unwatch` / `unsubscribe` / `close`
+    watches: Arc<Mutex<Vec<u32>>>,
+    subs: Arc<Mutex<HashMap<u32, Arc<AtomicBool>>>>,
+}
+
+fn sub_event_json(ev: kleos::SubscriptionEvent) -> String {
+    use kleos::SubscriptionEvent as E;
+    match ev {
+        E::Initial { rows } => json!({"kind": "initial", "rows": (*rows).clone().into_json()}),
+        E::Delta { added, removed } => json!({"kind": "delta", "added": (*added).clone().into_json(), "removed": (*removed).clone().into_json()}),
+        E::Resync { rows } => json!({"kind": "resync", "rows": (*rows).clone().into_json()}),
+        E::Error { message } => json!({"kind": "error", "message": message}),
+    }
+    .to_string()
 }
 
 #[napi]
@@ -281,7 +384,100 @@ impl KleosDb {
     pub fn new(engine: String, path: String, options: String) -> Result<Self> {
         let options = if options.trim().is_empty() { "{}".to_string() } else { options };
         let db = DbInstance::new(&engine, &path, &options).map_err(report_err)?;
-        Ok(Self { db: Arc::new(RwLock::new(Some(db))) })
+        Ok(Self { db: Arc::new(RwLock::new(Some(db))), watches: Default::default(), subs: Default::default() })
+    }
+
+    /// Watch a stored relation: `callback(eventJson)` runs on the JS thread
+    /// for every committed write, with `{op: 'Put'|'Rm', new_rows, old_rows}`
+    /// (rows as `{headers, rows}`). Returns the watch id for `unwatch`. The
+    /// watch keeps the process alive until `unwatch` or `close`.
+    #[napi(ts_args_type = "relation: string, callback: (event: string) => void")]
+    pub fn watch(&self, relation: String, callback: Function<String, ()>) -> Result<u32> {
+        let tsfn: EventFn = callback.build_threadsafe_function().callee_handled::<false>().build()?;
+        let db = self.handle()?;
+        let (id, recv) = db.register_callback(&relation, None);
+        self.watches.lock().unwrap().push(id);
+        // ends when the callback is unregistered (its sender drops)
+        std::thread::spawn(move || {
+            for (op, new, old) in recv {
+                let ev = json!({"op": op.to_string(), "new_rows": new.into_json(), "old_rows": old.into_json()});
+                if tsfn.call(ev.to_string(), ThreadsafeFunctionCallMode::Blocking) == Status::Closing {
+                    break;
+                }
+            }
+        });
+        Ok(id)
+    }
+
+    /// End a watch. False when it was not active.
+    #[napi]
+    pub fn unwatch(&self, id: u32) -> bool {
+        self.watches.lock().unwrap().retain(|x| *x != id);
+        match self.db.read().unwrap().as_ref() {
+            Some(db) => db.unregister_callback(id),
+            None => false,
+        }
+    }
+
+    /// A live query subscription (docs/specs/live-subscriptions.md):
+    /// `callback(eventJson)` gets `{kind: 'initial', rows}`, then `delta`
+    /// (`added`, `removed`), `resync` or `error` events. The first evaluation
+    /// runs now (errors throw). Returns the subscription id for
+    /// `unsubscribe`; it keeps the process alive until then or `close`.
+    #[napi(ts_args_type = "script: string, paramsJson: string, queue: number, callback: (event: string) => void")]
+    pub fn subscribe(&self, script: String, params_json: String, queue: u32, callback: Function<String, ()>) -> Result<u32> {
+        let params = match parse_json(&params_json, "params")? {
+            JsonValue::Null => BTreeMap::new(),
+            JsonValue::Object(m) => m.into_iter().map(|(k, v)| (k, DataValue::from(v))).collect(),
+            _ => return Err(js_err("params must be an object")),
+        };
+        let tsfn: EventFn = callback.build_threadsafe_function().callee_handled::<false>().build()?;
+        let mut opts = kleos::SubscribeOptions::default();
+        if queue > 0 {
+            opts.queue_capacity = queue as usize;
+        }
+        let sub = self.handle()?.subscribe(&script, params, opts).map_err(report_err)?;
+        let id = sub.id() as u32;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.subs.lock().unwrap().insert(id, stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                if let Some(ev) = sub.recv_timeout(Duration::from_millis(250)) {
+                    if tsfn.call(sub_event_json(ev), ThreadsafeFunctionCallMode::Blocking) == Status::Closing {
+                        break;
+                    }
+                }
+            }
+            // dropping `sub` unsubscribes
+        });
+        Ok(id)
+    }
+
+    /// End a live subscription. False when it was not active.
+    #[napi]
+    pub fn unsubscribe(&self, id: u32) -> bool {
+        match self.subs.lock().unwrap().remove(&id) {
+            Some(stop) => {
+                stop.store(true, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Register a reranker for `hybridSearch({rerank: {model: name}})` and the
+    /// `Rerank` fixed rule: `fn(query, docs)` returns one score per doc,
+    /// synchronously.
+    #[napi(ts_args_type = "name: string, fn: (query: string, docs: string[]) => number[]")]
+    pub fn register_reranker(&self, name: String, callback: Function<FnArgs<(String, Vec<String>)>, Vec<f64>>) -> Result<()> {
+        let tsfn: RerankFn = callback.build_threadsafe_function().callee_handled::<false>().weak::<true>().build()?;
+        self.handle()?.register_reranker(name, Arc::new(JsReranker(tsfn))).map_err(report_err)
+    }
+
+    /// Remove a reranker. False when none had that name.
+    #[napi]
+    pub fn unregister_reranker(&self, name: String) -> Result<bool> {
+        Ok(self.handle()?.unregister_reranker(&name))
     }
 
     fn handle(&self) -> Result<DbInstance> {
@@ -378,6 +574,15 @@ impl KleosDb {
     /// Returns false when it was already closed.
     #[napi]
     pub fn close(&self) -> bool {
+        for (_, stop) in self.subs.lock().unwrap().drain() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        let ids: Vec<u32> = self.watches.lock().unwrap().drain(..).collect();
+        if let Some(db) = self.db.read().unwrap().as_ref() {
+            for id in ids {
+                db.unregister_callback(id);
+            }
+        }
         self.db.write().unwrap().take().is_some()
     }
 }

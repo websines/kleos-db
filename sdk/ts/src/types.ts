@@ -328,6 +328,46 @@ export interface EntityProfile {
 }
 
 /** A hybrid search query (snake_case, as in Python's `hybrid_search`). */
+/** One write to a watched relation ({@link Kleos.watch}). */
+export interface ChangeEvent {
+  /** `Put` or `Rm`. */
+  op: string;
+  new_rows: NamedRows;
+  old_rows: NamedRows;
+}
+
+/** One event of a live query subscription ({@link Kleos.subscribe}). */
+export type SubscriptionEvent =
+  | { kind: 'initial'; rows: NamedRows }
+  | { kind: 'delta'; added: NamedRows; removed: NamedRows }
+  | { kind: 'resync'; rows: NamedRows }
+  | { kind: 'error'; message: string };
+
+/** A running watch or subscription; `close()` ends it (idempotent). */
+export interface LiveHandle {
+  close(): Promise<void>;
+}
+
+/** A k-hop graph-proximity leg of {@link HybridQuery} (as Python's `graph_legs` entries). */
+export interface GraphLegSpec {
+  label?: string;
+  edge_relation?: string;
+  from_col?: string;
+  to_col?: string;
+  seeds?: Json[];
+  max_hops?: number;
+  undirected?: boolean;
+  /** Budgeted expansion: presence switches the leg to this mode. */
+  max_nodes?: number;
+  max_cost?: number;
+  weight_col?: string;
+  graph?: string;
+  seed_from_legs?: boolean;
+  gate_relation?: string;
+  gate_cols?: string[];
+  admit?: string;
+}
+
 export interface HybridQuery {
   relation: string;
   id_col?: string;
@@ -344,6 +384,12 @@ export interface HybridQuery {
   detailed?: boolean;
   fusion?: 'rrf' | 'weighted' | { kind?: 'rrf' | 'weighted'; weights?: Record<string, number>; norm?: unknown; leg_norms?: Record<string, unknown> };
   extra_lists?: { label: string; rule_body: string }[];
+  /** Typed k-hop graph-proximity legs folded into the fusion. */
+  graph_legs?: GraphLegSpec[];
+  /** Re-rank the fused candidates with a reranker registered by {@link Kleos.registerReranker}. */
+  rerank?: { model: string; top_n?: number; text_field?: string; query?: string; batch_size?: number };
+  /** MMR diversity re-rank over an embedding column. */
+  mmr?: { lambda?: number; k?: number; embedding_col?: string };
 }
 
 /** The outcome of `decide` (label, p, band, decided_by, ...). */

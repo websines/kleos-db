@@ -38,7 +38,10 @@ camelCase or snake_case.
 | `db.enable_extractor("gliner")` | `await kleos.enableExtractor('gliner')` |
 | `db.embedders()` | `await kleos.embedders()` (rows) |
 | (CLI `kleos profile NAME`) | `await kleos.profile(name, { ns })` |
-| `db.hybrid_search({...})` | `await kleos.hybridSearch({...})` (no graph legs, rerank or MMR) |
+| `db.hybrid_search({...})` | `await kleos.hybridSearch({...})` (graph legs, rerank and MMR included) |
+| `db.register_reranker(name, fn)` | `kleos.registerReranker(name, (query, docs) => scores)` (embedded; synchronous) |
+| `db.register_callback(rel, cb)` | `await kleos.watch(rel, (e) => …)` → `{ close() }` |
+| `db.subscribe(query, params, cb)` | `await kleos.subscribe(query, (e) => …, { params })` → `{ close() }` |
 | `db.decide(name, template, a, b)` | `await kleos.decide(name, template, a, b)` |
 | `db.export_relations([...])` / `db.import_relations(d)` | `await kleos.exportRelations([...])` / `await kleos.importRelations(d)` |
 | `db.backup(path)` / `db.restore(path)` / `db.import_from_backup(path, rels)` | `await kleos.backup(path)` / `restore(path)` / `importFromBackup(path, rels)` |
@@ -46,12 +49,11 @@ camelCase or snake_case.
 
 **Not in the TypeScript SDK yet.** Most of these are reachable through
 `run()` with the matching CozoScript system op:
-- `register_callback`, `subscribe` (live updates);
-- `run_cypher`, and hybrid search's graph legs, rerank and MMR;
+- `run_cypher`;
 - `fit_decider`;
 - entity `resolve`, `merge` and `split`;
 - `multi_transact`;
-- custom fixed rules and rerankers.
+- custom fixed rules.
 
 Two differences in style:
 - **Everything is async in TypeScript.** Calls run off the event loop.

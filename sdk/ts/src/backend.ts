@@ -4,7 +4,7 @@
  *
  * @module
  */
-import type { FlowWorker, FlowWorkerOptions, Json, ModelSpec, NamedRows, PrincipalContext } from './types.js';
+import type { ChangeEvent, FlowWorker, FlowWorkerOptions, Json, LiveHandle, ModelSpec, NamedRows, PrincipalContext, SubscriptionEvent } from './types.js';
 
 /** Error thrown by kleos (bad arguments, a closed store, a failed op). */
 export class KleosError extends Error {
@@ -49,6 +49,13 @@ export interface Backend {
    * ignored.
    */
   memoryAs(ctx: PrincipalContext, op: string, args: Record<string, unknown>): Promise<any>;
+  /** Committed writes to a stored relation. */
+  watch(relation: string, onEvent: (e: ChangeEvent) => void): Promise<LiveHandle>;
+  /** A live query subscription. */
+  subscribe(script: string, params: Record<string, Json>, onEvent: (e: SubscriptionEvent) => void, queue?: number): Promise<LiveHandle>;
+  /** A reranker for `hybridSearch({rerank})`. Embedded only. */
+  registerReranker?(name: string, fn: (query: string, docs: string[]) => number[]): void;
+  unregisterReranker?(name: string): boolean;
   close(): Promise<void>;
 }
 

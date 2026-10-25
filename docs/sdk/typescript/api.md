@@ -134,7 +134,10 @@ worker.stop();
 | `enableDecider(name, spec?)` / `disableDecider(name)` | void / boolean | Spec: `{ model, path, precision, device }`. |
 | `enableExtractor(name, spec?)` / `disableExtractor(name)` | void / boolean | Spec: `{ model, path, precision, device }`. |
 | `embedders()`, `deciders()`, `extractors()` | `NamedRows` | What is enabled. |
-| `hybridSearch(query)` | `NamedRows` | Vector + text search over any relation with indexes (`relation`, `vector_index`, `query_vector`, `fts_index`, `query_text`, `limit`, `fusion`, `extra_lists`). Embedded only; graph legs, rerank and MMR via `run()`. |
+| `hybridSearch(query)` | `NamedRows` | Vector + text search over any relation with indexes (`relation`, `vector_index`, `query_vector`, `fts_index`, `query_text`, `limit`, `fusion`, `extra_lists`), plus `graph_legs` (k-hop or budgeted proximity legs; unknown keys are rejected), `rerank` (`{model, top_n, text_field, query, batch_size}` with a reranker from `registerReranker`) and `mmr` (`{lambda, k, embedding_col}`), as Python's `hybrid_search`. Embedded only. |
+| `registerReranker(name, fn)` / `unregisterReranker(name)` | void / boolean | A JS reranker `(query, docs) => number[]` (synchronous; called from the thread pool, run on the JS thread). Embedded only. |
+| `watch(relation, onEvent)` | `LiveHandle` | Committed writes to a stored relation (`kleos_mem`, `kleos_doc`, your own): `{op, new_rows, old_rows}`. Embedded: change callbacks (napi threadsafe function); remote: the server's `GET /changes/:relation` stream (admin secret). `close()` ends it; it keeps the process alive until then. |
+| `subscribe(script, onEvent, opts?: { params?, queue? })` | `LiveHandle` | A live query: `initial`, then `delta` (`added`, `removed`), `resync` or `error` events (docs/specs/live-subscriptions.md). Remote: `GET /subscribe`. |
 | `decide(name, template, a, b)` | `DecideResult` | One typed decision with an enabled decider (e.g. `supersedes`). Embedded only. |
 | `exportRelations(relations)` | `{ [rel]: NamedRows }` | Rows of stored relations. |
 | `importRelations(data)` | void | Put rows into existing relations (the `exportRelations` shape). |
