@@ -362,24 +362,119 @@ where
             self.audit_op(ss, op, json!({"scope": k.ns(), "filter": true, "result": out.get("ids")}), None, json!({"effect": "allow"}))?;
             return Ok(out);
         }
-        let (scopes, _) = self.scope_set(ss, "write")?;
-        let nss: Vec<String> = scopes.iter().map(|k| k.ns()).collect();
-        let mut by_ns: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (id, ns) in self.locate(part.as_deref(), &nss, &ids)? {
-            by_ns.entry(ns).or_default().push(id);
+        // where each id lives among the readable scopes, and whether the
+        // caller may change it there: scopes it writes directly; agent and
+        // org scopes as a curator (who may promote into them); else, in an
+        // agent or org scope, as a pending request for a curator to approve
+        let (wr, _) = self.scope_set(ss, "write")?;
+        let (cur, org_cur) = self.scope_set(ss, "promote")?;
+        let (rd, org_rd) = self.scope_set(ss, "read")?;
+        let wset: BTreeSet<String> = wr.iter().map(|k| k.ns()).collect();
+        let cset: BTreeSet<String> = cur.iter().filter(|k| matches!(k, ScopeKey::Agent { .. })).map(|k| k.ns()).collect();
+        let rd_nss: Vec<String> = rd.iter().map(|k| k.ns()).collect();
+        let mut groups: BTreeMap<(Option<String>, String), Vec<String>> = BTreeMap::new();
+        for (id, ns) in self.locate(part.as_deref(), &rd_nss, &ids)? {
+            groups.entry((part.clone(), ns)).or_default().push(id);
+        }
+        let org_part = ss.org_part();
+        if org_rd {
+            let found: BTreeSet<&String> = groups.values().flatten().collect();
+            let rest: Vec<String> = ids.iter().filter(|i| !found.contains(i)).cloned().collect();
+            for (id, ns) in self.locate(Some(&org_part), &["org".to_string()], &rest)? {
+                groups.entry((Some(org_part.clone()), ns)).or_default().push(id);
+            }
         }
         let mut done: Vec<String> = vec![];
+        let mut requests: Vec<JsonValue> = vec![];
         let mut mode = JsonValue::Null;
-        for (ns, group) in &by_ns {
-            let mut o = a.clone();
-            o.insert("ns".into(), json!(ns));
-            o.insert("ids".into(), json!(group));
-            let r = v.memory_call(op, JsonValue::Object(o))?;
-            mode = r.get("mode").cloned().unwrap_or(JsonValue::Null);
-            done.extend(r.get("ids").and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str().map(|y| y.to_string())));
+        for ((gpart, ns), group) in &groups {
+            let k = ScopeKey::parse(ns, gpart.as_deref() == Some(org_part.as_str()));
+            let direct = wset.contains(ns) || cset.contains(ns) || (k == ScopeKey::Org && org_cur);
+            if direct {
+                let mut o = a.clone();
+                o.insert("ns".into(), json!(ns));
+                o.insert("ids".into(), json!(group));
+                let gv = self.session_view(ss, gpart.as_deref(), None, true)?;
+                let r = gv.memory_call(op, JsonValue::Object(o))?;
+                mode = r.get("mode").cloned().unwrap_or(JsonValue::Null);
+                done.extend(r.get("ids").and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str().map(|y| y.to_string())));
+            } else if matches!(k, ScopeKey::Agent { .. } | ScopeKey::Org) {
+                let rid = format!("rq_{}", hex(&rand::random::<[u8; 8]>()));
+                self.tn_q(
+                    &format!(
+                        "?[id, ws, op, ns, ids, args, chain, requested_by, status, approved_by, result, at] <- \
+                           [[$id, $ws, $op, $ns, $ids, $args, $chain, $by, 'pending', null, null, $now]] \
+                         :put {TN_REQUEST} {{id => ws, op, ns, ids, args, chain, requested_by, status, approved_by, result, at}}"
+                    ),
+                    vec![
+                        ("id", s(&rid)),
+                        ("ws", s(&ss.ws)),
+                        ("op", s(op)),
+                        ("ns", s(ns)),
+                        ("ids", str_list(group)),
+                        ("args", json_dv(JsonValue::Object(a.clone()))),
+                        ("chain", json_dv(serde_json::to_value(&ss.chain).into_diagnostic()?)),
+                        ("by", s(ss.accountable.as_deref().unwrap_or_default())),
+                        ("now", DataValue::from(now_micros())),
+                    ],
+                )?;
+                requests.push(json!({"request": rid, "scope": ns, "ids": group}));
+            }
         }
-        self.audit_op(ss, op, json!({"ids": done, "scopes": by_ns.keys().collect::<Vec<_>>()}), None, json!({"effect": "allow"}))?;
-        Ok(if op == "forget" { json!({"mode": mode, "ids": done}) } else { json!({"ids": done}) })
+        self.audit_op(
+            ss,
+            op,
+            json!({"ids": done, "scopes": groups.keys().map(|k| &k.1).collect::<Vec<_>>(), "requests": requests}),
+            None,
+            json!({"effect": if requests.is_empty() { "allow" } else { "pending" }}),
+        )?;
+        let mut out = if op == "forget" { json!({"mode": mode, "ids": done}) } else { json!({"ids": done}) };
+        if !requests.is_empty() {
+            out["pending"] = JsonValue::Array(requests);
+        }
+        Ok(out)
+    }
+
+    /// Approve or reject a pending curation request (forget / set in an
+    /// agent or org scope): a human who may approve promotions there.
+    fn pm_request(&self, ss: &Session, op: &str, rid: &str) -> Result<JsonValue> {
+        let rows = self.tn_rows(
+            &format!("?[ws, rop, ns, ids, args, status] := *{TN_REQUEST}{{id: $id, ws, op: rop, ns, ids, args, status}}"),
+            vec![("id", s(rid))],
+        )?;
+        let Some(r) = rows.first() else { bail!("request '{rid}' not found") };
+        if cell_str(&r[0]).as_deref() != Some(ss.ws.as_str()) {
+            bail!("request '{rid}' not found");
+        }
+        if r[5].get_str() != Some("pending") {
+            bail!("request '{rid}' is not pending");
+        }
+        let rop = cell_str(&r[1]).unwrap_or_default();
+        let ns = cell_str(&r[2]).unwrap_or_default();
+        let target = ScopeKey::parse(&ns, ns == "org");
+        let approver = ss.human.as_ref().map(|h| h.id.clone()).ok_or_else(|| miette::miette!("only a human approves a request"))?;
+        if !self.authz(ss)?.allows("approve", &target)? {
+            bail!("not allowed to approve requests in '{ns}'");
+        }
+        let (status, result) = if op == "approve" {
+            let mut o = match cell_json(&r[4]) {
+                JsonValue::Object(m) => m,
+                _ => Map::new(),
+            };
+            o.insert("ns".into(), json!(ns));
+            o.insert("ids".into(), JsonValue::from(r[3].clone()));
+            let part = if target == ScopeKey::Org { Some(ss.org_part()) } else { ss.part.clone() };
+            let v = self.session_view(ss, part.as_deref(), None, true)?;
+            ("approved", v.memory_call(&rop, JsonValue::Object(o))?)
+        } else {
+            ("rejected", json!({"status": "rejected"}))
+        };
+        self.tn_q(
+            &format!("?[id, status, approved_by, result] <- [[$id, $st, $by, $res]] :update {TN_REQUEST} {{id => status, approved_by, result}}"),
+            vec![("id", s(rid)), ("st", s(status)), ("by", s(&approver)), ("res", json_dv(result.clone()))],
+        )?;
+        self.audit_op(ss, op, json!({"request": rid, "op": rop, "scope": ns}), None, json!({"effect": status}))?;
+        Ok(json!({"request": rid, "status": status, "result": result}))
     }
 
     /// Workflows, documents and ontologies of the session's partition
@@ -551,7 +646,10 @@ where
     }
 
     fn pm_approve(&self, ss: &Session, op: &str, mut a: Map<String, JsonValue>) -> Result<JsonValue> {
-        let pid = take_str(&mut a, "promotion").ok_or_else(|| miette::miette!("principal {op} needs 'promotion'"))?;
+        if let Some(rid) = take_str(&mut a, "request") {
+            return self.pm_request(ss, op, &rid);
+        }
+        let pid = take_str(&mut a, "promotion").ok_or_else(|| miette::miette!("principal {op} needs 'promotion' or 'request'"))?;
         let rows = self.tn_rows(
             &format!("?[ws, from_ns, ids, target, chain, status] := *{TN_PROMOTION}{{id: $id, ws, from_ns, ids, target, chain, status}}"),
             vec![("id", s(&pid))],

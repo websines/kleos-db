@@ -303,6 +303,34 @@ fn promotion_is_a_governed_copy() {
 }
 
 #[test]
+fn curation_in_agent_and_org_scopes() {
+    let w = World::new("cur");
+    w.t("grant", json!({"ws": "eng", "principal": "bot", "role": "writer", "actions": ["promote"]}));
+    let ab = cx("eng", Some("alice"), Some("bot"));
+    let src = w.put(&ab, "Use the blue deploy pipeline.", Some("team:core"))["id"].as_str().unwrap().to_string();
+    let copy = |r: Value| r["copies"][0]["id"].as_str().unwrap().to_string();
+    let agent_id = copy(w.call(&ab, "promote", json!({"ids": [src], "to": "agent"})).unwrap());
+    let org_id = copy(w.call(&cx("eng", Some("alice"), None), "promote", json!({"ids": [src], "to": "org", "approve": true})).unwrap());
+    // carol reads both but curates neither: her forgets become requests
+    let carol = cx("eng", Some("carol"), None);
+    let r = w.call(&carol, "forget", json!({"ids": [agent_id, org_id]})).unwrap();
+    assert!(r["ids"].as_array().unwrap().is_empty(), "{r}");
+    let reqs: Vec<String> = r["pending"].as_array().unwrap().iter().map(|x| x["request"].as_str().unwrap().to_string()).collect();
+    assert_eq!(reqs.len(), 2);
+    // (one hit: the restatement in org scope gives way to the agent scope's)
+    assert_eq!(w.texts(&carol, "blue deploy pipeline").len(), 1);
+    // alice (a writer and an org admin) approves both
+    for q in &reqs {
+        assert_eq!(w.call(&cx("eng", Some("alice"), None), "approve", json!({"request": q})).unwrap()["status"], "approved");
+    }
+    assert!(w.texts(&carol, "blue deploy pipeline").is_empty());
+    // the agent curates its own scope directly
+    let again = copy(w.call(&ab, "promote", json!({"ids": [src], "to": "agent"})).unwrap());
+    let r = w.call(&ab, "forget", json!({"ids": [again]})).unwrap();
+    assert_eq!(r["ids"].as_array().unwrap().len(), 1, "{r}");
+}
+
+#[test]
 fn supersession_and_duplicates_stay_within_a_scope() {
     let w = World::new("sup");
     let alice = cx("eng", Some("alice"), None);

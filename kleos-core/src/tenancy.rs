@@ -63,6 +63,9 @@ pub const TN_META: &str = "kleos_tn_meta";
 /// The head of each workspace's audit chain, read and written in the
 /// transaction that appends an event.
 pub const TN_AUDIT_HEAD: &str = "kleos_tn_audit_head";
+/// Pending curation requests (forget / set in agent and org scopes by a
+/// principal who is not a curator there).
+pub const TN_REQUEST: &str = "kleos_tn_request";
 
 /// The implicit org and workspace of a store (the unpartitioned store).
 pub const DEFAULT: &str = "default";
@@ -99,6 +102,11 @@ const DDL: &[(&str, &str)] = &[
     ),
     (TN_META, "{key: String => value: Json}"),
     (TN_AUDIT_HEAD, "{ws: String => seq: Int, hash: String}"),
+    (
+        TN_REQUEST,
+        "{id: String => ws: String, op: String, ns: String, ids: [String], args: Json, chain: Json, requested_by: String, \
+         status: String, approved_by: String?, result: Json?, at: Int}",
+    ),
 ];
 
 pub(crate) fn now_micros() -> i64 {
@@ -525,10 +533,18 @@ where
             return Ok(());
         }
         let root = self.root_view();
-        let have = root.run_script(&format!("?[ws] := *{TN_AUDIT_HEAD}{{ws}}"), Default::default(), ScriptMutability::Immutable).is_ok();
-        if !have {
-            let cols = DDL.iter().find(|x| x.0 == TN_AUDIT_HEAD).map(|x| x.1).unwrap_or_default();
-            root.run_script(&format!(":create {TN_AUDIT_HEAD} {cols}"), Default::default(), ScriptMutability::Mutable)?;
+        let have: BTreeSet<String> = root
+            .run_script("::relations", Default::default(), ScriptMutability::Immutable)?
+            .rows
+            .iter()
+            .filter_map(|r| r.first().and_then(|v| v.get_str()).map(|x| x.to_string()))
+            .collect();
+        for (name, cols) in DDL {
+            if !have.contains(*name) {
+                root.run_script(&format!(":create {name} {cols}"), Default::default(), ScriptMutability::Mutable)?;
+            }
+        }
+        if !have.contains(TN_AUDIT_HEAD) {
             self.tn_q(
                 &format!(
                     "last[ws, max(seq)] := *{TN_AUDIT}{{ws, seq}}\n\
@@ -1211,14 +1227,18 @@ where
             }
             "approve" | "reject" => {
                 let approver = need("as")?;
-                let pid = need("promotion")?;
+                let (key, rel, id) = match (gs("promotion"), gs("request")) {
+                    (Some(p), _) => ("promotion", TN_PROMOTION, p),
+                    (None, Some(r)) => ("request", TN_REQUEST, r),
+                    _ => bail!("tenant {op} needs 'promotion' or 'request'"),
+                };
                 let ws = self
-                    .tn_rows(&format!("?[ws] := *{TN_PROMOTION}{{id: $id, ws}}"), vec![("id", s(&pid))])?
+                    .tn_rows(&format!("?[ws] := *{rel}{{id: $id, ws}}"), vec![("id", s(&id))])?
                     .first()
                     .and_then(|r| cell_str(&r[0]))
-                    .ok_or_else(|| miette::miette!("promotion '{pid}' not found"))?;
+                    .ok_or_else(|| miette::miette!("{key} '{id}' not found"))?;
                 let ctx = PrincipalContext { workspace: Some(ws), human: Some(approver), ..Default::default() };
-                self.memory_call_as(&ctx, op, json!({"promotion": pid}))?
+                self.memory_call_as(&ctx, op, json!({key: id}))?
             }
             "get" | "list" => self.tenant_list(&need("kind")?)?,
             other => bail!(
@@ -1299,6 +1319,7 @@ where
             "member" => (TN_MEMBER, &["grp", "principal", "role"]),
             "grant" => (TN_GRANT, &["ws", "grantee", "role", "actions"]),
             "promotion" => (TN_PROMOTION, &["id", "ws", "from_ns", "ids", "target", "requested_by", "status", "approved_by", "result", "at"]),
+            "request" => (TN_REQUEST, &["id", "ws", "op", "ns", "ids", "requested_by", "status", "approved_by", "result", "at"]),
             other => bail!("tenant list: unknown kind '{other}'"),
         };
         let c = cols.join(", ");
