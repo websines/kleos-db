@@ -150,6 +150,10 @@ const LABEL_STOP: &[&str] = &[
     "amazing", "lovely", "fun", "good", "best", "happy", "sure", "totally", "definitely", "maybe", "stuff",
     "lot", "bit", "way", "something", "anything", "everything", "someone", "everyone", "guys", "chat", "talk",
     "memories", "support", "tough", "hard", "easy", "feel", "feeling", "felt",
+    // when, not what: dates and durations are values, never the property
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "weekend", "hour", "hours",
+    "minute", "minutes", "quarter", "night", "morning", "evening", "afternoon", "january", "february", "march",
+    "april", "june", "july", "august", "september", "october", "november", "december",
 ];
 
 /// Names a pool uses as speakers or to address someone ("Caroline:",
@@ -243,6 +247,9 @@ pub fn distinctive(cluster: &[&str], pool_df: &HashMap<String, usize>, pool_n: u
         for w in c.windows(2) {
             terms.insert(format!("{} {}", w[0], w[1]));
         }
+        for w in c.windows(3) {
+            terms.insert(format!("{} {} {}", w[0], w[1], w[2]));
+        }
         for x in terms {
             *df.entry(x).or_default() += 1;
         }
@@ -257,13 +264,56 @@ pub fn distinctive(cluster: &[&str], pool_df: &HashMap<String, usize>, pool_n: u
             (t, share, share / base)
         })
         .collect();
-    // bigrams that are as common as their words win the label
+    // phrases that are as common as their words win the label ("cloud
+    // vendor" over "vendor")
+    let boost = |t: &str| match t.matches(' ').count() {
+        0 => 1.0,
+        1 => 1.3,
+        _ => 1.45,
+    };
     out.sort_by(|a, b| {
-        let ka = a.1 * a.2.ln().max(0.0) * if a.0.contains(' ') { 1.3 } else { 1.0 };
-        let kb = b.1 * b.2.ln().max(0.0) * if b.0.contains(' ') { 1.3 } else { 1.0 };
-        kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal)
+        let ka = a.1 * a.2.ln().max(0.0) * boost(&a.0);
+        let kb = b.1 * b.2.ln().max(0.0) * boost(&b.0);
+        kb.partial_cmp(&ka).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
     });
     out
+}
+
+/// A count property's role: the noun most members put right after a number
+/// ("12 engineers", "now seats 40 people"), when at least half do.
+pub fn counted_noun(cluster: &[&str]) -> Option<String> {
+    let mut df: HashMap<String, usize> = HashMap::new();
+    for t in cluster {
+        let toks: Vec<String> = t
+            .split(|c: char| c.is_whitespace())
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let mut seen = BTreeSet::new();
+        for w in toks.windows(2) {
+            if w[0].chars().all(|c| c.is_ascii_digit()) && w[1].chars().all(|c| c.is_alphabetic()) && !STOP.contains(&w[1].as_str()) && !LABEL_STOP.contains(&w[1].as_str()) {
+                seen.insert(w[1].clone());
+            }
+        }
+        for x in seen {
+            *df.entry(x).or_default() += 1;
+        }
+    }
+    let (w, c) = df.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))?;
+    (c * 2 >= cluster.len() && c >= 2).then_some(w)
+}
+
+/// Words of a claim subject that a label must not use (they name who, not
+/// what): `team:data platform` → data, platform, team; `user.sister` →
+/// sister. A leading-name guess (`name:…`) is not used: it is often the
+/// sentence's first word ("Cloud vendor for …"); speakers and addressed names
+/// are already left out (`pool_names`).
+pub fn subject_words(subject: &str) -> Vec<String> {
+    match subject.split_once(':') {
+        Some(("team", n)) => n.split_whitespace().map(|w| w.to_string()).chain(["team".to_string()]).collect(),
+        Some(_) => vec![],
+        None => subject.split('.').skip(1).map(|w| w.to_string()).collect(),
+    }
 }
 
 pub fn pool_df(texts: &[&str]) -> HashMap<String, usize> {
@@ -273,6 +323,9 @@ pub fn pool_df(texts: &[&str]) -> HashMap<String, usize> {
         let mut terms: BTreeSet<String> = c.iter().cloned().collect();
         for w in c.windows(2) {
             terms.insert(format!("{} {}", w[0], w[1]));
+        }
+        for w in c.windows(3) {
+            terms.insert(format!("{} {} {}", w[0], w[1], w[2]));
         }
         for x in terms {
             *df.entry(x).or_default() += 1;
@@ -597,6 +650,44 @@ impl<'s, S: Storage<'s>> Db<S> {
         Ok(pts)
     }
 
+    /// The entity kind (as an ontology class: `Organization`, `Place`,
+    /// `Person`) that at least 60% of `ids` mention, from the extractor's
+    /// span labels, leaving out entities named like the subjects (`skip`);
+    /// `None` without extractor entities.
+    fn learn_value_kind(&'s self, ns: &str, ids: &[String], skip: &BTreeSet<String>) -> Result<Option<String>> {
+        // the extractor's span labels (kept spans), else the entity rows' kinds
+        let Ok(r) = self.ol_q(
+            "?[id, kind, name] := *kleos_mem_extract{ns: $ns, id, label: kind, text: name, kept}, kept, is_in(id, $ids) \
+             ?[id, kind, name] := *kleos_mem_mention{ns: $ns, id, eid}, is_in(id, $ids), \
+                 *kleos_mem_entity{ns: $ns, eid, kind, name}, !is_null(kind)",
+            vec![("ns", s(ns)), ("ids", strs(ids))],
+        ) else {
+            return Ok(None);
+        };
+        let mut per: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for x in &r.rows {
+            let (id, kind, name) = (cell(&x[0]), cell(&x[1]).to_lowercase(), cell(&x[2]).to_lowercase());
+            if name.split_whitespace().any(|w| skip.contains(w)) {
+                continue;
+            }
+            per.entry(kind).or_default().insert(id);
+        }
+        let Some((kind, n)) = per.into_iter().map(|(k, v)| (k, v.len())).max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))) else {
+            return Ok(None);
+        };
+        if (n as f64) < 0.6 * ids.len() as f64 {
+            return Ok(None);
+        }
+        let class = match kind.as_str() {
+            "organization" | "organisation" | "company" | "org" => "Organization",
+            "location" | "place" | "city" | "country" => "Place",
+            "person" | "relative" => "Person",
+            // a kind the ontologies have no class for stays a literal
+            _ => return Ok(None),
+        };
+        Ok(Some(class.to_string()))
+    }
+
     /// How many of `ids` a later one of them replaced (`supersedes` links).
     fn learn_replaced(&'s self, ns: &str, ids: &[String]) -> Result<usize> {
         let r = self.ol_q(
@@ -682,9 +773,28 @@ impl<'s, S: Storage<'s>> Db<S> {
                 continue;
             }
             let ctexts: Vec<&str> = members.iter().map(|&i| texts[i]).collect();
-            let terms = distinctive(&ctexts, &pdf, total, &names);
-            let Some((label, _, _)) = terms.iter().find(|t| t.1 >= 0.3).cloned() else { continue };
-            let cues: Vec<String> = terms.iter().filter(|t| t.1 >= 0.3).take(5).map(|t| t.0.clone()).collect();
+            let subjects: Vec<Option<String>> = ctexts.iter().map(|t| crate::ontology_type::subject(t)).collect();
+            // the words that name the subjects (team names, people) say who,
+            // not what: never a label or cue
+            let mut cnames = names.clone();
+            for x in subjects.iter().flatten() {
+                cnames.extend(subject_words(x));
+            }
+            let terms: Vec<(String, f64, f64)> = distinctive(&ctexts, &pdf, total, &cnames)
+                .into_iter()
+                .filter(|t| !t.0.split(' ').any(|w| cnames.contains(w)))
+                .collect();
+            let Some((mut label, _, _)) = terms.iter().find(|t| t.1 >= 0.3).cloned() else { continue };
+            let mut cues: Vec<String> = terms.iter().filter(|t| t.1 >= 0.3).take(5).map(|t| t.0.clone()).collect();
+            // a count names what it counts: "12 engineers" → `engineer_count`
+            if let Some(noun) = counted_noun(&ctexts) {
+                if label.split(' ').any(|w| w == noun) || !label.contains(' ') {
+                    label = format!("{} count", stem(&noun));
+                    if !cues.contains(&noun) {
+                        cues.insert(0, noun);
+                    }
+                }
+            }
             let evidence: Vec<String> = members.iter().map(|&i| pts[i].id.clone()).collect();
             let docs = members.iter().filter(|&&i| pts[i].kind == "doc").count();
             // a cluster on an existing property's prototype is vocabulary for it
@@ -703,7 +813,6 @@ impl<'s, S: Storage<'s>> Db<S> {
                     .map(|(pi, v)| (*pi, cosine(&centroid, v)))
                     .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             });
-            let subjects: Vec<Option<String>> = ctexts.iter().map(|t| crate::ontology_type::subject(t)).collect();
             let score = members.len() as f64 * coherence;
             let (kind, body) = match near {
                 Some((pi, x)) if x >= cal(knob("KLEOS_ONTO_VOCAB_SIM", 0.80)) => {
@@ -726,10 +835,15 @@ impl<'s, S: Storage<'s>> Db<S> {
                         name.push_str("_x");
                     }
                     used_names.insert(name.clone());
+                    // the extractor's type of the values: a cluster whose
+                    // claims mostly mention one kind of entity (other than
+                    // their subject) relates the subject to that kind
+                    let range = if sh.numeric { None } else { self.learn_value_kind(&ns, &evidence, &cnames)? };
                     let prop = OntoProp {
                         name: name.clone(),
-                        kind: "data".into(),
-                        datatype: Some(if sh.numeric { "number" } else { "string" }.into()),
+                        kind: if range.is_some() { "object" } else { "data" }.into(),
+                        range: range.iter().cloned().collect(),
+                        datatype: if range.is_some() { None } else { Some(if sh.numeric { "number" } else { "string" }.into()) },
                         card: sh.card.clone(),
                         temporal: sh.temporal,
                         label: label.clone(),
@@ -1213,6 +1327,35 @@ mod tests {
         let df = pool_df(&pool);
         let d = distinctive(&cluster, &df, pool.len(), &BTreeSet::new());
         assert!(d[0].0.contains("instagram") || d[0].0.contains("follower"), "{d:?}");
+    }
+
+    #[test]
+    fn phrase_and_role_labels() {
+        let cluster = [
+            "The data team now has 12 engineers.",
+            "Headcount update: the platform team is at 9 engineers now.",
+            "The search team grew to 7 engineers this quarter.",
+            "The mobile team now has 11 engineers.",
+        ];
+        assert_eq!(counted_noun(&cluster).as_deref(), Some("engineers"));
+        assert_eq!(counted_noun(&["I love sushi.", "My rent is 900 euros.", "Rome was nice."]), None);
+        assert_eq!(subject_words("team:data platform"), vec!["data", "platform", "team"]);
+        assert!(subject_words("name:cloud").is_empty());
+        assert_eq!(subject_words("user.sister"), vec!["sister"]);
+        let vendors = [
+            "The data team switched its cloud vendor to AWS.",
+            "Cloud vendor for payments is now GCP.",
+            "Our mobile workloads now run on Azure as the cloud vendor.",
+            "The search team moved to a new cloud vendor, Hetzner.",
+        ];
+        let pool: Vec<&str> = vendors.iter().copied().chain(["I love sushi.", "Lunch is on the third floor.", "The checkout service had an outage on Monday."]).collect();
+        let d = distinctive(&vendors, &pool_df(&pool), pool.len(), &BTreeSet::new());
+        assert_eq!(d[0].0, "cloud vendor", "{d:?}");
+        // weekdays are values, not labels
+        let outages = ["The checkout service had an outage on Monday.", "Incident: billing was down on Monday.", "The login service had an outage on Friday."];
+        let d = distinctive(&outages, &pool_df(&outages), outages.len(), &BTreeSet::new());
+        let l = LABEL_STOP;
+        assert!(d.iter().all(|t| !t.0.split(' ').any(|w| w == "monday") || !l.contains(&"monday")), "{d:?}");
     }
 
     #[test]

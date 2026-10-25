@@ -308,6 +308,13 @@ pub fn subject(text: &str) -> Option<String> {
             }
         }
     }
+    // a team as the sentence subject ("The backend team …", "Our data team
+    // …", "Our team …")
+    // (after a short heading label: "Headcount update: the data team …")
+    let after_label = b.split_once(':').filter(|(h, _)| h.split_whitespace().count() <= 3).map(|(_, r)| words(r));
+    if let Some(t) = team_subject(&ws, &me).or_else(|| after_label.and_then(|w| team_subject(&w, &me))) {
+        return Some(t);
+    }
     // first person in the first few words
     if ws.iter().take(4).any(|w| FIRST_PERSON.contains(&w.as_str())) {
         return Some(me);
@@ -333,6 +340,38 @@ pub fn subject(text: &str) -> Option<String> {
         return Some(me);
     }
     None
+}
+
+/// Words before "team" that don't name one ("the whole team").
+const TEAM_NOT_NAMES: &[&str] = &["whole", "entire", "same", "new", "other", "full", "a", "an", "this", "that", "every", "each"];
+
+/// A team that opens the sentence as its subject: `team:<name>` for "the
+/// data team" / "Our backend team" / "Platform team", `<me>.team` for "our
+/// team" / "my team" (the speaker's own). At most two name words; a team
+/// later in the sentence ("I joined the data team") is not the subject.
+fn team_subject(ws: &[String], me: &str) -> Option<String> {
+    let pos = ws.iter().take(5).position(|w| w == "team" || w == "squad" || w == "group")?;
+    let (own, start) = match ws.first().map(|w| w.as_str()) {
+        Some("our") | Some("my") => (true, 1),
+        Some("the") => (false, 1),
+        _ => (false, 0),
+    };
+    if pos < start {
+        return None;
+    }
+    let name: Vec<&str> = ws[start..pos].iter().map(|w| w.as_str()).filter(|w| !TEAM_NOT_NAMES.contains(w)).collect();
+    if name.len() > 2 || ws[start..pos].iter().any(|w| FIRST_PERSON.contains(&w.as_str()) || SECOND_PERSON.contains(&w.as_str())) {
+        return None;
+    }
+    if name.is_empty() {
+        // "our team", "the whole team" (the speaker's); a bare "team" or
+        // "the team" names nobody in particular
+        return (own || (start == 1 && pos > start)).then(|| format!("{me}.team"));
+    }
+    if name.iter().any(|w| !w.chars().all(|c| c.is_alphanumeric() || c == '-')) {
+        return None;
+    }
+    Some(format!("team:{}", name.join(" ")))
 }
 
 fn canon_kin(k: &str) -> &str {
@@ -734,6 +773,24 @@ mod tests {
         let f = edge_fact("Caroline", "son", "Max").unwrap();
         assert_eq!((f.s.as_str(), f.p.as_str(), f.o.as_str()), ("caroline", "parent_of", "max"));
         assert!(edge_fact("user", "neighbour", "user's neighbour").is_none());
+    }
+
+    #[test]
+    fn team_subjects() {
+        assert_eq!(subject("The data team now has 12 engineers.").as_deref(), Some("team:data"));
+        assert_eq!(subject("Our backend team switched to Postgres.").as_deref(), Some("team:backend"));
+        assert_eq!(subject("Platform team grew to 9 people.").as_deref(), Some("team:platform"));
+        assert_eq!(subject("The data platform team moved to Lisbon.").as_deref(), Some("team:data platform"));
+        assert_eq!(subject("Our team ships on Fridays.").as_deref(), Some("user.team"));
+        assert_eq!(subject("Maria: My team won the league!").as_deref(), Some("maria.team"));
+        assert_eq!(subject("Headcount update: the data team is at 9 engineers now.").as_deref(), Some("team:data"));
+        // a team later in the sentence is not its subject
+        assert_eq!(subject("I joined the data team last year.").as_deref(), Some("user"));
+        // two teams never replace each other's values; a team and its speaker neither
+        let a = act();
+        let t = |x: &str| type_claim(&a, None, x, None);
+        assert_eq!(gate(&a, &t("The data team now has 12 engineers."), &t("The platform team now has 8 engineers.")), Gate::Block);
+        assert_eq!(gate(&a, &t("Our team ships on Fridays."), &t("I ship on Fridays.")), Gate::Block);
     }
 
     #[test]
