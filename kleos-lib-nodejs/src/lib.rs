@@ -60,6 +60,8 @@ enum Work {
     EnableExtractor { name: String, spec: JsonValue },
     DisableExtractor { name: String },
     Admin { op: String, args: JsonValue },
+    Tenant { op: String, args: JsonValue },
+    MemoryAs { ctx: kleos::tenancy::PrincipalContext, op: String, args: JsonValue },
 }
 
 /// One call run on the libuv thread pool; resolves to JSON text.
@@ -84,6 +86,8 @@ fn run_work(db: Option<DbInstance>, work: Work) -> std::result::Result<JsonValue
         Work::Memory { op, args } => need_db()?.memory_call(&op, args).map_err(fmt),
         Work::Ontology { op, args } => need_db()?.ontology_call(&op, args).map_err(fmt),
         Work::Flow { op, args } => need_db()?.flow_call(&op, args).map_err(fmt),
+        Work::Tenant { op, args } => need_db()?.tenant_call(&op, args).map_err(fmt),
+        Work::MemoryAs { ctx, op, args } => need_db()?.memory_call_as(&ctx, &op, args).map_err(fmt),
         Work::Doc { op, args } => {
             let db = need_db()?;
             #[cfg(feature = "docs")]
@@ -315,6 +319,22 @@ impl KleosDb {
     pub fn flow_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
         let args = parse_json(&args_json, "args")?;
         Ok(job(Some(self.handle()?), Work::Flow { op, args }))
+    }
+
+    /// A tenancy admin op (docs/specs/tenancy.md): `DbInstance::tenant_call`.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn tenant_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::Tenant { op, args }))
+    }
+
+    /// A memory op as a principal (`ctx_json`: the principal context):
+    /// `DbInstance::memory_call_as`.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn memory_call_as(&self, ctx_json: String, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let ctx = serde_json::from_value(parse_json(&ctx_json, "ctx")?).map_err(|e| js_err(&format!("bad principal context: {e}")))?;
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::MemoryAs { ctx, op, args }))
     }
 
     /// A document admin op (`get`, `list`, `delete`, `reingest`): needs the

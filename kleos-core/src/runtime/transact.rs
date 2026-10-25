@@ -106,6 +106,32 @@ pub struct SessionTx<'a> {
     /// Set only while evaluating a subscription query: records every stored
     /// relation resolved by name, which is the query's dependency set.
     pub(crate) read_log: Option<crate::runtime::live::ReadLog>,
+    /// Workspace partition of the `Db` view this transaction came from
+    /// (docs/specs/tenancy.md, "Partitions"): every stored relation name is
+    /// routed to `<partition>@<name>`. `None`: the plain store.
+    pub(crate) partition: Option<SmartString<LazyCompact>>,
+    /// Told the names of the relations a successful commit wrote (the
+    /// tenancy write audit). `None` outside principal views.
+    pub(crate) write_sink: Option<Arc<dyn Fn(&[SmartString<LazyCompact>]) + Send + Sync>>,
+    /// Relations written so far, kept only when `write_sink` is set.
+    pub(crate) written: BTreeSet<SmartString<LazyCompact>>,
+}
+
+/// Relations that stay global in a partition view: the tenancy control
+/// plane (docs/specs/tenancy.md).
+pub(crate) const GLOBAL_PREFIX: &str = "kleos_tn_";
+
+/// The stored name of relation `name` in `partition` (`<p>@<name>`; an
+/// index `rel:idx` becomes `<p>@rel:idx`, which is also how an index of a
+/// routed relation is named). Temp relations, global relations and names
+/// already routed (they contain `@`) are left alone.
+pub(crate) fn route_name<'n>(partition: Option<&str>, name: &'n str) -> std::borrow::Cow<'n, str> {
+    match partition {
+        Some(p) if !name.starts_with('_') && !name.contains('@') && !name.starts_with(GLOBAL_PREFIX) => {
+            std::borrow::Cow::Owned(format!("{p}@{name}"))
+        }
+        _ => std::borrow::Cow::Borrowed(name),
+    }
 }
 
 /// One statement's worth of buffered writes to a tt-stamped relation.
@@ -278,7 +304,15 @@ impl<'a> SessionTx<'a> {
     pub(crate) fn mark_dirty(&mut self, handle: &RelationHandle) {
         if !handle.is_temp {
             self.dirty_relations.insert(handle.id);
+            if self.write_sink.is_some() {
+                self.written.insert(handle.name.clone());
+            }
         }
+    }
+
+    /// `name` as stored in this transaction's partition.
+    pub(crate) fn route<'n>(&self, name: &'n str) -> std::borrow::Cow<'n, str> {
+        route_name(self.partition.as_deref(), name)
     }
 
     /// Commit, maintaining the graph-projection freshness protocol
@@ -306,6 +340,12 @@ impl<'a> SessionTx<'a> {
         // Live subscriptions (F1): only a commit that succeeded is announced.
         if res.is_ok() {
             self.live.notify_commit(&self.dirty_relations);
+            if let Some(sink) = &self.write_sink {
+                if !self.written.is_empty() {
+                    let names: Vec<_> = std::mem::take(&mut self.written).into_iter().collect();
+                    sink(&names);
+                }
+            }
         }
         self.dirty_relations.clear();
         res

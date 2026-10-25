@@ -107,11 +107,19 @@ pub const MEM_EVENT: &str = "kleos_mem_event";
 /// extractor version (schema v7): `{ns, id, n => label, start, end, text,
 /// score, kept, eid, extractor, at}`.
 pub const MEM_EXTRACT: &str = "kleos_mem_extract";
+/// Who wrote a memory in principal mode (docs/specs/tenancy.md): `{ns, id
+/// => human?, agent?, run?, chain, at}`.
+pub const MEM_ACTOR: &str = "kleos_mem_actor";
+/// Provenance of a promoted copy: `{ns, id => from_ws, from_ns, from_id,
+/// chain, approved_by?, at}`.
+pub const MEM_PROMOTED: &str = "kleos_mem_promoted";
 /// Current schema version (2 added `kleos_mem_ns`; 3 added `kleos_mem_access`
 /// and `kleos_mem_life`, and entity merges / review links; 4 added
 /// `kleos_mem_role`; 5 added `kleos_mem_event`; 6 added the branch
-/// relations `kleos_mem_branch`, `kleos_mem_copied` and `kleos_mem_merge`).
-const SCHEMA_VERSION: i64 = 8;
+/// relations `kleos_mem_branch`, `kleos_mem_copied` and `kleos_mem_merge`;
+/// 9 added the tenancy provenance relations `kleos_mem_actor` and
+/// `kleos_mem_promoted`).
+const SCHEMA_VERSION: i64 = 9;
 
 /// The memory text index's analyzer. Stopwords run before the stemmer and use
 /// a short list of function words: the built-in `'en'` list (stopwords-iso)
@@ -819,6 +827,11 @@ pub struct RecallOpts {
     /// (memory_consolidate.rs; default true when summaries exist). Summary
     /// memories are hits only with `kind: 'summary'`.
     pub summaries: Option<bool>,
+    /// Hits from another partition (the org scope) merged in before the
+    /// precedence rule and the diverse selection (principal mode).
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub extra_hits: Vec<RecallHit>,
 }
 
 /// Options of [`Db::memory_set`]: change a memory's importance, expiry or
@@ -1122,6 +1135,9 @@ pub struct RecallHit {
     /// (PageRank neighbourhood).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// The scope the memory is in (principal mode, docs/specs/tenancy.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl RecallHit {
@@ -1529,8 +1545,39 @@ impl<'s, S: Storage<'s>> Db<S> {
             self.set_mem_config("version", Some("8".to_string()))?;
             cfg.version = 8;
         }
+        if cfg.version < 9 {
+            // v8 stores predate tenancy provenance
+            self.create_v9_relations()?;
+            self.set_mem_config("version", Some("9".to_string()))?;
+            cfg.version = 9;
+        }
         crate::memory_engram::ready(self, &cfg)?;
         Ok(Some(cfg))
+    }
+
+    fn create_v9_relations(&'s self) -> Result<()> {
+        let have: BTreeSet<String> = self
+            .run_script("::relations", Default::default(), ScriptMutability::Immutable)?
+            .rows
+            .iter()
+            .filter_map(|r| r.first().and_then(|v| v.get_str()).map(|x| x.to_string()))
+            .collect();
+        if !have.contains(MEM_ACTOR) {
+            self.mem_q(
+                &format!("{{:create {MEM_ACTOR} {{ns: String, id: String => human: String?, agent: String?, run: String?, chain: Json, at: Int}}}}"),
+                vec![],
+            )?;
+        }
+        if !have.contains(MEM_PROMOTED) {
+            self.mem_q(
+                &format!(
+                    "{{:create {MEM_PROMOTED} {{ns: String, id: String => from_ws: String, from_ns: String, from_id: String, chain: Json, \
+                      approved_by: String?, at: Int}}}}"
+                ),
+                vec![],
+            )?;
+        }
+        Ok(())
     }
 
     fn create_v7_relations(&'s self) -> Result<()> {
@@ -1657,6 +1704,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 self.create_v5_relations()?;
                 self.create_v6_relations()?;
                 self.create_v7_relations()?;
+                self.create_v9_relations()?;
                 self.mem_q(
                     &format!("::fts create {MEM}:fts {{extractor: text, tokenizer: Simple, filters: {MEM_FTS_FILTERS}}}"),
                     vec![],
@@ -1889,6 +1937,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         if let (Some(v), Some(_)) = (qvec, cfg.dim) {
             let filter = match (lineage, as_of.is_none()) {
+                // a principal's scopes: one pre-filter over all of them
+                (true, true) if sc.union => "is_in(ns, $lin) && current",
                 (false, true) => "ns == $ns && current",
                 (false, false) => "ns == $ns",
                 (true, true) => "(ns == $ns && current) || is_in(ns, $anc)",
@@ -2045,7 +2095,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         Ok(self
             .mem_q(
-                &format!("?[id, vt] := *{MEM}{{ns: $ns, id, vt}}, id in $ids"),
+                // `id` bound first: key-prefix reads, not a scan of the namespace
+                &format!("?[id, vt] := id in $ids, *{MEM}{{ns: $ns, id, vt}}"),
                 vec![("ns", s(sc.ns())), ("ids", str_list(ids))],
             )?
             .rows
@@ -3277,6 +3328,28 @@ impl<'s, S: Storage<'s>> Db<S> {
                     "{{?[ns, id, vt, text, kind, source, created, importance] <- $mems \
                       :put {MEM} {{ns, id, vt => text, kind, source, created, importance}}}}"
                 ));
+                // principal mode: who wrote it, in the same transaction
+                if let Some([h, a, r, c]) = self.view.as_ref().and_then(|v| v.actor.clone()) {
+                    let rows: Vec<DataValue> = mems
+                        .iter()
+                        .filter_map(|m| match m {
+                            DataValue::List(x) if x.len() > 1 => Some(DataValue::List(vec![
+                                x[0].clone(),
+                                x[1].clone(),
+                                h.clone(),
+                                a.clone(),
+                                r.clone(),
+                                c.clone(),
+                                DataValue::from(now_micros()),
+                            ])),
+                            _ => None,
+                        })
+                        .collect();
+                    script.push_str(&format!(
+                        "{{?[ns, id, human, agent, run, chain, at] <- $actors :put {MEM_ACTOR} {{ns, id => human, agent, run, chain, at}}}}"
+                    ));
+                    p.push(("actors", DataValue::List(rows)));
+                }
                 p.push(("mems", DataValue::List(mems)));
             }
             if !lives.is_empty() {
@@ -3761,9 +3834,24 @@ impl<'s, S: Storage<'s>> Db<S> {
                         self.mem_q(&meta, vec![("ns", s(&sc.levels[l].ns)), ("ids", str_list(&group))])?.rows,
                     );
                 }
-                for (cand, news) in self.pending_of(&sc, &ids, read_at)? {
-                    for n in news {
-                        meta_rows.push(vec![s("p"), s(&cand), s(&n), DataValue::Null]);
+                if sc.union {
+                    // a principal's scopes: no cuts, and a decision lives in
+                    // the namespace of its new memory, so one query
+                    meta_rows.extend(
+                        self.mem_q(
+                            &format!(
+                                "?[tag, id, a, b] := ns in $lin, *{MEM_DECISION}{{ns, new, cand: id, template: 'supersedes', status: 'pending'}}, \
+                                   is_in(id, $ids), *{MEM}{{ns, id: new @ $at}}, tag = 'p', a = new, b = null"
+                            ),
+                            vec![("lin", str_list(&sc.names())), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
+                        )?
+                        .rows,
+                    );
+                } else {
+                    for (cand, news) in self.pending_of(&sc, &ids, read_at)? {
+                        for n in news {
+                            meta_rows.push(vec![s("p"), s(&cand), s(&n), DataValue::Null]);
+                        }
                     }
                 }
             }
@@ -3886,11 +3974,25 @@ impl<'s, S: Storage<'s>> Db<S> {
                     events: sev.get(&id).cloned().unwrap_or_default(),
                     doc: None,
                     via: via.get(&id).cloned(),
+                    scope: None,
                     id,
                 })
             })
             .collect();
-        if blend || !expanded.is_empty() || !qdates.is_empty() || gmode != "off" {
+        // principal mode: each hit's scope, hits of the org partition, and
+        // precedence across scopes (docs/specs/tenancy.md)
+        if sc.union || !opts.extra_hits.is_empty() {
+            let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+            let own = self.mem_owners(&sc, &ids)?;
+            for h in hits.iter_mut() {
+                if let Some(l) = own.get(&h.id) {
+                    h.scope = Some(sc.levels[*l].ns.clone());
+                }
+            }
+            hits.extend(std::mem::take(&mut opts.extra_hits));
+            hits = self.scope_precedence(&sc, hits)?;
+        }
+        if blend || !expanded.is_empty() || !qdates.is_empty() || gmode != "off" || sc.union {
             // stable: equal scores keep the relevance order
             hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         }
@@ -3935,6 +4037,63 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         }
         Ok(hits)
+    }
+
+    /// Read-time precedence across scopes (docs/specs/tenancy.md): an exact
+    /// restatement, or a value of the same subject and single-valued
+    /// ontology property, in a broader scope gives way to the narrower
+    /// scope's memory. Supersession itself never crosses scopes.
+    fn scope_precedence(&'s self, sc: &Scope, hits: Vec<RecallHit>) -> Result<Vec<RecallHit>> {
+        let rank = |h: &RecallHit| -> u8 {
+            h.scope.as_deref().map_or(5, |n| crate::tenancy::ScopeKey::parse(n, n == "org").rank())
+        };
+        // (subject, property) of typed claims, single-valued properties only
+        let mut slot: BTreeMap<String, (String, String)> = BTreeMap::new();
+        if sc.levels.len() > 1 {
+            let single: BTreeSet<String> = match self.onto_active(sc.ns())? {
+                Some(act) => act.props.iter().filter(|p| p.single()).map(|p| p.name.clone()).collect(),
+                None => BTreeSet::new(),
+            };
+            let ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+            if !single.is_empty() {
+                if let Ok(r) = self.run_script(
+                    &format!(
+                        "?[id, subject, prop] := ns in $lin, id in $ids, *{}{{ns, id, subject, prop}}, !is_null(subject), !is_null(prop)",
+                        crate::ontology::MEM_TYPE
+                    ),
+                    params(vec![("lin", str_list(&sc.names())), ("ids", str_list(&ids))]),
+                    ScriptMutability::Immutable,
+                ) {
+                    for row in r.rows {
+                        if let (Some(id), Some(sub), Some(prop)) = (cell_str(&row[0]), cell_str(&row[1]), cell_str(&row[2])) {
+                            if single.contains(&prop) {
+                                slot.insert(id, (sub, prop));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // the narrowest scope holding each text / slot
+        let mut best_text: BTreeMap<String, u8> = BTreeMap::new();
+        let mut best_slot: BTreeMap<(String, String), u8> = BTreeMap::new();
+        for h in &hits {
+            let r = rank(h);
+            let t = best_text.entry(norm_text(h.memory_text())).or_insert(r);
+            *t = (*t).min(r);
+            if let Some(k) = slot.get(&h.id) {
+                let b = best_slot.entry(k.clone()).or_insert(r);
+                *b = (*b).min(r);
+            }
+        }
+        Ok(hits
+            .into_iter()
+            .filter(|h| {
+                let r = rank(h);
+                best_text.get(&norm_text(h.memory_text())).map_or(true, |b| *b >= r)
+                    && slot.get(&h.id).map_or(true, |k| best_slot.get(k).map_or(true, |b| *b >= r))
+            })
+            .collect())
     }
 
     /// Entity-graph expansion for `recall`: the canonical entities (merges
@@ -4197,14 +4356,26 @@ impl<'s, S: Storage<'s>> Db<S> {
                 nodes.insert(n);
             }
         }
-        let profiles = self.profiles_of(&ns, &nodes)?;
+        // per-scope profiles, composed by precedence (narrowest first)
+        let mut profiles: Vec<(String, String)> = vec![];
+        let mut seen_nodes: BTreeSet<String> = BTreeSet::new();
+        for lns in if sc.union { sc.names() } else { vec![ns.clone()] } {
+            for (node, text) in self.profiles_of(&lns, &nodes)? {
+                if seen_nodes.insert(node.clone()) {
+                    profiles.push((node, text));
+                }
+            }
+        }
         // session summaries of the hits' conversations, best-ranked first
         let groups: Vec<String> = if want_summaries {
             items.iter().filter_map(|it| it.source.as_deref().map(|s| memory_recall::source_group(s).to_string())).unique().collect()
         } else {
             vec![]
         };
-        let summaries = self.summaries_of(&ns, &groups)?;
+        let mut summaries = vec![];
+        for lns in if sc.union { sc.names() } else { vec![ns.clone()] } {
+            summaries.extend(self.summaries_of(&lns, &groups)?);
+        }
         if profiles.is_empty() && summaries.is_empty() {
             return Ok(memory_recall::render_context(&items, budget, show_source));
         }
@@ -4648,6 +4819,31 @@ impl<'s, S: Storage<'s>> Db<S> {
                ?[relation, a, b] := *{ENTITY_LINKS}{{relation, a, b}}, relation = $erel, gone[b] \
                :rm {ENTITY_LINKS} {{relation, a, b}}}}"
         ));
+        // graph attributes and provenance of the erased memories: their
+        // types, ontology facts and nodes they are evidence of, and who
+        // wrote or promoted them (docs/specs/tenancy.md, "Erasure")
+        let has = |n: &str| self.transact().map(|tx| tx.get_relation(n, false).is_ok()).unwrap_or(false);
+        {
+            use crate::ontology::{MEM_TYPE, ONTO_FACT, ONTO_NODE};
+            if has(MEM_TYPE) {
+                script.push_str(&format!("{{?[ns, id] := *{MEM_TYPE}{{ns, id}}, ns = $ns, id in $ids :rm {MEM_TYPE} {{ns, id}}}}"));
+            }
+            if has(ONTO_FACT) {
+                script.push_str(&format!(
+                    "{{?[ns, s, p, o, vt] := *{ONTO_FACT}{{ns, s, p, o, vt, mem}}, ns = $ns, is_in(mem, $ids) :rm {ONTO_FACT} {{ns, s, p, o, vt}}}}"
+                ));
+            }
+            if has(ONTO_NODE) {
+                script.push_str(&format!(
+                    "{{?[ns, node, vt] := *{ONTO_NODE}{{ns, node, vt, mem}}, ns = $ns, is_in(mem, $ids) :rm {ONTO_NODE} {{ns, node, vt}}}}"
+                ));
+            }
+        }
+        for rel in [MEM_ACTOR, MEM_PROMOTED] {
+            if has(rel) {
+                script.push_str(&format!("{{?[ns, id] := *{rel}{{ns, id}}, ns = $ns, id in $ids :rm {rel} {{ns, id}}}}"));
+            }
+        }
         let mut p = vec![("ns", s(ns)), ("ids", str_list(&exist)), ("eids", str_list(&eids))];
         let job = Job { op: "erase", mem_ids: &exist, old: &[], text: None, at: now_micros(), entities: &[] };
         if let Some((frag, ps)) = engram_hook::enqueue(cfg, job) {

@@ -74,6 +74,10 @@ pub struct Conn {
     pub principal: String,
     /// A read-only principal may call only read tools.
     pub read_only: bool,
+    /// Principal mode (docs/specs/tenancy.md): the authenticated principal;
+    /// memory tools then run through `memory_call_as`, with `scope` in place
+    /// of `ns`.
+    pub as_principal: Option<kleos::tenancy::PrincipalContext>,
 }
 
 /// The era a request is served in.
@@ -334,6 +338,8 @@ impl McpServer {
     /// The tool list, in a fixed order.
     pub fn tools(&self) -> Vec<Value> {
         let ns = json!({"type": "string", "description": "Namespace (one per user or project); default from the server"});
+        let scope = json!({"type": "string", "description": "Principal mode: the scope to write (agent_user, user, run, team:<id>, workspace); default the narrowest"});
+        let scopes = json!({"type": "array", "items": {"type": "string"}, "description": "Principal mode: scope kinds to read (default all readable)"});
         let mut tools = vec![
             json!({
                 "name": "recall",
@@ -342,6 +348,7 @@ impl McpServer {
                 "inputSchema": {"type": "object", "properties": {
                     "query": {"type": "string"},
                     "ns": ns,
+                    "scopes": scopes,
                     "format": {"type": "string", "enum": ["context", "list"]},
                     "budget": {"type": "integer", "description": "Token budget of the context block (default 1000)"},
                     "k": {"type": "integer", "description": "Number of hits (list format)"},
@@ -357,6 +364,7 @@ impl McpServer {
                 "inputSchema": {"type": "object", "properties": {
                     "text": {"type": "string"},
                     "ns": ns,
+                    "scope": scope,
                     "attachments": {"type": "array", "items": {"type": "object", "properties": {
                         "path": {"type": "string"}, "data_b64": {"type": "string"}, "mime": {"type": "string"}, "name": {"type": "string"}
                     }}},
@@ -542,7 +550,76 @@ impl McpServer {
         args.get("ns").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()).unwrap_or_else(|| self.default_ns.clone())
     }
 
+    /// A memory op as the connection's principal: `ns` gives way to the
+    /// principal's scopes.
+    fn call_as(&self, ctx: &kleos::tenancy::PrincipalContext, op: &str, mut args: Value) -> Result<Value, String> {
+        let Backend::Embedded(db) = &self.backend else {
+            return Err("principal mode needs an embedded store".into());
+        };
+        if let Value::Object(m) = &mut args {
+            m.remove("ns");
+        }
+        db.memory_call_as(ctx, op, args).map_err(|e| e.to_string())
+    }
+
+    fn run_tool_as(&self, ctx: &kleos::tenancy::PrincipalContext, name: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
+        let pick = |keys: &[&str]| -> Map<String, Value> {
+            let mut m = Map::new();
+            for k in keys {
+                if let Some(v) = args.get(*k).filter(|v| !v.is_null()) {
+                    m.insert((*k).to_string(), v.clone());
+                }
+            }
+            m
+        };
+        Ok(match name {
+            "recall" => {
+                let mut m = pick(&["query", "k", "budget", "as_of", "sources", "scopes"]);
+                let format = args.get("format").and_then(|f| f.as_str()).unwrap_or("context");
+                match self.call_as(ctx, if format == "context" { "context" } else { "recall" }, Value::Object(std::mem::take(&mut m))) {
+                    Ok(v) if format == "context" => {
+                        let text = v.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+                        let text = if text.trim().is_empty() { "(no memories found)".to_string() } else { text };
+                        ToolOut::Done { text, structured: v, is_error: false }
+                    }
+                    Ok(v) => done(json!({"hits": v})),
+                    Err(e) => tool_error(e),
+                }
+            }
+            "remember" => match self.call_as(ctx, "remember", Value::Object(pick(&["text", "entities", "at", "priority", "scope"]))) {
+                Ok(v) => done(v),
+                Err(e) => tool_error(e),
+            },
+            "reflect" => match self.call_as(ctx, "reflect", Value::Object(pick(&["since", "limit", "scope"]))) {
+                Ok(v) => done(v),
+                Err(e) => tool_error(e),
+            },
+            "forget" => {
+                let mut ids: Vec<String> = args.get("ids").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                if let Some(id) = args.get("id").and_then(|v| v.as_str()) {
+                    ids.push(id.to_string());
+                }
+                if ids.is_empty() {
+                    return Ok(tool_error("forget needs 'id' or 'ids'"));
+                }
+                let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("retract").to_string();
+                let message = format!("{} {} memor{}?", if mode == "erase" { "Erase (permanently delete)" } else { "Retract" }, ids.len(), if ids.len() == 1 { "y" } else { "ies" });
+                match self.confirm("forget", args, params, era, conn, &message)? {
+                    Confirm::Yes => match self.call_as(ctx, "forget", json!({"ids": ids, "mode": mode})) {
+                        Ok(v) => done(v),
+                        Err(e) => tool_error(e),
+                    },
+                    other => other.into_out(),
+                }
+            }
+            other => tool_error(format!("'{other}' is not available to principals yet; use recall, remember, forget or reflect")),
+        })
+    }
+
     fn run_tool(&self, name: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
+        if let Some(ctx) = &conn.as_principal {
+            return self.run_tool_as(ctx, name, args, params, era, conn);
+        }
         let ns = self.ns_arg(args);
         let b = &self.backend;
         let pick = |keys: &[&str]| -> Map<String, Value> {

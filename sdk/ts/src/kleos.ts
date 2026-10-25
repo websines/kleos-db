@@ -29,6 +29,7 @@ import type {
   RememberResult,
   HybridQuery,
   DecideResult,
+  PrincipalContext,
 } from './types.js';
 
 type Opts = Record<string, unknown> | undefined;
@@ -279,6 +280,21 @@ export class Kleos {
   }
   extractors(): Promise<NamedRows> {
     return this.run('::extractor list', {}, { immutable: true });
+  }
+
+  // ---- tenancy (docs/specs/tenancy.md) ------------------------------------
+
+  /** A tenancy admin op: `orgCreate`-style ops are `tenant('org_create', {...})`. */
+  tenant(op: string, args: Record<string, unknown> = {}): Promise<any> {
+    return this.backend.tenant(op, args);
+  }
+
+  /**
+   * A memory op as a principal (`remember`, `recall`, `context`, `forget`,
+   * `promote`, `approve`, ...), with `scope` in place of `ns`.
+   */
+  memoryAs(ctx: PrincipalContext, op: string, args: Record<string, unknown> = {}): Promise<any> {
+    return this.backend.memoryAs(ctx, op, snakeKeys(args));
   }
 
   /** Close the store (embedded) or release the client (remote). */

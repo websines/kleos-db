@@ -1562,6 +1562,42 @@ impl CozoDbPy {
         let out = py.allow_threads(|| db.ontology_call(op, a)).map_err(report2py)?;
         Ok(json_to_py(out, py))
     }
+    /// Tenancy admin op (kleos fork; docs/specs/tenancy.md): `org_create`,
+    /// `ws_create`, `team_create`, `principal_create`, `member_add`, `grant`,
+    /// `revoke`, `policy_set`, `apikey_create`, `erase`, `approve`, `audit`,
+    /// `audit_verify`, `scopes`, `list`, ... with `args` (a dict). The
+    /// embedding host is trusted: check who may administer before calling.
+    #[pyo3(signature = (op, args=None))]
+    pub fn tenant(&self, py: Python<'_>, op: &str, args: Option<&PyAny>) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let a = match args {
+            None => serde_json::Value::Null,
+            Some(x) if x.is_none() => serde_json::Value::Null,
+            Some(x) => serde_json::Value::from(py_to_value(x)?),
+        };
+        let out = py.allow_threads(|| db.tenant_call(op, a)).map_err(report2py)?;
+        Ok(json_to_py(out, py))
+    }
+    /// A memory op as a principal (kleos fork; docs/specs/tenancy.md):
+    /// `ctx` is the principal context (a dict: `workspace`, `human`, `agent`,
+    /// `run`, `participants`, `chain`, `token`, ...), `op` one of
+    /// `remember`, `recall`, `context`, `forget`, `set`, `link`, `reflect`,
+    /// `consolidate`, `promote`, `approve`, `reject`, `fork`, `merge`,
+    /// `discard`, `diff`, `flow`, `doc`, `ontology`, `scopes`; `args` the
+    /// memory API's options with `scope` in place of `ns`.
+    #[pyo3(signature = (ctx, op, args=None))]
+    pub fn memory_as(&self, py: Python<'_>, ctx: &PyAny, op: &str, args: Option<&PyAny>) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let c: ::kleos::tenancy::PrincipalContext = serde_json::from_value(serde_json::Value::from(py_to_value(ctx)?))
+            .map_err(|e| PyException::new_err(format!("bad principal context: {e}")))?;
+        let a = match args {
+            None => serde_json::Value::Null,
+            Some(x) if x.is_none() => serde_json::Value::Null,
+            Some(x) => serde_json::Value::from(py_to_value(x)?),
+        };
+        let out = py.allow_threads(|| db.memory_call_as(&c, op, a)).map_err(report2py)?;
+        Ok(json_to_py(out, py))
+    }
     /// Durable workflows (kleos fork; docs/specs/durable-workflows.md): run
     /// flow op `op` (`define`, `start`, `signal`, `cancel`, `status`,
     /// `list`, `history`, `stats`, `schedule`, `claim`, `step`, `record`,

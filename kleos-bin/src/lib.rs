@@ -8,6 +8,7 @@
 //! stateless MCP server and the backend they share
 //! (docs/specs/mcp-cli-skills.md).
 
+pub mod auth;
 pub mod backend;
 pub mod cli;
 pub mod config;
