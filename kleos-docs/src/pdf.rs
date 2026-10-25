@@ -240,6 +240,8 @@ pub struct Census {
     pub images: usize,
     /// summed image bounds, in square points
     pub image_area: f64,
+    /// each image's bounds in page space (l, b, r, t; points)
+    pub image_rects: Vec<[f64; 4]>,
     pub paths: usize,
     pub shadings: usize,
 }
@@ -285,6 +287,30 @@ impl PageRef<'_> {
             let bmp = self.l.FPDFBitmap_CreateEx(bw, bh, BITMAP_GRAY, std::ptr::null_mut(), 0);
             self.l.FPDFBitmap_FillRect(bmp, 0, 0, bw, bh, 0xFFFF_FFFF);
             self.l.FPDF_RenderPageBitmap(bmp, self.page, 0, 0, bw, bh, 0, RENDER_FLAGS);
+            let stride = self.l.FPDFBitmap_GetStride(bmp) as usize;
+            let buf = self.l.FPDFBitmap_GetBuffer(bmp) as *const u8;
+            let mut data = Vec::with_capacity((bw * bh) as usize);
+            for y in 0..bh as usize {
+                let row = std::slice::from_raw_parts(buf.add(y * stride), bw as usize);
+                data.extend_from_slice(row);
+            }
+            self.l.FPDFBitmap_Destroy(bmp);
+            Gray::from_raw(bw as usize, bh as usize, data)
+        }
+    }
+
+    /// Grayscale render of the pixel rectangle `[x0, y0, x1, y1)` of the page
+    /// rendered at `scale` (same pixels as cropping [`Self::render_gray`],
+    /// without rendering the rest).
+    pub fn render_gray_region(&self, scale: f64, rect: [usize; 4]) -> Gray {
+        let (w, h) = self.size();
+        let (fw, fh) = (((w * scale).ceil() as i32).max(1), ((h * scale).ceil() as i32).max(1));
+        let (x0, y0) = (rect[0] as i32, rect[1] as i32);
+        let (bw, bh) = (((rect[2] - rect[0]) as i32).max(1), ((rect[3] - rect[1]) as i32).max(1));
+        unsafe {
+            let bmp = self.l.FPDFBitmap_CreateEx(bw, bh, BITMAP_GRAY, std::ptr::null_mut(), 0);
+            self.l.FPDFBitmap_FillRect(bmp, 0, 0, bw, bh, 0xFFFF_FFFF);
+            self.l.FPDF_RenderPageBitmap(bmp, self.page, -x0, -y0, fw, fh, 0, RENDER_FLAGS);
             let stride = self.l.FPDFBitmap_GetStride(bmp) as usize;
             let buf = self.l.FPDFBitmap_GetBuffer(bmp) as *const u8;
             let mut data = Vec::with_capacity((bw * bh) as usize);
@@ -351,6 +377,7 @@ impl PageRef<'_> {
                         let (mut l, mut b, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
                         if self.l.FPDFPageObj_GetBounds(o, &mut l, &mut b, &mut r, &mut t) != 0 {
                             c.image_area += ((r - l).abs() * (t - b).abs()) as f64;
+                            c.image_rects.push([l.min(r) as f64, b.min(t) as f64, l.max(r) as f64, b.max(t) as f64]);
                         }
                     }
                     OBJ_PATH => c.paths += 1,

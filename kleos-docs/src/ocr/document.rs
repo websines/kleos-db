@@ -242,12 +242,21 @@ pub struct Prepared {
     /// a simple digital page read from its text layer's geometry alone (no
     /// render, no detector): see `Converter::simple_page`
     pub fast: bool,
+    /// a mixed page on the fast path: its embedded images, rendered at
+    /// `scale` (pixel rectangle, render), to be OCR'd on their own
+    pub regions: Vec<([usize; 4], Gray)>,
 }
 
 /// Fast-path limits: a page with more vector drawing or image area than this
 /// goes through the detector (tables, figures, mixed pages).
 const FAST_MAX_PATHS: usize = 40;
 const FAST_MAX_IMAGE_SHARE: f64 = 0.01;
+/// A mixed page (a simple text layer plus embedded images covering at most
+/// this share of the page) keeps its text layer and OCRs only the images.
+const MIXED_MAX_IMAGE_SHARE: f64 = 0.6;
+/// Images smaller than this (pixels at the render scale, either side) carry
+/// no readable line.
+const MIXED_MIN_REGION: usize = 24;
 
 pub struct Converter<'a> {
     pub ocr: &'a Ocr,
@@ -278,7 +287,7 @@ impl<'a> Converter<'a> {
         Ok(doc.with_page(index, |page| {
             let size = page.size();
             let k = self.page_scale(size);
-            let mut p = Prepared { size, scale: k, upright: None, layer: None, gray: Gray::new(1, 1, 255), text_ms: 0.0, render_ms: 0.0, fast: false };
+            let mut p = Prepared { size, scale: k, upright: None, layer: None, gray: Gray::new(1, 1, 255), text_ms: 0.0, render_ms: 0.0, fast: false, regions: vec![] };
             if self.mode != Mode::Ocr {
                 let t0 = std::time::Instant::now();
                 let s = CHECK_DPI / 72.0;
@@ -306,10 +315,48 @@ impl<'a> Converter<'a> {
                     tl.stats.vertical = true;
                 }
                 p.text_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                if self.fast_digital && self.mode == Mode::Auto && p.upright.is_none() && self.simple_page(&tl, size, &page.census()) {
+                let census = page.census();
+                if self.fast_digital && self.mode == Mode::Auto && p.upright.is_none() && self.simple_page(&tl, size, &census) {
                     p.layer = Some(tl);
                     p.fast = true;
                     return p;
+                }
+                // a mixed page: text where the layer has it, OCR only on the
+                // images (rendered alone, not the whole page)
+                if self.fast_digital && self.mode == Mode::Auto && self.image_ocr && p.upright.is_none() && !census.image_rects.is_empty() {
+                    // image bounds in the rendered frame (points, top-left origin)
+                    let a = page.device_affine();
+                    let dev: Vec<[f64; 4]> = census
+                        .image_rects
+                        .iter()
+                        .map(|r| {
+                            let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+                            for (x, y) in [(r[0], r[1]), (r[2], r[1]), (r[0], r[3]), (r[2], r[3])] {
+                                let dx = a[0][0] * x + a[0][1] * y + a[0][2];
+                                let dy = a[1][0] * x + a[1][1] * y + a[1][2];
+                                x0 = x0.min(dx);
+                                x1 = x1.max(dx);
+                                y0 = y0.min(dy);
+                                y1 = y1.max(dy);
+                            }
+                            [x0, y0, x1, y1]
+                        })
+                        .collect();
+                    if self.mixed_page(&tl, size, &census, &dev) {
+                        let t1 = std::time::Instant::now();
+                        let (fw, fh) = ((size.0 * k).ceil() as usize, (size.1 * k).ceil() as usize);
+                        for d in &dev {
+                            let rect = [(d[0] * k).floor().max(0.0) as usize, (d[1] * k).floor().max(0.0) as usize, ((d[2] * k).ceil() as usize).min(fw), ((d[3] * k).ceil() as usize).min(fh)];
+                            if rect[2] < rect[0] + MIXED_MIN_REGION || rect[3] < rect[1] + MIXED_MIN_REGION {
+                                continue;
+                            }
+                            p.regions.push((rect, page.render_gray_region(k, rect)));
+                        }
+                        p.render_ms = t1.elapsed().as_secs_f64() * 1000.0;
+                        p.layer = Some(tl);
+                        p.fast = true;
+                        return p;
+                    }
                 }
                 p.layer = Some(tl);
             }
@@ -339,7 +386,7 @@ impl<'a> Converter<'a> {
         };
         if p.fast {
             if let Some(tl) = &p.layer {
-                return Ok(stamp(self.geometry_page(tl, p.size, p.scale)?, &p));
+                return Ok(stamp(self.geometry_page(tl, p.size, p.scale, &p.regions)?, &p));
             }
         }
         if let Some((tl0, g0, k0)) = &p.upright {
@@ -372,11 +419,38 @@ impl<'a> Converter<'a> {
     /// or vector drawing (tables, figures); and one column (no two lines side
     /// by side on the same band).
     fn simple_page(&self, tl: &TextLayer, size: (f64, f64), census: &crate::pdf::Census) -> bool {
+        census.image_area <= FAST_MAX_IMAGE_SHARE * size.0 * size.1 && self.simple_layout(tl, census)
+    }
+
+    /// A page whose text layer is a simple one (`simple_layout`) and that
+    /// also holds embedded images (more than the fast path's image share, at
+    /// most `MIXED_MAX_IMAGE_SHARE` of the page, none overlapping a layer
+    /// line): read as text plus OCR of the images.
+    fn mixed_page(&self, tl: &TextLayer, size: (f64, f64), census: &crate::pdf::Census, dev: &[[f64; 4]]) -> bool {
+        let area = size.0 * size.1;
+        if dev.is_empty() || census.image_area <= FAST_MAX_IMAGE_SHARE * area || census.image_area > MIXED_MAX_IMAGE_SHARE * area {
+            return false;
+        }
+        // text drawn over an image (a caption box, a watermark) would be read
+        // twice; `dev` and the layer's boxes are both top-left points
+        let over = tl.lines.iter().any(|l| {
+            dev.iter().any(|r| {
+                let ix = l.bbox[2].min(r[2]) - l.bbox[0].max(r[0]);
+                let iy = l.bbox[3].min(r[3]) - l.bbox[1].max(r[1]);
+                ix > 0.0 && iy > 0.0 && ix * iy > 0.3 * (l.bbox[2] - l.bbox[0]) * (l.bbox[3] - l.bbox[1])
+            })
+        });
+        !over && self.simple_layout(tl, census)
+    }
+
+    /// The layout half of `simple_page`: trusted, upright, horizontal, Latin,
+    /// readable, little vector drawing, one column.
+    fn simple_layout(&self, tl: &TextLayer, census: &crate::pdf::Census) -> bool {
         let st = &tl.stats;
         if !tl.trusted || tl.lines.is_empty() || st.turn != 0 || st.frame != 0 || st.vertical || !tl.rotated.is_empty() {
             return false;
         }
-        if census.paths > FAST_MAX_PATHS || census.shadings > 0 || census.image_area > FAST_MAX_IMAGE_SHARE * size.0 * size.1 {
+        if census.paths > FAST_MAX_PATHS || census.shadings > 0 {
             return false;
         }
         let all: String = tl.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" ");
@@ -420,7 +494,7 @@ impl<'a> Converter<'a> {
     /// A simple digital page from its text layer: lines are the layer's runs
     /// merged per baseline band, in the same token form the detector path
     /// builds, then the usual order, layout and Markdown.
-    fn geometry_page(&self, tl: &TextLayer, size: (f64, f64), k: f64) -> Result<Page, DocError> {
+    fn geometry_page(&self, tl: &TextLayer, size: (f64, f64), k: f64, regions: &[([usize; 4], Gray)]) -> Result<Page, DocError> {
         let mut t = std::collections::HashMap::new();
         t.insert("det_ms".to_string(), 0.0);
         let (w, h) = (((size.0 * k).ceil() as usize).max(1), ((size.1 * k).ceil() as usize).max(1));
@@ -459,11 +533,42 @@ impl<'a> Converter<'a> {
             kb.push([(bb[0] * k) as f32, (bb[1] * k) as f32, (bb[2] * k) as f32, (bb[3] * k) as f32]);
             kr.push((txt, 1.0, tk));
         }
+        // the images of a mixed page: detection and recognition on each image
+        // alone, boxes and token positions moved to page pixels
+        let mut ocr_lines = 0;
+        if !regions.is_empty() {
+            let (mut det_ms, mut rec_ms) = (0.0, 0.0);
+            for (rect, g) in regions {
+                let t0 = std::time::Instant::now();
+                let det = self.ocr.detect(g)?;
+                det_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                if det.is_empty() {
+                    continue;
+                }
+                let t0 = std::time::Instant::now();
+                let recs = self.ocr.recognize(g, &det, false)?;
+                rec_ms += t0.elapsed().as_secs_f64() * 1000.0;
+                let (ox, oy) = (rect[0] as f32, rect[1] as f32);
+                for (b, mut r) in det.iter().zip(recs) {
+                    if r.0.trim().is_empty() {
+                        continue;
+                    }
+                    for tk in r.2.iter_mut() {
+                        tk.x += ox as f64;
+                    }
+                    kb.push([b[0] + ox, b[1] + oy, b[2] + ox, b[3] + oy]);
+                    kr.push(r);
+                    ocr_lines += 1;
+                }
+            }
+            t.insert("det_ms".to_string(), det_ms);
+            t.insert("rec_ms".to_string(), rec_ms);
+        }
         let mut out = self.ocr.assemble((w, h), kb, kr, t, false, None)?;
-        out.source = "text".into();
+        out.source = if ocr_lines > 0 { "hybrid" } else { "text" }.into();
         out.rotation = 0;
         out.size = (w, h);
-        out.note += "; geometry fast path";
+        out.note += if regions.is_empty() { "; geometry fast path" } else { "; geometry fast path, OCR of the page's images only" };
         Ok(out)
     }
 
