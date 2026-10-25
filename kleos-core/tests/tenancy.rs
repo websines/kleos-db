@@ -464,6 +464,30 @@ fn bm25_statistics_and_embedding_cache_are_per_scope_set() {
 }
 
 #[test]
+fn background_workers_serve_workspace_partitions() {
+    let w = World::new("bg");
+    let bob = cx("eng", Some("bob"), None);
+    let flow = |op: &str, a: Value| {
+        let mut a = a;
+        a["op"] = json!(op);
+        w.call(&bob, "flow", a).unwrap()
+    };
+    flow("define", json!({"name": "triple", "graph": {"steps": [{"return": "$input * 3"}]}}));
+    flow("start", json!({"workflow": "triple", "id": "t1", "input": 14}));
+    // the plain store's worker also serves the workspace partition
+    let worker = w.db.flow_worker(kleos::FlowWorkerOpts { poll_ms: 50, ..Default::default() });
+    let t0 = std::time::Instant::now();
+    while flow("status", json!({"id": "t1"}))["status"] != "completed" {
+        assert!(t0.elapsed().as_secs() < 10, "the workspace workflow did not run");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(worker);
+    assert_eq!(flow("status", json!({"id": "t1"}))["output"], 42);
+    // and the workflow lives in the partition, not in the plain store
+    assert!(w.db.flow_call("status", json!({"id": "t1"})).map_or(true, |v| v.is_null()));
+}
+
+#[test]
 fn cozoscript_ops() {
     let w = World::new("script");
     let run = |s: &str| w.db.run_script(s, Default::default(), ScriptMutability::Mutable).unwrap();

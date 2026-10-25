@@ -259,10 +259,21 @@ pub struct Db<S> {
     /// Principal-view state, set only on views made by the tenancy layer.
     pub(crate) view: Option<Arc<ViewCtx>>,
     /// Access-count buffers of the partitions (each view uses its own).
-    access_bufs: Arc<Mutex<BTreeMap<String, Arc<crate::memory::AccessBuf>>>>,
+    access_bufs: Arc<Mutex<BTreeMap<String, PartState>>>,
     /// Process-side tenancy state: ScopeSet cache, audit chain heads,
     /// queued write events (tenancy.rs).
     pub(crate) tenancy: Arc<crate::tenancy::TenancyState>,
+}
+
+/// The per-partition runtime state of a store: each workspace partition has
+/// its own access-count buffer and its own document and consolidation
+/// runners (docs/specs/tenancy.md, "Partitions").
+#[derive(Clone, Default)]
+pub(crate) struct PartState {
+    mem_access: Arc<crate::memory::AccessBuf>,
+    #[cfg(feature = "docs")]
+    docs_state: Arc<crate::docs::DocsState>,
+    consol_state: Arc<crate::memory::consolidate::ConsolState>,
 }
 
 /// Principal-view state (docs/specs/tenancy.md): what a principal call
@@ -461,7 +472,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             })),
         );
         let mem_access: Arc<crate::memory::AccessBuf> = Default::default();
-        let access_bufs = Arc::new(Mutex::new(BTreeMap::from([(String::new(), mem_access.clone())])));
+        let root_state = PartState { mem_access: mem_access.clone(), ..Default::default() };
+        let access_bufs = Arc::new(Mutex::new(BTreeMap::from([(String::new(), root_state.clone())])));
         let ret = Self {
             db: storage,
             temp_db: Default::default(),
@@ -476,8 +488,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             rerankers,
             mem_access,
             #[cfg(feature = "docs")]
-            docs_state: Default::default(),
-            consol_state: Default::default(),
+            docs_state: root_state.docs_state.clone(),
+            consol_state: root_state.consol_state.clone(),
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
@@ -523,14 +535,18 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut v = self.clone();
         v.partition = Some(SmartString::from(partition));
         v.view = None;
-        v.mem_access = self
-            .access_bufs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(partition.to_string())
-            .or_default()
-            .clone();
+        v.set_part_state(partition);
         Ok(v)
+    }
+
+    fn set_part_state(&mut self, partition: &str) {
+        let st = self.access_bufs.lock().unwrap_or_else(|e| e.into_inner()).entry(partition.to_string()).or_default().clone();
+        self.mem_access = st.mem_access;
+        #[cfg(feature = "docs")]
+        {
+            self.docs_state = st.docs_state;
+        }
+        self.consol_state = st.consol_state;
     }
 
     /// The plain store under this view (no partition, no principal).
@@ -538,13 +554,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut v = self.clone();
         if v.partition.is_some() {
             v.partition = None;
-            v.mem_access = self
-                .access_bufs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(String::new())
-                .or_default()
-                .clone();
+            v.set_part_state("");
         }
         v.view = None;
         v

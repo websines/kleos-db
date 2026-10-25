@@ -1337,6 +1337,29 @@ where
         ))
     }
 
+    /// Every partition of the store: workspace partitions and org
+    /// partitions (empty without tenancy). Background runners serve each.
+    pub fn tenancy_partitions(&self) -> Result<Vec<String>> {
+        if !self.tenancy_enabled() {
+            return Ok(vec![]);
+        }
+        let mut out: Vec<String> = self
+            .tn_rows(&format!("?[p] := *{TN_WS}{{partition: p, status: 'active'}}, !is_null(p)"), vec![])?
+            .into_iter()
+            .filter_map(|r| cell_str(&r[0]))
+            .collect();
+        out.extend(self.tn_rows(&format!("?[o] := *{TN_ORG}{{org: o}}"), vec![])?.into_iter().filter_map(|r| cell_str(&r[0])).map(|o| format!("org_{o}")));
+        Ok(out)
+    }
+
+    /// The partitions a principal call may write to: its workspace's and its
+    /// org's.
+    pub fn principal_partitions(&self, ctx: &PrincipalContext) -> Result<Vec<String>> {
+        let ws = ctx.workspace.clone().unwrap_or_else(|| DEFAULT.to_string());
+        let (org, part) = self.workspace(&ws)?;
+        Ok(part.into_iter().chain(std::iter::once(format!("org_{org}"))).collect())
+    }
+
     /// The principal an API key belongs to, with the key's actions.
     pub fn resolve_apikey(&self, key: &str) -> Result<Option<(String, Vec<String>)>> {
         if !self.tenancy_enabled() {

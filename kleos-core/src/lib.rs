@@ -1452,9 +1452,27 @@ impl DbInstance {
     pub fn tenant_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
         dispatch_db!(self, db => db.tenant_call(op, args))
     }
-    /// Memory ops as a principal. See [crate::Db::memory_call_as].
+    /// Memory ops as a principal. See [crate::Db::memory_call_as]. The
+    /// document and consolidation runners of the principal's partitions
+    /// start as needed, as they do for the plain store.
     pub fn memory_call_as(&self, ctx: &tenancy::PrincipalContext, op: &str, args: JsonValue) -> Result<JsonValue> {
-        dispatch_db!(self, db => db.memory_call_as(ctx, op, args))
+        let r = dispatch_db!(self, db => db.memory_call_as(ctx, op, args))?;
+        let running = r
+            .get("documents")
+            .and_then(|d| d.as_array())
+            .is_some_and(|d| d.iter().any(|x| x.get("status").and_then(|s| s.as_str()) == Some("running")));
+        for p in dispatch_db!(self, db => db.principal_partitions(ctx)).unwrap_or_default() {
+            if let Ok(v) = self.partition_view(&p) {
+                v.docs_kick(running);
+                v.consolidate_kick();
+            }
+        }
+        Ok(r)
+    }
+    /// Every workspace and org partition of the store. See
+    /// [crate::Db::tenancy_partitions].
+    pub fn tenancy_partitions(&self) -> Result<Vec<String>> {
+        dispatch_db!(self, db => db.tenancy_partitions())
     }
     /// A live subscription filtered to a principal's scopes. See
     /// [crate::Db::subscribe_as].
@@ -1707,30 +1725,63 @@ impl DbInstance {
                 let (cb, changes) = db.register_callback(flow::FLOW_TASK, Some(64));
                 let queues = if opts.queues.is_empty() { vec!["default".to_string()] } else { opts.queues.clone() };
                 let args = json!({"worker": opts.worker, "queues": queues, "lease_ms": opts.lease_ms, "max": 64});
+                // the store and, with tenancy, every workspace and org
+                // partition (re-listed every few seconds)
+                let mut views: Vec<(Option<String>, DbInstance)> = vec![(None, db.clone())];
+                let mut listed = std::time::Instant::now() - std::time::Duration::from_secs(60);
+                let mut part_cbs: Vec<(DbInstance, u32, Receiver<(CallbackOp, NamedRows, NamedRows)>)> = vec![];
                 while !st.load(Ordering::SeqCst) {
-                    let busy = match db.flow_call("tick", args.clone()) {
-                        Ok(r) => {
-                            r.get("ran").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
-                                || r.get("fired").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
+                    if listed.elapsed() > std::time::Duration::from_secs(5) {
+                        listed = std::time::Instant::now();
+                        for p in db.tenancy_partitions().unwrap_or_default() {
+                            if views.iter().any(|(q, _)| q.as_deref() == Some(p.as_str())) {
+                                continue;
+                            }
+                            if let Ok(v) = db.partition_view(&p) {
+                                let (id, rx) = v.register_callback(flow::FLOW_TASK, Some(64));
+                                part_cbs.push((v.clone(), id, rx));
+                                views.push((Some(p), v));
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("kleos flow worker: {e}");
-                            false
+                    }
+                    let mut busy = false;
+                    let now = flow::now_us();
+                    let mut wait_ms = opts.poll_ms.max(1);
+                    for (p, v) in &views {
+                        match v.flow_call("tick", args.clone()) {
+                            Ok(r) => {
+                                busy |= r.get("ran").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
+                                    || r.get("fired").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty());
+                            }
+                            // a partition without workflows yet has no flow relations
+                            Err(e) if p.is_some() && format!("{e:?}").contains("kleos_flow") => {}
+                            Err(e) => eprintln!("kleos flow worker: {e}"),
                         }
-                    };
+                        if let Ok(Some(due)) = dispatch_db!(v, d => d.flow_next_due(&queues)) {
+                            wait_ms = wait_ms.min(((due - now).max(0) / 1000) as u64);
+                        }
+                    }
                     if busy {
                         continue;
                     }
-                    let now = flow::now_us();
-                    let mut wait_ms = opts.poll_ms.max(1);
-                    if let Ok(Some(due)) = dispatch_db!(&db, d => d.flow_next_due(&queues)) {
-                        wait_ms = wait_ms.min(((due - now).max(0) / 1000) as u64);
+                    if part_cbs.iter().any(|(_, _, rx)| !rx.is_empty()) {
+                        for (_, _, rx) in &part_cbs {
+                            while rx.try_recv().is_ok() {}
+                        }
+                        continue;
+                    }
+                    // partition commits are seen within a short poll
+                    if views.len() > 1 {
+                        wait_ms = wait_ms.min(200);
                     }
                     crossbeam::select! {
                         recv(changes) -> _ => {}
                         recv(wake_rx) -> _ => {}
                         default(std::time::Duration::from_millis(wait_ms)) => {}
                     }
+                }
+                for (v, id, _) in part_cbs {
+                    v.unregister_callback(id);
                 }
                 db.unregister_callback(cb);
             })
