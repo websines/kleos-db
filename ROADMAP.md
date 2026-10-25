@@ -45,10 +45,11 @@ Work shipped in waves; each wave merged with targeted tests and before/after mea
 | 4 | Durable workflows `::flow` with retries, schedules, signals and child workflows (F4, F5); memory branches: fork, diff, merge, rewind (E9) |
 | 5 | Ontologies that build and maintain themselves (cardinality-driven supersession, learning, maintenance, history and undo); a memory budget and concurrency lanes; the documents pipeline (G2): a Rust port of Indra OCR, Chonkie-style chunking, durable ingestion with page citations; EmbeddingGemma 2 as the default embedder, with `::memory reembed` |
 | 6 | Graph recall: personalized PageRank (C4) and inferred ontology links, on by default; units of typed literals; consolidation into entity profiles and session summaries, automatic by default (E7); the stateless MCP server (protocol 2026-07-28), the `kleos` CLI and agent skills (J3); the TypeScript SDK (J2); native OCR kernels and streaming ingestion (500-page scanned book 590 → 217 s); hybrid fusion retuned on memory data; ontology quality fixes |
+| 7 | Tenancy and access (E5, K2): orgs, workspaces and nested teams; humans and agents as principals with actor chains recorded on every write and read; Cedar scope filtering inside vector, full-text and graph search; per-workspace partitions and workers; per-scope derived data and BM25 statistics; session scopes; audited promotion and approvals; an in-transaction hash-chained audit log; erasure with crypto-shredding; JWT/OIDC with JWKS, DPoP, SPIFFE, Transaction Tokens and RFC 8693 token exchange; every MCP tool as the principal; OpenTelemetry spans |
 
 ## In progress (wave 7)
 
-Tenancy and access (E5, K2) merged on 2026-10-25 ([spec](docs/specs/tenancy.md)); finishing work continues (partition-aware workers, the remaining MCP tools as principals, JWKS and token exchange).
+Tenancy and access (E5, K2) shipped on 2026-10-25 ([spec](docs/specs/tenancy.md)): see the wave 7 row above.
 
 
 | Work | What it adds | Spec (lands with the branch) |
