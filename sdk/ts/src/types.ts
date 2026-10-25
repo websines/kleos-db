@@ -353,3 +353,57 @@ export interface DecideResult {
   band?: string;
   [k: string]: unknown;
 }
+
+/** Options of {@link Kleos.findSkills} (docs/specs/skills.md). */
+export interface FindSkillsOptions {
+  /** Skills to return (default 5). */
+  k?: number;
+  /** Token budget of the answer (default 2000). */
+  budget?: number;
+  /** The scope to search (default `default`), or several, narrowest first. */
+  scope?: string;
+  scopes?: string[];
+  /** `descriptions` (default), `body` (the top skill's instructions) or `auto`. */
+  disclosure?: 'descriptions' | 'body' | 'auto';
+  /** Exploration bonus for skills with few outcomes (0 = none). */
+  explore?: number;
+}
+
+/** One skill {@link Kleos.findSkills} returned. */
+export interface FoundSkill {
+  name: string;
+  scope: string;
+  ver: string;
+  /** `skill://` URI of its SKILL.md (SEP-2640). */
+  uri: string;
+  description: string;
+  score: number;
+  rank: number;
+  stats: { uses: number; success_rate: number | null; posterior: number };
+  /** The instructions, when disclosure asked for them and they fit. */
+  body?: string;
+  resources?: { path: string; uri: string; size: number }[];
+  [k: string]: unknown;
+}
+
+/** The result of {@link Kleos.findSkills}. */
+export interface FindSkillsResult {
+  /** Pass to {@link Kleos.recordSkillOutcome}. */
+  route: string;
+  skills: FoundSkill[];
+  tokens: number;
+  budget: number;
+}
+
+/** An outcome for {@link Kleos.recordSkillOutcome}. */
+export interface SkillOutcome {
+  success: boolean;
+  route?: string;
+  run?: string;
+  task?: string;
+  latencyMs?: number;
+  tokens?: number;
+  cost?: number;
+  model?: string;
+  metrics?: Record<string, unknown>;
+}

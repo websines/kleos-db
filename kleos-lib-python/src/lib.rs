@@ -1562,6 +1562,23 @@ impl CozoDbPy {
         let out = py.allow_threads(|| db.ontology_call(op, a)).map_err(report2py)?;
         Ok(json_to_py(out, py))
     }
+    /// The skill library (kleos fork; docs/specs/skills.md): run skill op
+    /// `op` (`import`, `export`, `put`, `find`, `get`, `list`, `activate`,
+    /// `rollback`, `undo`, `retire`, `record_outcome`, `record_trace`,
+    /// `learn`, `optimize`, `promote`, `sign`, `install`, ...) with `args` (a
+    /// dict). A `learn` or `optimize` run that starts a workflow is run by an
+    /// in-process thread.
+    #[pyo3(signature = (op, args=None))]
+    pub fn skill_call(&self, py: Python<'_>, op: &str, args: Option<&PyAny>) -> PyResult<PyObject> {
+        let db = self.db_ref()?;
+        let a = match args {
+            None => serde_json::Value::Null,
+            Some(x) if x.is_none() => serde_json::Value::Null,
+            Some(x) => serde_json::Value::from(py_to_value(x)?),
+        };
+        let out = py.allow_threads(|| db.skill_call(op, a)).map_err(report2py)?;
+        Ok(json_to_py(out, py))
+    }
     /// Durable workflows (kleos fork; docs/specs/durable-workflows.md): run
     /// flow op `op` (`define`, `start`, `signal`, `cancel`, `status`,
     /// `list`, `history`, `stats`, `schedule`, `claim`, `step`, `record`,

@@ -52,6 +52,7 @@ enum Work {
     Memory { op: String, args: JsonValue },
     Ontology { op: String, args: JsonValue },
     Flow { op: String, args: JsonValue },
+    Skill { op: String, args: JsonValue },
     Doc { op: String, args: JsonValue },
     EnableEmbedder { name: String, spec: JsonValue },
     DisableEmbedder { name: String },
@@ -84,6 +85,7 @@ fn run_work(db: Option<DbInstance>, work: Work) -> std::result::Result<JsonValue
         Work::Memory { op, args } => need_db()?.memory_call(&op, args).map_err(fmt),
         Work::Ontology { op, args } => need_db()?.ontology_call(&op, args).map_err(fmt),
         Work::Flow { op, args } => need_db()?.flow_call(&op, args).map_err(fmt),
+        Work::Skill { op, args } => need_db()?.skill_call(&op, args).map_err(fmt),
         Work::Doc { op, args } => {
             let db = need_db()?;
             #[cfg(feature = "docs")]
@@ -308,6 +310,14 @@ impl KleosDb {
     pub fn ontology_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
         let args = parse_json(&args_json, "args")?;
         Ok(job(Some(self.handle()?), Work::Ontology { op, args }))
+    }
+
+    /// A skill-library op (`find`, `get`, `import`, `record_outcome`, `learn`,
+    /// ...): `DbInstance::skill_call` (docs/specs/skills.md).
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn skill_call(&self, op: String, args_json: String) -> Result<AsyncTask<Job>> {
+        let args = parse_json(&args_json, "args")?;
+        Ok(job(Some(self.handle()?), Work::Skill { op, args }))
     }
 
     /// A durable-workflow op: `DbInstance::flow_call`.

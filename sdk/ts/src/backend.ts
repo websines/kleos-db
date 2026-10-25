@@ -34,6 +34,8 @@ export interface Backend {
   ontology(op: string, args: Record<string, unknown>): Promise<any>;
   flow(op: string, args: Record<string, unknown>): Promise<any>;
   doc(op: string, args: Record<string, unknown>): Promise<any>;
+  /** The skill library (docs/specs/skills.md). */
+  skill(op: string, args: Record<string, unknown>): Promise<any>;
   run(script: string, params: Record<string, Json>, immutable: boolean): Promise<NamedRows>;
   /** Hybrid search, decide, export/import, backup/restore (`op`). */
   admin(op: AdminOp, args: Record<string, unknown>): Promise<any>;

@@ -20,6 +20,7 @@ interface NativeDb {
   ontologyCall(op: string, argsJson: string): Promise<string>;
   flowCall(op: string, argsJson: string): Promise<string>;
   docCall(op: string, argsJson: string): Promise<string>;
+  skillCall(op: string, argsJson: string): Promise<string>;
   adminCall(op: string, argsJson: string): Promise<string>;
   flowWorker(optsJson: string): FlowWorker;
   close(): boolean;
@@ -130,6 +131,9 @@ export class NativeBackend implements Backend {
   }
   doc(op: string, args: Record<string, unknown>) {
     return call(`doc.${op}`, () => this.db.docCall(op, JSON.stringify(args)));
+  }
+  skill(op: string, args: Record<string, unknown>) {
+    return call(`skill.${op}`, () => this.db.skillCall(op, JSON.stringify(args)));
   }
   run(script: string, params: Record<string, Json>, immutable: boolean): Promise<NamedRows> {
     return call('run', () => this.db.runScript(script, JSON.stringify(params), immutable));

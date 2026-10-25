@@ -215,6 +215,39 @@ export class McpClient {
   }
 
   /**
+   * `skills/list` (SEP-2640). kleos answers with the most useful skills (a
+   * partial listing) or, given a `task`, the top-k for it.
+   */
+  async listSkills(opts: { task?: string; k?: number; cursor?: string } = {}): Promise<{ skills: any[]; nextCursor?: string }> {
+    return this.rpc('skills/list', opts as Record<string, unknown>);
+  }
+  /** `skills/get`: one skill's entry (frontmatter and file digests) by its SKILL.md URI. */
+  async getSkill(uri: string): Promise<any> {
+    return (await this.rpc('skills/get', { uri })).skill;
+  }
+  /**
+   * Read a skill file and verify it against the entry's digest and size, as
+   * SEP-2640 requires of hosts. Throws on a mismatch or an unlisted file.
+   */
+  async readSkillFile(entry: { resources: { uri: string; digest: string; size: number }[] | 'dynamic' }, uri: string): Promise<string> {
+    const listed = entry.resources === 'dynamic' ? undefined : entry.resources.find((r) => r.uri === uri);
+    if (entry.resources !== 'dynamic' && !listed) throw new KleosError(`${uri} is not listed in the skill entry`, { op: 'mcp.skills' });
+    const r = await this.readResource(uri);
+    const text: string = r.contents?.[0]?.text ?? '';
+    if (listed) {
+      const bytes = new TextEncoder().encode(text);
+      const { createHash } = await import('node:crypto');
+      const digest = 'sha256:' + createHash('sha256').update(bytes).digest('hex');
+      if (bytes.length !== listed.size || digest !== listed.digest) throw new KleosError(`${uri} does not match its digest`, { op: 'mcp.skills' });
+    }
+    return text;
+  }
+  /** `resources/directory/read`: the children of a skill directory. */
+  async readDirectory(uri: string): Promise<any[]> {
+    return (await this.rpc('resources/directory/read', { uri }, uri)).resources;
+  }
+
+  /**
    * Call a tool. Handles `input_required` (confirmations) through
    * `onInputRequired`; returns a {@link McpTask} when a long call became a task.
    */

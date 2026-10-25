@@ -29,6 +29,9 @@ import type {
   RememberResult,
   HybridQuery,
   DecideResult,
+  FindSkillsOptions,
+  FindSkillsResult,
+  SkillOutcome,
 } from './types.js';
 
 type Opts = Record<string, unknown> | undefined;
@@ -184,6 +187,32 @@ export class Kleos {
   /** A document admin op: `get`, `list`, `delete`, `reingest`. Documents themselves go through `remember`. */
   docs(op: string, args?: Record<string, unknown>): Promise<any> {
     return this.backend.doc(op, snakeKeys(args));
+  }
+
+  // ---- skills (procedural memory; docs/specs/skills.md) ------------------
+
+  /**
+   * A skill-library op: `import`, `export`, `put`, `find`, `get`, `list`,
+   * `history`, `activate`, `rollback`, `undo`, `retire`, `recordOutcome`
+   * (`record_outcome`), `recordTrace`, `learn`, `optimize`, `promote`,
+   * `approve`, `sign`, `verify`, `package`, `publish`, `install`, ...
+   */
+  skill(op: string, args?: Record<string, unknown>): Promise<any> {
+    return this.backend.skill(op.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase()), snakeKeys(args));
+  }
+
+  /**
+   * The few skills that fit `task` (ranked by fit and measured success,
+   * within a token budget). Pass the returned `route` to
+   * {@link Kleos.recordSkillOutcome} so the router learns.
+   */
+  findSkills(task: string, opts?: FindSkillsOptions): Promise<FindSkillsResult> {
+    return this.backend.skill('find', { ...snakeKeys(opts as unknown as Record<string, unknown>), task });
+  }
+
+  /** Report whether following a skill worked (stats, auto-rollback, router). */
+  recordSkillOutcome(skill: { name?: string; ver?: string; scope?: string }, outcome: SkillOutcome): Promise<any> {
+    return this.backend.skill('record_outcome', { ...snakeKeys(skill as Record<string, unknown>), ...snakeKeys(outcome as unknown as Record<string, unknown>) });
   }
 
   /** A durable-workflow op: `define`, `start`, `signal`, `cancel`, `status`, `list`, `history`, `schedule`, ... */
