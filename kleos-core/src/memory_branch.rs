@@ -775,7 +775,8 @@ impl<'s, S: Storage<'s>> Db<S> {
             for r in self
                 .mem_q(
                     &format!(
-                        "?[id, new] := id in $ids, *{MEM_DECISION}{{ns: $ns, new, cand: id, template: 'supersedes', status: 'pending', at}}{cut}"
+                        // one pass over the level's decisions (`cand` is not a key prefix)
+                        "?[id, new] := *{MEM_DECISION}{{ns: $ns, new, cand: id, template: 'supersedes', status: 'pending', at}}, is_in(id, $ids){cut}"
                     ),
                     vec![("ns", s(&l.ns)), ("ids", str_list(cands)), ("c", c)],
                 )?

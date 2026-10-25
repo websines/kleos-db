@@ -1482,6 +1482,10 @@ impl DbInstance {
     pub fn principal_kind(&self, id: &str) -> Result<Option<String>> {
         dispatch_db!(self, db => db.principal_kind(id))
     }
+    /// The org an admin op touches. See [crate::Db::tenant_target_org].
+    pub fn tenant_target_org(&self, args: &JsonValue) -> Result<Option<String>> {
+        dispatch_db!(self, db => db.tenant_target_org(args))
+    }
     /// Whether `principal` administers `org`.
     pub fn is_org_admin(&self, principal: &str, org: &str) -> Result<bool> {
         dispatch_db!(self, db => db.is_org_admin(principal, org))

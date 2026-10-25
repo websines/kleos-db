@@ -2095,7 +2095,8 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
         Ok(self
             .mem_q(
-                &format!("?[id, vt] := *{MEM}{{ns: $ns, id, vt}}, id in $ids"),
+                // `id` bound first: key-prefix reads, not a scan of the namespace
+                &format!("?[id, vt] := id in $ids, *{MEM}{{ns: $ns, id, vt}}"),
                 vec![("ns", s(sc.ns())), ("ids", str_list(ids))],
             )?
             .rows
@@ -3833,9 +3834,24 @@ impl<'s, S: Storage<'s>> Db<S> {
                         self.mem_q(&meta, vec![("ns", s(&sc.levels[l].ns)), ("ids", str_list(&group))])?.rows,
                     );
                 }
-                for (cand, news) in self.pending_of(&sc, &ids, read_at)? {
-                    for n in news {
-                        meta_rows.push(vec![s("p"), s(&cand), s(&n), DataValue::Null]);
+                if sc.union {
+                    // a principal's scopes: no cuts, and a decision lives in
+                    // the namespace of its new memory, so one query
+                    meta_rows.extend(
+                        self.mem_q(
+                            &format!(
+                                "?[tag, id, a, b] := ns in $lin, *{MEM_DECISION}{{ns, new, cand: id, template: 'supersedes', status: 'pending'}}, \
+                                   is_in(id, $ids), *{MEM}{{ns, id: new @ $at}}, tag = 'p', a = new, b = null"
+                            ),
+                            vec![("lin", str_list(&sc.names())), ("ids", str_list(&ids)), ("at", DataValue::from(read_at))],
+                        )?
+                        .rows,
+                    );
+                } else {
+                    for (cand, news) in self.pending_of(&sc, &ids, read_at)? {
+                        for n in news {
+                            meta_rows.push(vec![s("p"), s(&cand), s(&n), DataValue::Null]);
+                        }
                     }
                 }
             }

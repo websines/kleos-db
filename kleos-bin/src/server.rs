@@ -1030,11 +1030,12 @@ async fn tenant_op(
                 if ctx.token.as_ref().and_then(|t| t.actions.as_ref()).is_some_and(|a| !a.iter().any(|x| x == "admin")) {
                     miette::bail!("this credential does not allow admin ops");
                 }
-                let org = args.get("org").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| {
-                    st.db.tenant_call("list", json!({"kind": "principal"})).ok().and_then(|v| {
-                        v.as_array()?.iter().find(|p| p["id"] == who.as_str()).and_then(|p| p["org"].as_str().map(String::from))
-                    }).unwrap_or_default()
-                });
+                // the org the op touches, from every object it names; an op
+                // that names none (e.g. `list`) needs the admin secret
+                let org = st.db.tenant_target_org(&args)?.ok_or_else(|| miette!("tenant {op}: name the org, workspace or principal it acts on"))?;
+                if op == "list" || op == "enable" {
+                    miette::bail!("tenant {op} needs the admin secret");
+                }
                 if !st.db.is_org_admin(&who, &org)? {
                     miette::bail!("'{who}' is not an admin of org '{org}'");
                 }

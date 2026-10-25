@@ -266,7 +266,12 @@ pub fn authenticate(cfg: &TenancyConfig, db: &DbInstance, bearer: &str, header: 
             assurance: Assurance::IssuerEndorsed,
         });
     }
-    let Some(sp) = sub_principal else {
+    // an AI agent presenting the token must be a known principal: its
+    // permissions are part of the intersection
+    if chain.len() > 1 && chain.last().is_some_and(|l| l.kind == "ai_agent" && l.principal.is_none()) {
+        return Err(AuthError { status: 403, error: "actor_unauthorized", description: "the presenting agent is not a kleos principal".into() });
+    }
+        let Some(sp) = sub_principal else {
         return Err(AuthError { status: 403, error: "insufficient_scope", description: format!("subject '{sub}' of '{iss}' is not a kleos principal") });
     };
     let mut ctx = PrincipalContext {

@@ -1416,6 +1416,49 @@ where
         Ok(self.principal(id)?.filter(|p| p.status == "active").map(|p| p.kind))
     }
 
+    /// The org an admin op touches (from its `org`, `ws`, `team`, `group`,
+    /// `principal` / `id` or `promotion` options); every named object must
+    /// belong to the same org. `None`: the op names none.
+    pub fn tenant_target_org(&self, args: &JsonValue) -> Result<Option<String>> {
+        self.tenancy_ensure()?;
+        let g = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+        let mut orgs: BTreeSet<String> = BTreeSet::new();
+        orgs.extend(g("org"));
+        if let Some(ws) = g("ws") {
+            orgs.insert(self.workspace(&ws)?.0);
+        }
+        if let Some(t) = g("team") {
+            orgs.insert(self.team_org(&t)?.ok_or_else(|| miette::miette!("team '{t}' not found"))?);
+        }
+        if let Some(gr) = g("group") {
+            match gr.split_once(':') {
+                Some(("org", o)) => {
+                    orgs.insert(o.to_string());
+                }
+                Some(("team", t)) => {
+                    orgs.insert(self.team_org(t)?.ok_or_else(|| miette::miette!("team '{t}' not found"))?);
+                }
+                _ => bail!("bad group '{gr}'"),
+            }
+        }
+        for k in ["principal", "id", "sponsor", "reassign_to"] {
+            if let Some(p) = g(k) {
+                if let Some(pr) = self.principal(&p)? {
+                    orgs.insert(pr.org);
+                }
+            }
+        }
+        if let Some(pid) = g("promotion") {
+            if let Some(ws) = self.tn_rows(&format!("?[ws] := *{TN_PROMOTION}{{id: $id, ws}}"), vec![("id", s(&pid))])?.first().and_then(|r| cell_str(&r[0])) {
+                orgs.insert(self.workspace(&ws)?.0);
+            }
+        }
+        if orgs.len() > 1 {
+            bail!("the op names objects of several orgs: {orgs:?}");
+        }
+        Ok(orgs.into_iter().next())
+    }
+
     /// Whether `principal` is an admin or owner of `org`.
     pub fn is_org_admin(&self, principal: &str, org: &str) -> Result<bool> {
         Ok(self

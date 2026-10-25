@@ -268,7 +268,7 @@ Append-only, hash-chained per workspace (`kleos_tn_audit`):
 
 Deterministic tests (`cargo test -p kleos --features engram --test tenancy`, fake embedder and decider): workspace isolation and partitions, agent-user scopes across users and autonomous runs, the intersection with participants, credentials and an org `forbid` policy, the PPR walk and entity expansion inside visible scopes, per-scope summaries, promotion (pending, approval, provenance, agent grant, org with approval), supersession and duplicates within a scope and read-time precedence, the erasure cascade with a verifying, shredded audit chain, audit coverage of writes and reads with tamper detection, and the CozoScript ops.
 
-Perf sanity (`perf_scope_filter`, release build, M-series laptop, mem store, 4,000 memories of 64-d fake vectors, graph off): PERF_RESULT.
+Perf sanity (`perf_scope_filter`, release build, M-series laptop, mem store, 4,000 memories of 64-d fake vectors, graph off, 50 queries): a principal recall over 3 of the workspace's 5 scopes (60% of its memories, one pre-filtered search) takes **62 ms** against **43 ms** for a plain one-namespace recall of a 4,000-memory store; restricted to one scope it takes 43 ms (the partition's own one-namespace recall: 41 ms), and the session plus cached ScopeSet costs 0.3 ms. The remaining gap is the union's filtered index legs (about 13 ms more than `ns == $ns`) and per-scope metadata reads. While measuring, two queries that scanned a whole namespace per id were reordered (the history read binds `id` first; a union reads pending decisions in one pass), which took the union from 150 ms to 62 ms.
 
 ## Threat model
 

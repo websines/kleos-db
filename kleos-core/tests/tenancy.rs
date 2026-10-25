@@ -416,5 +416,15 @@ fn perf_scope_filter() {
     let unscoped = time(&|q| {
         plain.recall(q, RecallOpts { graph: Some("off".into()), record_access: Some(false), ..Default::default() }).unwrap();
     });
+    let one = time(&|q| {
+        w.call(&ctx, "recall", json!({"query": q, "graph": "off", "record_access": false, "scopes": ["ws"]})).unwrap();
+    });
+    let part = time(&|q| {
+        eng.recall(q, RecallOpts { ns: Some("ws".into()), graph: Some("off".into()), record_access: Some(false), ..Default::default() }).unwrap();
+    });
+    let session = time(&|_| {
+        w.call(&ctx, "scopes", json!({})).unwrap();
+    });
     println!("recall p-mean: scoped {scoped:.2} ms, plain {unscoped:.2} ms (4,000 memories, graph off)");
+    println!("  one scope as principal {one:.2} ms, one namespace of the partition {part:.2} ms, session + scope set {session:.2} ms");
 }
