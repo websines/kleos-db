@@ -255,8 +255,8 @@ fn norm(s: &str) -> String {
 
 /// Does a final answer match the expected result? Equal after
 /// normalization; or the expected text appears in the answer at token
-/// boundaries; or the same numbers in the same order with every longer word
-/// of the expected text present (`8.55` for `USD 8.55`, not `07` for `007`).
+/// boundaries; or, for a number with at most one unit word, the same number
+/// (`8.55` for `USD 8.55`; never `TKT-RED-7` for `TKT-RED-7-X`).
 pub fn answer_matches(ans: &str, exp: &str) -> bool {
     let (a, e) = (norm(ans), norm(exp));
     if e.is_empty() {
@@ -281,7 +281,9 @@ pub fn answer_matches(ans: &str, exp: &str) -> bool {
     let nums = |t: &[String]| -> Vec<String> { t.iter().filter(|x| x.chars().all(|c| c.is_ascii_digit() || c == '.') && x.chars().any(|c| c.is_ascii_digit())).cloned().collect() };
     let (ta, te) = (toks(&a), toks(&e));
     let (na, ne) = (nums(&ta), nums(&te));
-    !ne.is_empty() && na == ne && te.iter().filter(|w| w.chars().any(|c| c.is_alphabetic()) && w.chars().count() > 3).all(|w| ta.contains(w))
+    // a number with at most one unit word (`USD 8.55`, `12 kg`): the unit may be left out
+    let words: Vec<&String> = te.iter().filter(|w| w.chars().any(|c| c.is_alphabetic())).collect();
+    !ne.is_empty() && words.len() <= 1 && na == ne && words.iter().filter(|w| w.chars().count() > 3).all(|w| ta.contains(w))
 }
 
 /// The final answer of a response: the text after the last `ANSWER:`, else
@@ -1265,6 +1267,7 @@ mod tests {
         assert!(!answer_matches("AcOfCh-R3-23-B012", "OFCH-R3-23-B012"));
         assert!(!answer_matches("DELA-B4-24-B07", "DELA-B4-24-B007"));
         assert!(!answer_matches("USD 18.30", "USD 18.00"));
+        assert!(!answer_matches("TKT-RED-7", "TKT-RED-7-X"));
         assert_eq!(extract_json("sure:\n```json\n[{\"op\":\"delete\",\"line\":1}]\n```").unwrap()[0]["op"], "delete");
         assert_eq!(slug("My Skill!! v2", "x"), "my-skill-v2");
         let md = extract_skill_md("```markdown\n---\nname: Bad Name\ndescription: does things\n---\nbody\n```", "fallback").unwrap();
