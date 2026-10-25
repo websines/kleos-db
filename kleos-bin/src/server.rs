@@ -131,6 +131,7 @@ pub(crate) struct ServerArgs {
 #[derive(Clone)]
 struct DbState {
     db: DbInstance,
+    tenancy: Option<Arc<kleos_bin::auth::TenancyConfig>>,
     mcp: Option<Arc<kleos_bin::mcp::McpServer>>,
     origin: Arc<String>,
     backup_dir: Arc<PathBuf>,
@@ -248,6 +249,12 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
         let token_table = self.token_table.clone();
         let tenancy = self.tenancy.clone();
         Box::pin(async move {
+            // the token endpoint authenticates its own subject and actor tokens
+            if tenancy.is_some() && request.uri().path() == "/oauth/token" {
+                request.extensions_mut().insert(ScriptMutability::Immutable);
+                request.extensions_mut().insert(AuthContext { mutability: ScriptMutability::Immutable, principal: Principal::Local, tenant: None });
+                return Ok(request);
+            }
             if skip_auth {
                 // Loopback is not an authentication boundary for browsers. Reject
                 // requests originating on another site before granting the
@@ -273,16 +280,22 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                 .headers()
                 .get("Authorization")
                 .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.strip_prefix("Bearer "))
+                .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("DPoP ")))
                 .map(|t| t.trim().to_string());
-            if let (Some(tn), Some(tok)) = (&tenancy, &bearer) {
-                if auth_guard.is_empty() || tok != &auth_guard {
+            let has_txn = request.headers().contains_key("txn-token");
+            let tok = bearer.clone().unwrap_or_default();
+            if let (Some(tn), true) = (&tenancy, bearer.is_some() || has_txn) {
+                if auth_guard.is_empty() || tok != auth_guard {
                     let (cfg, db) = (tn.0.clone(), tn.1.clone());
                     let headers = request.headers().clone();
-                    let t2 = tok.clone();
+                    let t2 = bearer.clone();
+                    let info = kleos_bin::auth::RequestInfo {
+                        method: request.method().as_str().to_string(),
+                        url: format!("{}{}", allowed_origin.trim_end_matches('/'), request.uri().path()),
+                    };
                     let res = spawn_blocking(move || {
                         let h = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|x| x.to_string());
-                        kleos_bin::auth::authenticate(&cfg, &db, &t2, &h)
+                        kleos_bin::auth::authenticate_request(&cfg, &db, t2.as_deref(), &h, &info)
                     })
                     .await
                     .unwrap_or_else(|e| Err(kleos_bin::auth::AuthError { status: 500, error: "server_error", description: e.to_string() }));
@@ -299,7 +312,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                             return Ok(request);
                         }
                         // a token-table token is not a tenancy credential: fall through
-                        Err(e) if token_table.is_none() || tok.starts_with("kl_") || tok.matches('.').count() == 2 => {
+                        Err(e) if token_table.is_none() || has_txn || tok.starts_with("kl_") || tok.matches('.').count() == 2 => {
                             return Err(Response::builder()
                                 .status(StatusCode::from_u16(e.status).unwrap_or(StatusCode::UNAUTHORIZED))
                                 .header(header::WWW_AUTHENTICATE, tn.0.challenge(&allowed_origin, Some(&e)))
@@ -624,6 +637,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
         ))
     });
     let state = DbState {
+        tenancy: tenancy.clone().map(Arc::new),
         mcp,
         origin: Arc::new(server_origin.clone()),
         db,
@@ -681,6 +695,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .route("/text-query", post(text_query))
         .route("/memory/:op", post(memory_op))
         .route("/tenant/:op", post(tenant_op))
+        .route("/oauth/token", post(oauth_token))
         .route("/mcp", post(mcp_post).get(mcp_not_allowed).delete(mcp_not_allowed))
         .route("/flow/:op", post(flow_op))
         .route("/doc/:op", post(doc_op))
@@ -702,6 +717,23 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .layer(AsyncRequireAuthorizationLayer::new(auth_obj))
         .fallback(not_found)
         .route("/", get(root))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get({
+                let t = tenancy.clone();
+                let o = server_origin.clone();
+                move || {
+                    let t = t.clone();
+                    let o = o.clone();
+                    async move {
+                        match t.as_ref().filter(|c| c.signing_secret_env.is_some()) {
+                            Some(c) => (StatusCode::OK, Json(c.as_metadata(&o))),
+                            None => (StatusCode::NOT_FOUND, Json(json!({"error": "token exchange is off"}))),
+                        }
+                    }
+                }
+            }),
+        )
         .route(
             "/.well-known/oauth-protected-resource",
             get(move || {
@@ -1010,6 +1042,34 @@ fn principal_name(p: &Principal) -> String {
         Principal::Admin => "admin".into(),
         Principal::Bearer(h) => h.iter().map(|b| format!("{b:02x}")).collect(),
         Principal::Tenant(id) => format!("tenant:{id}"),
+    }
+}
+
+/// RFC 8693 token exchange (docs/specs/tenancy.md): `POST /oauth/token`
+/// with a form body; no other credential (the subject and actor tokens are
+/// the credentials).
+async fn oauth_token(
+    State(st): State<DbState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(cfg) = st.tenancy.clone() else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "invalid_request", "error_description": "principal mode is off"})));
+    };
+    let info = kleos_bin::auth::RequestInfo { method: "POST".into(), url: format!("{}/oauth/token", st.origin.trim_end_matches('/')) };
+    let db = st.db.clone();
+    let res = spawn_blocking(move || {
+        let h = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|x| x.to_string());
+        kleos_bin::auth::token_exchange(&cfg, &db, &form, &h, &info)
+    })
+    .await;
+    match res {
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)),
+        Ok(Err(e)) => (
+            StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(json!({"error": e.error, "error_description": e.description})),
+        ),
+        Err(e) => internal_error(e),
     }
 }
 

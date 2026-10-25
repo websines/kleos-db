@@ -1492,6 +1492,10 @@ impl DbInstance {
     pub fn resolve_apikey(&self, key: &str) -> Result<Option<(String, Vec<String>)>> {
         dispatch_db!(self, db => db.resolve_apikey(key))
     }
+    /// A principal's registered public keys. See [crate::Db::principal_jwks].
+    pub fn principal_jwks(&self, id: &str) -> Result<Option<JsonValue>> {
+        dispatch_db!(self, db => db.principal_jwks(id))
+    }
     /// The principal an external identity `(iss, sub)` maps to.
     pub fn resolve_ident(&self, iss: &str, sub: &str) -> Result<Option<String>> {
         dispatch_db!(self, db => db.resolve_ident(iss, sub))

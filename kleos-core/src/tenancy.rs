@@ -66,6 +66,8 @@ pub const TN_AUDIT_HEAD: &str = "kleos_tn_audit_head";
 /// Pending curation requests (forget / set in agent and org scopes by a
 /// principal who is not a curator there).
 pub const TN_REQUEST: &str = "kleos_tn_request";
+/// Public keys of principals (agents authenticating with `private_key_jwt`).
+pub const TN_JWKS: &str = "kleos_tn_jwks";
 
 /// The implicit org and workspace of a store (the unpartitioned store).
 pub const DEFAULT: &str = "default";
@@ -102,6 +104,7 @@ const DDL: &[(&str, &str)] = &[
     ),
     (TN_META, "{key: String => value: Json}"),
     (TN_AUDIT_HEAD, "{ws: String => seq: Int, hash: String}"),
+    (TN_JWKS, "{principal: String => jwks: Json, updated: Int}"),
     (
         TN_REQUEST,
         "{id: String => ws: String, op: String, ns: String, ids: [String], args: Json, chain: Json, requested_by: String, \
@@ -1200,6 +1203,19 @@ where
                 self.tn_q(&format!("?[hash] <- [[$h]] :rm {TN_APIKEY} {{hash}}"), vec![("h", s(&h))])?;
                 json!({"revoked": h})
             }
+            "principal_key_set" => {
+                // the public keys an agent signs its client assertions with
+                let id = need("id")?;
+                if self.principal(&id)?.map(|p| p.status) != Some("active".to_string()) {
+                    bail!("principal '{id}' is not active");
+                }
+                let jwks = a.get("jwks").cloned().filter(|j| j.get("keys").is_some_and(|k| k.is_array())).ok_or_else(|| miette::miette!("principal_key_set needs 'jwks' ({{keys: [...]}})"))?;
+                self.tn_q(
+                    &format!("?[principal, jwks, updated] <- [[$p, $j, $now]] :put {TN_JWKS} {{principal => jwks, updated}}"),
+                    vec![("p", s(&id)), ("j", json_dv(jwks)), ("now", now.clone())],
+                )?;
+                json!({"id": id})
+            }
             "erase" => self.tenant_erase(&need("principal")?, gs("reassign_to"))?,
             "audit" => {
                 let ws = gs("ws").unwrap_or_else(|| DEFAULT.to_string());
@@ -1380,6 +1396,15 @@ where
         Ok(cell_str(&r[0]).map(|p| (p, acts)))
     }
 
+    /// The registered public keys (a JWKS) of a principal.
+    pub fn principal_jwks(&self, id: &str) -> Result<Option<JsonValue>> {
+        if !self.tenancy_enabled() {
+            return Ok(None);
+        }
+        self.tenancy_ensure()?;
+        Ok(self.tn_rows(&format!("?[j] := *{TN_JWKS}{{principal: $p, jwks: j}}"), vec![("p", s(id))])?.first().map(|r| cell_json(&r[0])))
+    }
+
     /// The principal an external identity maps to.
     pub fn resolve_ident(&self, iss: &str, sub: &str) -> Result<Option<String>> {
         if !self.tenancy_enabled() {
@@ -1537,6 +1562,7 @@ where
                  {{?[iss, sub] := *{TN_IDENT}{{iss, sub, principal}}, principal = $p :rm {TN_IDENT} {{iss, sub}}}}\
                  {{?[hash] := *{TN_APIKEY}{{hash, principal}}, principal = $p :rm {TN_APIKEY} {{hash}}}}\
                  {{?[principal] <- [[$p]] :rm {TN_KEY} {{principal}}}}\
+                 {{?[principal] <- [[$p]] :rm {TN_JWKS} {{principal}}}}\
                  {{?[id, status, name] := *{TN_PRINCIPAL}{{id}}, id = $p, status = 'erased', name = 'erased' :update {TN_PRINCIPAL} {{id => status, name}}}}"
             ),
             vec![("p", s(id)), ("g", s(&grantee))],
