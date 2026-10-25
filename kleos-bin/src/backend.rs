@@ -144,7 +144,13 @@ impl Remote {
             .with_timeout(self.timeout.as_secs())
             .with_body(body.to_string());
         if let Some(t) = &self.token {
-            req = req.with_header("x-cozo-auth", t.as_str());
+            // a tenancy credential (API key or JWT access token) goes as a
+            // bearer token; the server's own secret as before
+            if t.starts_with("kl_") || t.matches('.').count() == 2 {
+                req = req.with_header("Authorization", format!("Bearer {t}"));
+            } else {
+                req = req.with_header("x-cozo-auth", t.as_str());
+            }
         }
         let resp = req
             .send()
@@ -156,6 +162,11 @@ impl Remote {
             }
             _ => serde_json::from_str(text).map_err(|_| format!("HTTP {} from {path}: {}", resp.status_code, text.trim())),
         }
+    }
+
+    /// A tenancy admin op (`POST /tenant/:op`).
+    pub fn tenant(&self, op: &str, body: &Value) -> Result<Value, String> {
+        self.post(&format!("/tenant/{op}"), body)
     }
 
     fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
