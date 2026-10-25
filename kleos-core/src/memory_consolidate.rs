@@ -58,6 +58,11 @@ pub const CONSOLIDATE_WORKFLOW: &str = "memory.consolidate";
 const DEFAULT_MIN_CLAIMS: usize = 8;
 const DEFAULT_MAX_SUMMARY: usize = 6;
 const DEFAULT_MIN_FACTS: usize = 2;
+/// An extractor entity needs this many current memories mentioning it for a
+/// profile of its own …
+const ENTITY_MIN_MENTIONS: usize = 3;
+/// … and not more than this (a speaker of every turn is a hub).
+const ENTITY_MAX_MENTIONS: usize = 150;
 const MMR_LAMBDA: f64 = 0.7;
 const PROFILE_VALUE_CHARS: usize = 90;
 /// An older single-valued claim this similar to a newer one of the same
@@ -321,14 +326,15 @@ impl<'s, S: Storage<'s>> Db<S> {
         if self.consol_exists(crate::ontology::MEM_TYPE) {
             for r in self
                 .mem_q(
-                    // cue- or rule-backed types only: a prototype match alone
-                    // is too loose to state a fact about someone
+                    // cue- or rule-backed types, and prototype matches at a
+                    // confident score (a weak prototype match alone is too
+                    // loose to state a fact about someone)
                     &format!(
-                        "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop, by}}, cls = 'fact', !is_null(subject), \
-                           !is_null(prop), by != 'proto'",
+                        "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop, by, score}}, cls = 'fact', !is_null(subject), \
+                           !is_null(prop), or(by != 'proto', score >= $conf)",
                         crate::ontology::MEM_TYPE
                     ),
-                    vec![("ns", s(ns))],
+                    vec![("ns", s(ns)), ("conf", DataValue::from(crate::ontology_type::CONFIDENT))],
                 )?
                 .rows
             {
@@ -354,8 +360,43 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
             });
         }
+        // extractor entities: a named entity that enough current memories
+        // mention gets a profile of what they say about it (by property when
+        // typed, `mentioned` otherwise), unless an ontology profile covers it
+        let mut ent_mems: BTreeMap<String, (Option<String>, BTreeSet<String>)> = BTreeMap::new();
+        if self.consol_exists(MEM_MENTION) && self.consol_exists(MEM_ENTITY) {
+            let view = self.entity_view(&sc)?;
+            let mut kinds: BTreeMap<String, String> = BTreeMap::new();
+            for r in self.mem_q(&format!("?[eid, kind] := *{MEM_ENTITY}{{ns: $ns, eid, kind}}, !is_null(kind)"), vec![("ns", s(ns))])?.rows {
+                if let (Some(e), Some(k)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    kinds.insert(view.canonical(&e), k);
+                }
+            }
+            let mut by_e: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for r in self.mem_q(&format!("?[eid, id] := *{MEM_MENTION}{{ns: $ns, eid, id}}"), vec![("ns", s(ns))])?.rows {
+                if let (Some(e), Some(id)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    by_e.entry(view.canonical(&e)).or_default().insert(id);
+                }
+            }
+            for (e, ms) in by_e {
+                // a hub (a speaker of every turn) says nothing in particular
+                if ms.len() < ENTITY_MIN_MENTIONS || ms.len() > ENTITY_MAX_MENTIONS {
+                    continue;
+                }
+                let Some((name, _)) = view.rows.get(&e) else { continue };
+                let node = graph_node(name);
+                if node.len() < 2 || NOT_NAMES.contains(&node.as_str()) {
+                    continue;
+                }
+                let x = ent_mems.entry(node.clone()).or_insert_with(|| (None, BTreeSet::new()));
+                x.0 = x.0.take().or_else(|| kinds.get(&e).cloned());
+                x.1.extend(ms);
+                labels.entry(node).or_insert_with(|| name.clone());
+            }
+        }
         let mut ids: Vec<String> = claims.iter().map(|c| c.0.clone()).collect();
         ids.extend(fact_mems);
+        ids.extend(ent_mems.values().flat_map(|x| x.1.iter().cloned()));
         ids.sort();
         ids.dedup();
         // current texts and valid-from of those memories
@@ -400,6 +441,31 @@ impl<'s, S: Storage<'s>> Db<S> {
                 evidence: vec![id.clone()],
             });
         }
+        let claim_prop: BTreeMap<&str, &str> = claims.iter().map(|(id, _, p)| (id.as_str(), p.as_str())).collect();
+        let mut ent_kind: BTreeMap<String, String> = BTreeMap::new();
+        for (node, (kind, ms)) in &ent_mems {
+            let have: usize = by.get(node).map_or(0, |p| p.values().map(|v| v.len()).sum());
+            if have >= min_facts {
+                continue;
+            }
+            let mut n = 0;
+            for id in ms {
+                let Some(t) = text.get(id) else { continue };
+                let body = t.split_once(": ").filter(|(a, _)| a.split_whitespace().count() <= 3).map_or(t.as_str(), |x| x.1);
+                let p = claim_prop.get(id.as_str()).map_or("mentioned", |p| *p);
+                by.entry(node.clone()).or_default().entry(p.to_string()).or_default().push(ProfileEntry {
+                    value: short(body, PROFILE_VALUE_CHARS),
+                    since: since(&Some(id.clone())),
+                    evidence: vec![id.clone()],
+                });
+                n += 1;
+            }
+            if n > 0 {
+                if let Some(k) = kind {
+                    ent_kind.insert(node.clone(), k.to_lowercase());
+                }
+            }
+        }
         // single-valued properties: the newest value only
         for props in by.values_mut() {
             for (p, v) in props.iter_mut() {
@@ -429,7 +495,10 @@ impl<'s, S: Storage<'s>> Db<S> {
                 continue;
             }
             keep.insert(node.clone());
-            let name = labels.get(node).cloned().unwrap_or_else(|| title(node));
+            let mut name = labels.get(node).cloned().unwrap_or_else(|| title(node));
+            if let Some(k) = ent_kind.get(node) {
+                name = format!("{name} ({k})");
+            }
             let parts: Vec<String> = props
                 .iter()
                 .map(|(p, v)| {

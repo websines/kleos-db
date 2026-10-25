@@ -172,6 +172,42 @@ fn auto_consolidation_runs_in_process() {
 }
 
 #[test]
+fn entity_profiles_from_extractor_entities() {
+    let db = db();
+    let ent = |text: &str, day: i64, src: &str, ents: &[&str]| {
+        db.remember(
+            text,
+            RememberOpts {
+                ns: Some("u".into()),
+                at: Some(T0 + day * DAY),
+                source: Some(src.into()),
+                entities: ents.iter().map(|e| e.to_string()).collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    ent("Max the dog loves swimming in the lake.", 1, "c#1", &["Max"]);
+    ent("We took Max to the vet on Tuesday.", 2, "c#2", &["Max"]);
+    ent("Max learned to fetch a frisbee.", 3, "c#3", &["Max"]);
+    ent("Bella came over once.", 4, "c#4", &["Bella"]);
+    let r = db.memory_call("consolidate", json!({"ns": "u", "summaries": false})).unwrap();
+    assert!(r["profiles"]["nodes"].as_u64().unwrap() >= 1, "{r}");
+    let t = db
+        .run_script("?[node, text] := *kleos_mem_profile{ns: 'u', node, text}", Default::default(), ScriptMutability::Immutable)
+        .unwrap();
+    let max = t.rows.iter().find(|r| r[0].get_str() == Some("max")).unwrap_or_else(|| panic!("{:?}", t.rows));
+    let text = max[1].get_str().unwrap();
+    assert!(text.starts_with("Profile: Max"), "{text}");
+    assert!(text.contains("frisbee"), "newest first: {text}");
+    // one mention is not enough for a profile
+    assert!(!t.rows.iter().any(|r| r[0].get_str() == Some("bella")), "{:?}", t.rows);
+    // the profile reaches the context block of a hit that mentions Max
+    let ctx = db.recall_context("What does Max like?", RecallOpts { ns: Some("u".into()), ..Default::default() }).unwrap();
+    assert!(ctx.text.contains("Profile: Max"), "{}", ctx.text);
+}
+
+#[test]
 fn summaries_leave_out_replaced_values() {
     let db = db();
     let lines = [

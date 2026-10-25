@@ -20,7 +20,22 @@ facts:
   in Lisbon now (since 2026-01-06)`);
 - each value with its valid-from and the memories behind it (`evidence`);
 - single-valued properties keep only the newest current value, so a profile
-  follows supersession on the next run.
+  follows supersession on the next run;
+- typed claims count when their type is cue- or rule-backed, or a prototype
+  match at a confident score (≥ 0.55, wave7/closeout; weaker prototype matches
+  stay out).
+
+**Entity profiles from the extractor** (wave7/closeout): a named entity
+(GLiNER, or `entities` passed to `remember`) that 3 to 150 current memories
+mention, and that no ontology profile covers (fewer than `min_facts` facts),
+gets a profile of what those memories say: by property when a claim is typed,
+`mentioned` otherwise, newest first, the entity's kind in the title
+(`Profile: Max (pet) — mentioned: …`). An entity mentioned by more than 150
+memories (a speaker of every turn) is a hub and gets none. Chat stores, where
+the ontology knows little beyond the speakers (24 profiles over LoCoMo's 10
+conversations before), get profiles for the people, pets and places they talk
+about. The count on LoCoMo and QA with profiles on vs off were **not
+re-measured** (measurement cut short by the user).
 
 The text is one line per node:
 
