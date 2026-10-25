@@ -1,0 +1,53 @@
+[package]
+name = "kleos-pg"
+version = "0.1.0"
+edition = "2021"
+description = "Postgres coexistence connector for kleos: CDC ingest (logical replication), zero-maintenance mapping into memories and ontology facts, exactly-once write-back, a Debezium adapter and live queries"
+license = "MPL-2.0"
+repository = "https://github.com/websines/kleos-db"
+keywords = ["postgres", "cdc", "logical-replication", "kleos"]
+categories = ["database"]
+# Git dependencies (the Supabase rust-postgres fork with logical replication)
+# cannot go to crates.io; kleos-pg stays unpublished and out of kleos-core
+# (docs/specs/pg-connector.md, "Crate layout").
+publish = false
+
+[features]
+default = ["tls"]
+## TLS to Postgres (`sslmode=require|verify-ca|verify-full`) through native-tls.
+tls = ["dep:native-tls", "dep:postgres-native-tls"]
+## Live queries: Postgres tables as DataFusion table providers, joined with
+## kleos relations (`pg query`). Pulls DataFusion (large).
+query = [
+    "dep:datafusion",
+    "dep:datafusion-table-providers-postgres",
+    "dep:arrow",
+    "dep:async-trait",
+]
+
+[dependencies]
+kleos = { version = "0.18.0", path = "../kleos-core", default-features = false }
+# The same fork and revision supabase/etl builds on (replication protocol and
+# pgoutput decoding are not in upstream rust-postgres).
+tokio-postgres = { git = "https://github.com/supabase/rust-postgres", rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e", default-features = false, features = ["runtime", "with-chrono-0_4", "with-serde_json-1"] }
+postgres-replication = { git = "https://github.com/supabase/rust-postgres", rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e" }
+postgres-native-tls = { git = "https://github.com/supabase/rust-postgres", rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e", optional = true }
+native-tls = { version = "0.2", optional = true }
+tokio = { version = "1.37.0", features = ["full"] }
+futures = "0.3.30"
+bytes = "1"
+serde = { version = "1.0.199", features = ["derive"] }
+serde_json = "1.0.116"
+serde_yaml = "0.9"
+sha2 = "0.10.8"
+chrono = "0.4.38"
+log = "0.4.21"
+miette = { version = "5.10.0" }
+deadpool = { version = "0.12", default-features = false, features = ["managed", "rt_tokio_1"] }
+datafusion = { version = "55.2", optional = true, default-features = false, features = ["sql", "nested_expressions", "datetime_expressions", "string_expressions", "unicode_expressions", "regex_expressions", "crypto_expressions"] }
+datafusion-table-providers-postgres = { version = "0.14.0", optional = true }
+arrow = { version = "59.2", optional = true, default-features = false }
+async-trait = { version = "0.1", optional = true }
+
+[dev-dependencies]
+kleos = { version = "0.18.0", path = "../kleos-core", default-features = false, features = ["storage-sqlite", "storage-sqlite-src", "graph-algo"] }
