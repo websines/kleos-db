@@ -3,6 +3,24 @@
 *Drafted 2026-10-15 from a survey of 2025–26 research, competing products and the
 kleos source. Priorities: **P0** = first wave, **P1** = next, **P2** = later.*
 
+## Status (2026-10-25)
+
+The plan below is the original research list, kept as written. Progress against it, in
+the order of [`ROADMAP.md`](ROADMAP.md):
+
+| Status | Items |
+|---|---|
+| **Done** | A1, A2; C1, C2, C4, C6; D1, D2, D3, D5, D6; E1, E2, E3, E4, E6, E7, E9, E10; F1, F4; G2; H1; J2, J3; L1 |
+| **Partly done** | D4 (re-rank stage and hook; no built-in cross-encoder ships); D7 (late chunking and multimodal encoders not started; EmbeddingGemma 2 is in place for them); D8 (stores record their embedding model and `::memory reembed` migrates them; no general model registry); F5 (durable workflows run slow work outside transactions; no stored procedures); L2 (internal LoCoMo and LongMemEval runs in `docs/benchmarks/memory.md`; no published standard-judge run) |
+| **In progress (wave 7)** | E5 and K2 (tenancy and access); E8 (skill library); plus a Postgres coexistence connector that was not in the original list |
+| **Open** | A3–A11; B1–B4; C3, C5; F2, F3, F6, F7; G1, G3–G6; H2–H5; I1–I6; J4, J5; K1, K3, K4; L3 |
+| **Held** | J1 (publishing to crates.io and PyPI waits for the owner) |
+
+Built beyond the original list: self-building ontologies with units and inferred links;
+the documents pipeline's Rust OCR port and chunkers; durable workflows; Engram overlays;
+the GLiNER extractor; a memory budget with priority lanes; the stateless MCP server, CLI
+and agent skills.
+
 ## Goal
 
 Make kleos **the one embedded database an AI application or agent needs**: memory,

@@ -8,6 +8,46 @@
 
 [ English | [中文](./README-zh.md) ]
 
+## A memory engine for agents
+
+kleos keeps an agent's memory in one engine: retrieval, history, knowledge graph,
+built-in models, workflows and documents, embedded in your process or run as a
+server. Agents use it through a memory API that needs no query language:
+
+- **Memory API:** `remember` / `recall` / `forget` / `reflect` in Rust, Python,
+  TypeScript, the CLI and MCP. Recall fuses vector, full-text and graph search
+  (personalized PageRank over the ontology), and returns ranked hits or a
+  context block within a token budget.
+  ([spec](docs/specs/memory-api.md))
+- **Facts change, history stays:** a new fact supersedes the old one instead of
+  overwriting it, with valid time and provenance, so "what was true when?" and
+  "where did this come from?" are queries; erasure follows provenance.
+  ([spec](docs/specs/memory-supersession-provenance.md))
+- **Self-building ontology:** typed properties, cardinality-driven supersession,
+  inferred links and units, learned and maintained from the data with history and
+  undo; nobody has to curate a schema.
+  ([spec](docs/specs/ontology.md))
+- **Consolidation:** entity profiles and session summaries built automatically.
+  ([spec](docs/specs/consolidation.md))
+- **Built-in small models:** an embedder (EmbeddingGemma 2 by default), a
+  decider for supersede / duplicate / same-entity calls, and a GLiNER entity
+  extractor, all in-process.
+  ([decide](docs/specs/decide.md), [entity resolution](docs/specs/entity-resolution.md))
+- **Documents:** PDFs, scans, images, Markdown, HTML and DOCX become cited,
+  searchable memory through a Rust port of Indra OCR and structure-aware chunking,
+  ingested durably. ([spec](docs/specs/documents.md))
+- **Durable workflows, branches and live updates:** `::flow` workflows with
+  retries and schedules, memory branches (fork, diff, merge, rewind), and query
+  subscriptions that push changes.
+  ([workflows](docs/specs/durable-workflows.md), [branches](docs/specs/memory-branches.md),
+  [subscriptions](docs/specs/live-subscriptions.md))
+- **Agent surfaces:** a stateless MCP server, a CLI, Agent Skills, and the
+  [TypeScript SDK](docs/sdk/typescript/). See "Agents" below.
+
+Measurements are in [`docs/benchmarks/memory.md`](docs/benchmarks/memory.md).
+In progress: tenancy with human and agent identity at every level, a skill library,
+and a Postgres coexistence connector; see [`ROADMAP.md`](ROADMAP.md).
+
 ## What kleos adds over CozoDB
 
 CozoDB's last upstream commit was 2024-12-04. mnestic, and now kleos, continue
@@ -222,8 +262,8 @@ kleos server --mcp            # POST /mcp behind the server's auth
 ```
 
 - **MCP tools:** `recall`, `remember`, `forget`, `reflect`, `entity_profile`,
-  `doc_add`, `doc_status`, `flow`, `branch` (and a read-only `query` with
-  `--allow-query`). Destructive calls confirm through MCP's multi round-trip
+  `doc_add`, `doc_status`, `flow`, `branch`, `ontology`, `reembed`,
+  `consolidate` (and a read-only `query` with `--allow-query`). Destructive calls confirm through MCP's multi round-trip
   requests; large documents return a task (`io.modelcontextprotocol/tasks`).
   Clients of earlier MCP revisions (`initialize`) are served too.
 - **Skills:** [`skills/`](skills) holds SKILL.md files that teach an agent when
@@ -472,8 +512,9 @@ only Golang wraps the C API directly.
 
 ## Status of the project
 
-CozoDB is still very young, but we encourage you to try it out for your use case.
-Any feedback is welcome.
+kleos is under active development and nothing is published under the kleos name
+yet; build it from this repository. [`ROADMAP.md`](ROADMAP.md) lists what has
+shipped, what is in progress and what comes next.
 
 Versions before 1.0 do not promise syntax/API stability or storage compatibility.
 
