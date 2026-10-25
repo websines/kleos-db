@@ -215,6 +215,24 @@ fn intersection_includes_participants_and_token() {
 }
 
 #[test]
+fn shared_session_memory_is_an_intersection_scope() {
+    let w = World::new("sess");
+    let with = |h: &str, others: &[&str]| PrincipalContext {
+        run: Some("standup".into()),
+        participants: others.iter().map(|x| x.to_string()).collect(),
+        ..cx("eng", Some(h), Some("bot"))
+    };
+    let r = w.put(&with("alice", &["bob"]), "We agreed to ship the beta on Friday.", None);
+    assert_eq!(r["scope"], "sess:bot:standup:alice+bob");
+    // the same session, and each member alone, see it; an outsider's
+    // presence hides it
+    assert_eq!(w.texts(&with("bob", &["alice"]), "ship beta Friday").len(), 1);
+    assert_eq!(w.texts(&cx("eng", Some("bob"), None), "ship beta Friday").len(), 1);
+    assert!(w.texts(&with("alice", &["carol"]), "ship beta Friday").is_empty());
+    assert!(w.texts(&cx("eng", Some("carol"), None), "ship beta Friday").is_empty());
+}
+
+#[test]
 fn graph_walk_stays_inside_visible_scopes() {
     let w = World::new("ppr");
     let alice = cx("eng", Some("alice"), None);

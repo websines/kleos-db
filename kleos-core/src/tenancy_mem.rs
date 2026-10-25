@@ -104,7 +104,19 @@ where
         let need = |x: &Option<String>, what: &str| -> Result<String> {
             x.clone().ok_or_else(|| miette::miette!("scope '{}' needs {what} in the principal context", want.unwrap_or("")))
         };
+        // a shared session writes to the session's intersection scope
+        let session = || -> Result<ScopeKey> {
+            let mut members: Vec<String> = human.iter().cloned().chain(ss.participants.iter().map(|p| p.id.clone())).collect();
+            members.sort();
+            members.dedup();
+            if members.len() < 2 {
+                bail!("scope 'session' needs participants in the principal context");
+            }
+            Ok(ScopeKey::Session { agent: agent.clone(), run: run.clone().unwrap_or_else(|| "default".to_string()), members })
+        };
         let k = match want {
+            None if !ss.participants.is_empty() && human.is_some() => session()?,
+            Some("session") | Some("sess") => session()?,
             None => match (&agent, &human) {
                 (Some(a), Some(h)) => ScopeKey::AgentUser { agent: a.clone(), user: h.clone() },
                 (None, Some(h)) => ScopeKey::User { user: h.clone() },

@@ -270,6 +270,9 @@ pub struct PrincipalContext {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScopeKey {
     Run { agent: String, user: Option<String>, run: String },
+    /// A shared session's memory: an ad-hoc intersection scope readable
+    /// only by its members (and its agent).
+    Session { agent: Option<String>, run: String, members: Vec<String> },
     AgentUser { agent: String, user: String },
     User { user: String },
     Agent { agent: String },
@@ -296,6 +299,11 @@ impl ScopeKey {
                 user: (*u != "-").then(|| u.to_string()),
                 run: r.to_string(),
             }),
+            ["sess", a, r, ms] if (*a == "-" || is_id(a)) && is_id(r) && !ms.is_empty() && ms.split('+').all(is_id) => Some(ScopeKey::Session {
+                agent: (*a != "-").then(|| a.to_string()),
+                run: r.to_string(),
+                members: ms.split('+').map(|m| m.to_string()).collect(),
+            }),
             ["au", a, u] if is_id(a) && is_id(u) => Some(ScopeKey::AgentUser { agent: a.to_string(), user: u.to_string() }),
             ["user", u] if is_id(u) => Some(ScopeKey::User { user: u.to_string() }),
             ["agent", a] if is_id(a) => Some(ScopeKey::Agent { agent: a.to_string() }),
@@ -311,6 +319,7 @@ impl ScopeKey {
     pub fn ns(&self) -> String {
         match self {
             ScopeKey::Run { agent, user, run } => format!("run:{agent}:{}:{run}", user.as_deref().unwrap_or("-")),
+            ScopeKey::Session { agent, run, members } => format!("sess:{}:{run}:{}", agent.as_deref().unwrap_or("-"), members.join("+")),
             ScopeKey::AgentUser { agent, user } => format!("au:{agent}:{user}"),
             ScopeKey::User { user } => format!("user:{user}"),
             ScopeKey::Agent { agent } => format!("agent:{agent}"),
@@ -325,6 +334,7 @@ impl ScopeKey {
     pub fn kind(&self) -> &'static str {
         match self {
             ScopeKey::Run { .. } => "run",
+            ScopeKey::Session { .. } => "sess",
             ScopeKey::AgentUser { .. } => "au",
             ScopeKey::User { .. } => "user",
             ScopeKey::Agent { .. } => "agent",
@@ -339,7 +349,7 @@ impl ScopeKey {
     /// > workspace / legacy > org.
     pub fn rank(&self) -> u8 {
         match self {
-            ScopeKey::Run { .. } => 0,
+            ScopeKey::Run { .. } | ScopeKey::Session { .. } => 0,
             ScopeKey::AgentUser { .. } => 1,
             ScopeKey::User { .. } => 2,
             ScopeKey::Agent { .. } => 3,
@@ -357,6 +367,7 @@ impl ScopeKey {
                 v.extend(user.as_deref());
                 v
             }
+            ScopeKey::Session { agent, members, .. } => agent.iter().map(|a| a.as_str()).chain(members.iter().map(|m| m.as_str())).collect(),
             ScopeKey::AgentUser { agent, user } => vec![agent, user],
             ScopeKey::User { user } => vec![user],
             ScopeKey::Agent { agent } => vec![agent],
@@ -369,6 +380,7 @@ impl ScopeKey {
 pub(crate) fn kind_alias(k: &str) -> Option<&'static str> {
     Some(match k {
         "run" => "run",
+        "sess" | "session" => "sess",
         "au" | "agent_user" => "au",
         "user" => "user",
         "agent" => "agent",
@@ -1615,6 +1627,7 @@ mod tests {
             ScopeKey::AgentUser { agent: "bot".into(), user: "alice".into() },
             ScopeKey::User { user: "alice".into() },
             ScopeKey::Agent { agent: "bot".into() },
+            ScopeKey::Session { agent: Some("bot".into()), run: "r1".into(), members: vec!["alice".into(), "bob".into()] },
             ScopeKey::Team { team: "eng".into() },
             ScopeKey::Workspace,
         ] {

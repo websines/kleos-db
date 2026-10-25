@@ -42,6 +42,13 @@ when { resource.kind == "team" && resource has team && principal in resource.tea
 permit (principal, action == Kleos::Action::"write", resource is Kleos::Scope)
 when { resource.kind == "team" && resource has team && principal in resource.team && principal in resource.ws_writer };
 
+// A shared session (an ad-hoc intersection scope): its members and its agent.
+permit (principal, action in [Kleos::Action::"read", Kleos::Action::"write"], resource is Kleos::Scope)
+when {
+  resource.kind == "sess" && principal in resource.ws_reader &&
+  ((resource has agent && principal in resource.agent) || (resource has members && resource.members.contains(principal)))
+};
+
 // Run and agent-user scopes: their agent and their user.
 permit (principal, action in [Kleos::Action::"read", Kleos::Action::"write"], resource is Kleos::Scope)
 when {
@@ -166,6 +173,12 @@ impl Authz {
             ScopeKey::AgentUser { agent, user } => {
                 attrs.insert("agent".into(), rent(principal_uid(agent)));
                 attrs.insert("user".into(), rent(principal_uid(user)));
+            }
+            ScopeKey::Session { agent, members, .. } => {
+                if let Some(a) = agent {
+                    attrs.insert("agent".into(), rent(principal_uid(a)));
+                }
+                attrs.insert("members".into(), RestrictedExpression::new_set(members.iter().map(|m| rent(principal_uid(m)))));
             }
             ScopeKey::User { user } => {
                 attrs.insert("user".into(), rent(principal_uid(user)));
@@ -415,6 +428,9 @@ where
                     (agent == Some(a.as_str()) && (human.is_some() || user.is_none())) || (human.is_some() && user.as_deref() == human)
                 }
                 ScopeKey::AgentUser { agent: a, user } => human.is_some() && (agent == Some(a.as_str()) || Some(user.as_str()) == human),
+                ScopeKey::Session { agent: a, members, .. } => {
+                    human.is_some_and(|h| members.iter().any(|m| m == h)) || (human.is_some() && a.is_some() && a.as_deref() == agent)
+                }
                 ScopeKey::User { user } => Some(user.as_str()) == human,
                 ScopeKey::Team { team } => az.teams.contains(team),
                 ScopeKey::Org => false,
