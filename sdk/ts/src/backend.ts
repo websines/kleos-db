@@ -49,6 +49,8 @@ export interface Backend {
    * ignored.
    */
   memoryAs(ctx: PrincipalContext, op: string, args: Record<string, unknown>): Promise<any>;
+  /** The Postgres connector's ops (`POST /pg/:op`). Remote only: the connector runs in `kleos server --pg-cdc`. */
+  pg?(op: string, args: Record<string, unknown>): Promise<any>;
   close(): Promise<void>;
 }
 

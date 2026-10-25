@@ -22,6 +22,8 @@ pub enum Area {
     Doc,
     Flow,
     Ontology,
+    /// The Postgres connector (feature `pg-cdc`).
+    Pg,
 }
 
 impl Area {
@@ -31,6 +33,7 @@ impl Area {
             Area::Doc => "doc",
             Area::Flow => "flow",
             Area::Ontology => "ontology",
+            Area::Pg => "pg",
         }
     }
 }
@@ -86,6 +89,13 @@ impl Backend {
                     Area::Doc => {
                         let _ = args;
                         return Err("documents need kleos built with the `docs` feature".into());
+                    }
+                    #[cfg(feature = "pg-cdc")]
+                    Area::Pg => kleos_pg::pg_call(db, op, args),
+                    #[cfg(not(feature = "pg-cdc"))]
+                    Area::Pg => {
+                        let _ = args;
+                        return Err("the Postgres connector needs kleos built with the `pg-cdc` feature".into());
                     }
                 };
                 r.map_err(|e| e.to_string())

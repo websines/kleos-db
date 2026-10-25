@@ -114,6 +114,11 @@ pub(crate) struct ServerArgs {
     /// (docs/specs/mcp-cli-skills.md).
     #[clap(long, default_value_t = false)]
     mcp: bool,
+    /// Mirror a Postgres source (kleos-pg, feature `pg-cdc`;
+    /// docs/specs/pg-connector.md): the connector's YAML config. Repeat for
+    /// several sources. Each runs as a task of this server.
+    #[clap(long = "pg-cdc")]
+    pg_cdc: Vec<String>,
     /// Default namespace of the MCP tools.
     #[clap(long, default_value_t = String::from("default"))]
     mcp_ns: String,
@@ -564,6 +569,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
             ..Default::default()
         })
     });
+    start_pg(&args.pg_cdc, &db);
     if args.default_query_mem_limit > 0 {
         db.set_default_query_mem_limit(Some(args.default_query_mem_limit as usize));
     }
@@ -700,6 +706,8 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .route("/flow/:op", post(flow_op))
         .route("/doc/:op", post(doc_op))
         .route("/ontology/:op", post(ontology_op))
+        .route("/pg/:op", post(pg_op))
+        .route("/pg/debezium/:source", post(pg_debezium))
         .route("/export/:relations", get(export_relations))
         .route("/import", put(import_relations))
         .route("/backup", post(backup))
@@ -1263,6 +1271,79 @@ async fn ontology_op(
             StatusCode::BAD_REQUEST,
             json!({"ok": false, "message": err.to_string()}).into(),
         ),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Start the `--pg-cdc` connectors (and the `pg` flow action with `flow-pg`).
+#[cfg(feature = "pg-cdc")]
+fn start_pg(configs: &[String], db: &DbInstance) {
+    #[cfg(feature = "flow-pg")]
+    if let Err(e) = kleos_pg::writeback::register_flow_action() {
+        panic!("flow action pg: {e:?}");
+    }
+    for path in configs {
+        let cfg = kleos_pg::PgConfig::load(path).unwrap_or_else(|e| panic!("--pg-cdc {path}: {e:?}"));
+        eprintln!("pg connector '{}' (slot {}, publication {}) into namespace '{}'", cfg.source, cfg.slot(), cfg.publication(), cfg.ns);
+        kleos_pg::spawn(cfg, db.clone());
+    }
+}
+
+#[cfg(not(feature = "pg-cdc"))]
+fn start_pg(configs: &[String], _db: &DbInstance) {
+    if !configs.is_empty() {
+        panic!("--pg-cdc needs kleos built with the `pg-cdc` feature");
+    }
+}
+
+/// The Postgres connector (kleos fork; docs/specs/pg-connector.md): `POST
+/// /pg/{status|init|resync|drop_slot|map|approve|query|writeback}` with
+/// `{source, …}`. A read-only principal may only read (`status`, `map`,
+/// `query`).
+async fn pg_op(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let reads = ["status", "map", "query"];
+    if matches!(mutability, ScriptMutability::Immutable) && !reads.contains(&op.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            json!({"ok": false, "message": format!("pg {op} needs write access")}).into(),
+        );
+    }
+    if op == "map" && args.get("approve").is_some() && matches!(mutability, ScriptMutability::Immutable) {
+        return (StatusCode::FORBIDDEN, json!({"ok": false, "message": "pg approve needs write access"}).into());
+    }
+    let backend = kleos_bin::backend::Backend::Embedded(st.db.clone());
+    let result = spawn_blocking(move || backend.call(kleos_bin::backend::Area::Pg, &op, args)).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (StatusCode::BAD_REQUEST, json!({"ok": false, "message": err}).into()),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Debezium Server's HTTP sink target (kleos fork; docs/specs/pg-connector.md,
+/// "Debezium adapter"): `POST /pg/debezium/<source>` with one change event
+/// or a list. Send the auth token with
+/// `debezium.sink.http.headers.x-cozo-auth=<token>`.
+async fn pg_debezium(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(source): Path<String>,
+    Json(events): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if matches!(mutability, ScriptMutability::Immutable) {
+        return (StatusCode::FORBIDDEN, json!({"ok": false, "message": "debezium ingest needs write access"}).into());
+    }
+    let backend = kleos_bin::backend::Backend::Embedded(st.db.clone());
+    let result = spawn_blocking(move || backend.call(kleos_bin::backend::Area::Pg, "debezium", json!({"source": source, "events": events}))).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        // a failed event must be retried by the sender: 5xx
+        Ok(Err(err)) => (StatusCode::SERVICE_UNAVAILABLE, json!({"ok": false, "message": err}).into()),
         Err(err) => internal_error(err),
     }
 }
