@@ -1944,8 +1944,11 @@ impl<'s, S: Storage<'s>> Db<S> {
                 (true, true) => "(ns == $ns && current) || is_in(ns, $anc)",
                 (true, false) => "is_in(ns, $lin)",
             };
+            // a principal's scopes: the exact scan of a selective search reads
+            // only their key ranges
+            let prefixes = if sc.union { ", prefixes: $lin" } else { "" };
             legs.push(format!(
-                "l[lid, id, score] := ~{MEM_VEC}:hnsw{{ns, id, current | query: vec($qv), k: {fetch}, ef: {ef}, bind_distance: d, filter: {filter}}}, lid = 'semantic', score = -d",
+                "l[lid, id, score] := ~{MEM_VEC}:hnsw{{ns, id, current | query: vec($qv), k: {fetch}, ef: {ef}, bind_distance: d, filter: {filter}{prefixes}}}, lid = 'semantic', score = -d",
                 ef = fetch.max(64)
             ));
             p.push((

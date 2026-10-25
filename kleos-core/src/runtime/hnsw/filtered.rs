@@ -291,7 +291,9 @@ impl SessionTx<'_> {
                             s
                         }
                     };
-                    if remaining > scan_cost(size, p) {
+                    // a prefix scan reads about the passing share of the rows
+                    let scanned = if config.prefixes.is_some() { size * p } else { size };
+                    if remaining > scan_cost(scanned, if config.prefixes.is_some() { 1.0 } else { p }) {
                         return self.hnsw_knn_brute_force(q, config, pred, stack, vec_cache);
                     }
                 }
@@ -383,6 +385,11 @@ impl SessionTx<'_> {
         tuple: Tuple,
         dist: f64,
     ) -> Result<Option<Tuple>> {
+        if let Some(ps) = &config.prefixes {
+            if !tuple.first().is_some_and(|v| ps.contains(v)) {
+                return Ok(None);
+            }
+        }
         if pred.needs_bindings {
             let bound = bind_result(config, key, tuple, dist)?;
             Ok(eval_bytecode_pred(pred.code, &bound, stack, pred.span)?.then_some(bound))
@@ -411,7 +418,13 @@ impl SessionTx<'_> {
         if k == 0 {
             return Ok(vec![]);
         }
-        for row in config.base_handle.scan_all(self) {
+        // with `prefixes` (a principal's scope namespaces), only their key
+        // ranges are read
+        let rows: Box<dyn Iterator<Item = Result<Tuple>> + '_> = match &config.prefixes {
+            Some(ps) => Box::new(ps.iter().flat_map(move |p| config.base_handle.scan_prefix(self, &vec![p.clone()]))),
+            None => Box::new(config.base_handle.scan_all(self)),
+        };
+        for row in rows {
             let row = row?;
             if !pred.needs_bindings && !eval_bytecode_pred(pred.code, &row, stack, pred.span)? {
                 continue;

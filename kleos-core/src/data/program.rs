@@ -1151,6 +1151,11 @@ pub(crate) struct HnswSearch {
     pub(crate) bind_vector: Option<Symbol>,
     pub(crate) radius: Option<f64>,
     pub(crate) filter: Option<Expr>,
+    /// kleos fork (tenancy): the values of the first key column a passing
+    /// row may have (`prefixes: [...]`). The exact scan for selective
+    /// filters then reads only those key ranges, and rows outside them never
+    /// pass.
+    pub(crate) prefixes: Option<Vec<DataValue>>,
     pub(crate) span: SourceSpan,
 }
 
@@ -1745,6 +1750,13 @@ impl SearchInput {
         };
 
         let filter = self.parameters.remove("filter");
+        let prefixes = match self.parameters.remove("prefixes") {
+            None => None,
+            Some(expr) => match expr.eval_to_const()? {
+                DataValue::List(l) => Some(l),
+                _ => bail!("HNSW `prefixes` must be a list of first-key values"),
+            },
+        };
 
         let bind_field = match self.parameters.remove("bind_field") {
             None => None,
@@ -1832,6 +1844,7 @@ impl SearchInput {
             bind_vector,
             radius,
             filter,
+            prefixes,
             span: self.span,
         }));
 

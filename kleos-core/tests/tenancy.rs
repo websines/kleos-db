@@ -364,6 +364,23 @@ fn audit_chain_covers_writes_and_reads() {
 }
 
 #[test]
+fn selective_scope_set_finds_every_visible_memory() {
+    let w = World::new("sel");
+    // 150 memories bob's agent keeps about him; carol sees none of them
+    let bb = cx("eng", Some("bob"), Some("bot"));
+    for i in 0..150 {
+        w.put(&bb, &format!("Bob's note {i} about the quarterly planning budget."), None);
+    }
+    // carol (a reader) has one note of her own and reads one workspace note
+    let me = cx("eng", Some("carol"), None);
+    w.put(&me, "Planning budget review is on Tuesday.", Some("user"));
+    w.put(&cx("eng", Some("bob"), None), "The planning budget is frozen until May.", Some("workspace"));
+    let mut got = w.texts(&me, "quarterly planning budget");
+    got.sort();
+    assert_eq!(got, vec!["Planning budget review is on Tuesday.", "The planning budget is frozen until May."]);
+}
+
+#[test]
 fn cozoscript_ops() {
     let w = World::new("script");
     let run = |s: &str| w.db.run_script(s, Default::default(), ScriptMutability::Mutable).unwrap();
