@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { KleosError } from './backend.js';
 import type { AdminOp, Backend, ModelKind } from './backend.js';
-import type { FlowWorker, FlowWorkerOptions, Json, ModelSpec, NamedRows } from './types.js';
+import type { FlowWorker, FlowWorkerOptions, Json, ModelSpec, NamedRows, PrincipalContext } from './types.js';
 
 interface NativeDb {
   runScript(script: string, paramsJson: string, immutable: boolean): Promise<string>;
@@ -21,6 +21,8 @@ interface NativeDb {
   flowCall(op: string, argsJson: string): Promise<string>;
   docCall(op: string, argsJson: string): Promise<string>;
   adminCall(op: string, argsJson: string): Promise<string>;
+  tenantCall(op: string, argsJson: string): Promise<string>;
+  memoryCallAs(ctxJson: string, op: string, argsJson: string): Promise<string>;
   flowWorker(optsJson: string): FlowWorker;
   close(): boolean;
 }
@@ -136,6 +138,12 @@ export class NativeBackend implements Backend {
   }
   admin(op: AdminOp, args: Record<string, unknown>) {
     return call(`admin.${op}`, () => this.db.adminCall(op, JSON.stringify(args)));
+  }
+  tenant(op: string, args: Record<string, unknown>) {
+    return call(`tenant.${op}`, () => this.db.tenantCall(op, JSON.stringify(args)));
+  }
+  memoryAs(ctx: PrincipalContext, op: string, args: Record<string, unknown>) {
+    return call(`principal.${op}`, () => this.db.memoryCallAs(JSON.stringify(ctx), op, JSON.stringify(args)));
   }
   async enableModel(kind: ModelKind, name: string, spec: ModelSpec): Promise<void> {
     const s = JSON.stringify(spec);
