@@ -375,6 +375,14 @@ impl<'s, S: Storage<'s>> Db<S> {
                     kinds.insert(view.canonical(&e), k);
                 }
             }
+            // an extractor's entities carry their kind on the spans
+            if self.consol_exists(MEM_EXTRACT) {
+                for r in self.mem_q(&format!("?[eid, label] := *{MEM_EXTRACT}{{ns: $ns, eid, label, kept}}, kept, !is_null(eid)"), vec![("ns", s(ns))])?.rows {
+                    if let (Some(e), Some(k)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                        kinds.entry(view.canonical(&e)).or_insert(k);
+                    }
+                }
+            }
             let mut by_e: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
             for r in self.mem_q(&format!("?[eid, id] := *{MEM_MENTION}{{ns: $ns, eid, id}}"), vec![("ns", s(ns))])?.rows {
                 if let (Some(e), Some(id)) = (cell_str(&r[0]), cell_str(&r[1])) {
