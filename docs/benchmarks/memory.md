@@ -932,3 +932,53 @@ setup as above (decider on, held-out 23 KU questions, Metal).*
   these and has the best NDCG@10 (0.955 vs 0.939). So the fix gives back most of
   the re-rank's small top-5 edge on this sample; LongMemEval QA was not rerun.
   Results: `.bench-data/quality/results/{kufix,kubase}/lme-user`.
+
+## Close-out (wave7/closeout, branch base 0af7f19)
+
+*The user cut measurement short for this branch: no LongMemEval/LoCoMo
+retrieval or QA reruns, no KU / life-stream / typing sweeps. What was and
+was not measured, item by item; the earlier tables above stand as they were
+measured, on their own commits.*
+
+- **PPR (`graph: 'ppr'`) stays lift-only** (`max(r, 0.7·r + 0.3·ppr)`,
+  0cdbcc4). The LongMemEval QA rerun with lift-only PPR and the middle-ground
+  variants (capped sinking, lift-only for current-value claims) were **not
+  run**; LongMemEval QA for `ppr` is still the old blend's 0.647 (above), which
+  predates the lift-only fix. Multi-session retrieval with lift-only: Rall@10
+  0.917, Rall@5 0.667 (PPR and the current value, above).
+- **KU v2 / v1 and the life stream were not re-run** on the final build. Last
+  measured: KU v2 latest-first 83% (91% hide-pending), v1 74% (87%), life
+  stream v2 12/1/3 (0cdbcc4).
+- **Over-typing (180-pair audit):** the new thin-pair rule, replayed offline
+  on EmbeddingGemma 2 types from 0af7f19, allows 7 of the 180 known-wrong
+  replacements (13 before; v1: 7); the 22 held-out true KU pairs are
+  unaffected. Not re-run end to end (docs/specs/ontology.md).
+- **Summaries without replaced values** and **entity profiles from
+  extractor entities**: unit/integration tests only; consolidation QA
+  (summaries on vs off, profiles on vs off) and the LoCoMo profile count were
+  **not re-measured** (docs/specs/consolidation.md).
+- **Consolidation LLM summaries:** one live call against Synthetic
+  (`syn:small:text`), no errors; see docs/specs/consolidation.md.
+
+### Inferred-link recall (`graph: 'inferred'`)
+
+A small relations benchmark, `kleos-core/tests/memory_graph.rs`
+`inferred_recall_on_relation_questions`: 12 memories (four relatives named
+with their relation, three of their facts that never name it — "Tom plays the
+cello in an orchestra." —, a friend, distractors) and 4 relation questions
+("Who are my relatives?", "What are my family members up to?", "What do my
+relatives do in their free time?", "Which relatives do I have?"), gold = the
+relatives' memories. No models (text search seeds the graph; kinship facts
+by rule). Measured on the branch build:
+
+| graph | Recall@10 (mean of 4 questions) |
+|---|---|
+| `off` | 0.000 |
+| `inferred` | **1.000** |
+| `ppr` (with the inferred expansion) | **1.000** |
+
+Plain text search finds none of them (the questions share no content word
+with the memories; an embedder would find some); the inferred `relative_of`
+links reach all of them. This is a synthetic sanity set (4 questions), not a
+replacement for the life-stream / LoCoMo relations run the plan asked for,
+which was not run (measurement cut short).

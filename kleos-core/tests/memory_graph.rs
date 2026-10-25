@@ -155,3 +155,46 @@ fn units_convert_validate_and_restate() {
     assert!((c["value"].as_f64().unwrap() - 6.2137).abs() < 1e-3, "{c}");
     assert!(db.ontology_call("convert", json!({"value": 10, "from": "EUR", "to": "USD"})).is_err());
 }
+
+/// A small relations benchmark for `graph: 'inferred'` (docs/benchmarks/memory.md,
+/// "Inferred-link recall"): relatives' memories that never name the relation
+/// ("Tom plays the cello") are reachable only through the kinship facts. Prints
+/// Recall@10 per mode; no models (text search seeds the graph).
+#[test]
+fn inferred_recall_on_relation_questions() {
+    let db = db();
+    let m = |t: &str, d: i64| rem(&db, t, d, &[]);
+    let sister = m("My sister Anna lives in Munich.", 1);
+    let brother = m("My brother Tom works at Siemens.", 2);
+    let mother = m("My mother Rosa retired last spring.", 3);
+    let grandpa = m("My grandfather Otto was a sailor.", 4);
+    let hike = m("Anna loves hiking in the Alps.", 5);
+    let cello = m("Tom plays the cello in an orchestra.", 6);
+    let garden = m("Rosa grows tomatoes on her balcony.", 7);
+    m("My friend Kai moved to Oslo.", 8);
+    m("Kai collects vinyl records.", 9);
+    m("I bought a new bike last week.", 10);
+    m("The office moved to a new building.", 11);
+    m("I watched a documentary about whales.", 12);
+    let all = vec![sister.clone(), brother.clone(), mother.clone(), grandpa.clone(), hike.clone(), cello.clone(), garden.clone()];
+    let questions: Vec<(&str, Vec<String>)> = vec![
+        ("Who are my relatives?", all.clone()),
+        ("What are my family members up to?", all.clone()),
+        ("What do my relatives do in their free time?", vec![hike.clone(), cello.clone(), garden.clone()]),
+        ("Which relatives do I have?", vec![sister, brother, mother, grandpa]),
+    ];
+    let mut score = std::collections::BTreeMap::new();
+    for mode in ["off", "inferred", "ppr"] {
+        let mut sum = 0.0;
+        for (q, gold) in &questions {
+            let hits = recall(&db, q, mode);
+            let found = gold.iter().filter(|g| hits.iter().any(|h| &h.id == *g)).count();
+            sum += found as f64 / gold.len() as f64;
+        }
+        let r = sum / questions.len() as f64;
+        eprintln!("inferred-link recall: graph {mode}: Recall@10 {r:.3}");
+        score.insert(mode, r);
+    }
+    assert!(score["inferred"] > score["off"], "{score:?}");
+    assert!(score["ppr"] >= score["inferred"] - 1e-9, "{score:?}");
+}
