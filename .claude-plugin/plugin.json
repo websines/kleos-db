@@ -1,7 +1,7 @@
 {
   "name": "kleos",
   "version": "0.1.0",
-  "description": "kleos memory engine for agents: skills that teach when and how to remember, recall, store documents, inspect the ontology and use branches, plus the kleos MCP server (protocol 2026-07-28).",
+  "description": "kleos memory engine for agents: skills that teach when and how to remember, recall, store documents, inspect the ontology, use branches and use the skill library (versioned, measured procedures), plus the kleos MCP server (protocol 2026-07-28, skills over MCP).",
   "author": {
     "name": "kleos"
   },
@@ -13,7 +13,8 @@
     "mcp",
     "knowledge-graph",
     "documents",
-    "agents"
+    "agents",
+    "skills"
   ],
   "mcpServers": {
     "kleos": {

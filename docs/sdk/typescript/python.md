@@ -42,6 +42,9 @@ camelCase or snake_case.
 | `db.decide(name, template, a, b)` | `await kleos.decide(name, template, a, b)` |
 | `db.export_relations([...])` / `db.import_relations(d)` | `await kleos.exportRelations([...])` / `await kleos.importRelations(d)` |
 | `db.backup(path)` / `db.restore(path)` / `db.import_from_backup(path, rels)` | `await kleos.backup(path)` / `restore(path)` / `importFromBackup(path, rels)` |
+| `db.skill_call("find", {"task": t, "k": 3})` | `await kleos.findSkills(t, { k: 3 })` |
+| `db.skill_call("record_outcome", {"name": n, "success": True, "route": r})` | `await kleos.recordSkillOutcome({ name: n }, { success: true, route: r })` |
+| `db.skill_call(op, {...})` (any skill op) | `await kleos.skill(op, {...})` |
 | `db.close()` | `await kleos.close()` |
 
 **Not in the TypeScript SDK yet.** Most of these are reachable through

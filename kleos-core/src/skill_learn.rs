@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn answers_and_json() {
         assert_eq!(final_answer("work\nANSWER: INV-42"), "INV-42");
-        assert_eq!(extract_json("sure:\n```json\n[{\"op\":\"delete\",\"line\":1}]\n```")[0]["op"], "delete");
+        assert_eq!(extract_json("sure:\n```json\n[{\"op\":\"delete\",\"line\":1}]\n```").unwrap()[0]["op"], "delete");
         assert_eq!(slug("My Skill!! v2", "x"), "my-skill-v2");
         let md = extract_skill_md("```markdown\n---\nname: Bad Name\ndescription: does things\n---\nbody\n```", "fallback").unwrap();
         assert!(md.contains("name: bad-name"));

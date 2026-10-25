@@ -73,6 +73,9 @@ pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 const CHUNK_CHARS: usize = 1000;
 /// Reference files indexed per skill (first chunk each).
 const INDEXED_REFERENCES: usize = 4;
+/// Index chunks per skill, at most (a very long SKILL.md is indexed by its
+/// description and its first sections).
+const MAX_CHUNKS: usize = 24;
 
 const FTS_FILTERS: &str = "[Lowercase, Stopwords('en'), Stemmer('english')]";
 
@@ -375,11 +378,7 @@ pub fn parse_skill_md(text: &str) -> Result<SkillDoc> {
 
 /// A `SKILL.md` with the same frontmatter text and a new body.
 pub fn with_body(doc: &SkillDoc, body: &str) -> String {
-    let mut b = body.to_string();
-    if !b.starts_with('\n') {
-        b.insert(0, '\n');
-    }
-    format!("---\n{}---\n{}", doc.fm_text, b)
+    format!("---\n{}---\n{}", doc.fm_text, body)
 }
 
 /// One file of a version's manifest.
@@ -551,6 +550,7 @@ pub(crate) fn chunks_of(name: &str, description: &str, body: &str, refs: &[(Stri
         }
     }
     flush(&mut cur, &heading, &mut out);
+    out.truncate(MAX_CHUNKS - refs.len().min(INDEXED_REFERENCES));
     for (path, text) in refs.iter().take(INDEXED_REFERENCES) {
         let t: String = text.chars().take(CHUNK_CHARS).collect();
         if !t.trim().is_empty() {

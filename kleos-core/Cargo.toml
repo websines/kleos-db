@@ -280,6 +280,11 @@ required-features = ["infer"]
 name = "memory_scenario"
 required-features = ["infer"]
 
+# routing at scale and the learning-loop demo (docs/benchmarks/skills.md)
+[[example]]
+name = "skill_bench"
+required-features = ["infer"]
+
 [[example]]
 name = "concurrency_bench"
 required-features = ["infer"]

@@ -68,14 +68,14 @@ fn md(name: &str, desc: &str, body: &str) -> String {
 fn interop_round_trip_retrieval_and_sep2640() {
     let db = db();
     let r = call(&db, "import", json!({"path": repo_skills(), "activate": true}));
-    assert_eq!(r["imported"].as_array().unwrap().len(), 4);
+    assert_eq!(r["imported"].as_array().unwrap().len(), 5);
     let list = call(&db, "list", json!({}));
-    assert_eq!(list.as_array().unwrap().iter().filter(|s| s["status"] == "active").count(), 4);
+    assert_eq!(list.as_array().unwrap().iter().filter(|s| s["status"] == "active").count(), 5);
 
     // lossless export: byte-identical folders
     let out = tmp();
     call(&db, "export", json!({"path": out.path()}));
-    for name in ["kleos-memory", "kleos-documents", "kleos-ontology", "kleos-branches"] {
+    for name in ["kleos-memory", "kleos-documents", "kleos-ontology", "kleos-branches", "kleos-skills"] {
         let a = std::fs::read(repo_skills().join(name).join("SKILL.md")).unwrap();
         let b = std::fs::read(out.path().join(name).join("SKILL.md")).unwrap();
         assert_eq!(a, b, "{name} changed in the round trip");
@@ -113,7 +113,7 @@ fn interop_round_trip_retrieval_and_sep2640() {
     let full = call(&db, "entries", json!({"mode": "full", "limit": 3}));
     assert_eq!(full["nextCursor"], "3");
     let page2 = call(&db, "entries", json!({"mode": "full", "limit": 3, "cursor": "3"}));
-    assert_eq!(page2["skills"].as_array().unwrap().len(), 1);
+    assert_eq!(page2["skills"].as_array().unwrap().len(), 2);
     let tk = call(&db, "entries", json!({"task": "what did the user say about the project deadline", "k": 1}));
     assert_eq!(tk["skills"][0]["frontmatter"]["name"], "kleos-memory");
 

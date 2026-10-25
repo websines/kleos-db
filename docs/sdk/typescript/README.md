@@ -22,7 +22,7 @@ Switching is one line: `open({ path })` or `connect({ url })`.
 |---|---|
 | [Getting started](getting-started.md) | Install, embedded vs remote, first `remember` and `recall`, models and the memory budget |
 | [Concepts](concepts.md) | Memories and claims, supersession, namespaces, time travel, documents, entities and the ontology, branches, workflows, priority lanes |
-| Guides | [Chat agent with per-user memory](guides/chat-agent.md) · [Documents and citations](guides/documents.md) · [Support agent with entity profiles](guides/support-profiles.md) · [Branches](guides/branches.md) · [Long-running workflows](guides/workflows.md) · [kleos over MCP](guides/mcp.md) · [Serverless and edge](guides/serverless.md) |
+| Guides | [Chat agent with per-user memory](guides/chat-agent.md) · [Documents and citations](guides/documents.md) · [Support agent with entity profiles](guides/support-profiles.md) · [Branches](guides/branches.md) · [Long-running workflows](guides/workflows.md) · [Skills](guides/skills.md) · [kleos over MCP](guides/mcp.md) · [Serverless and edge](guides/serverless.md) |
 | [API reference](api.md) | Every method, its options and results |
 | [Python equivalents](python.md) | The same calls in the Python binding |
 | [Troubleshooting](troubleshooting.md) | Native builds, model downloads, the memory budget, errors |

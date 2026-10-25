@@ -46,7 +46,7 @@ fn sep2640_listing_get_read_and_directories() {
     let (r, st) = call(&s, "skills/list", json!({}));
     assert_eq!(st, 200);
     let skills = r["result"]["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 4);
+    assert_eq!(skills.len(), 5);
     assert!(r["result"]["ttlMs"].as_u64().is_some());
     // every entry: verbatim frontmatter, complete resources, digests that match the bytes
     for e in skills {
@@ -80,7 +80,7 @@ fn sep2640_listing_get_read_and_directories() {
     assert_eq!(r["result"]["skills"].as_array().unwrap().len(), 0);
     let full = server("full");
     let (r, _) = call(&full, "skills/list", json!({}));
-    assert_eq!(r["result"]["skills"].as_array().unwrap().len(), 4);
+    assert_eq!(r["result"]["skills"].as_array().unwrap().len(), 5);
 }
 
 #[test]

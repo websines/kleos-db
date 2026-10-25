@@ -156,6 +156,7 @@ errors (unknown tool, bad params) as JSON-RPC errors.
 Background tasks of an embedded store (re-embed, consolidate) run on an in-process workflow worker the server starts on first use; with `--url`, the remote server's own worker runs them.
 | `branch` | `action` (`fork`, `diff`, `merge`, `rewind`, `discard`, `list`), `from?`, `to?`, `ns?`, `a?`, `b?`, `into?`, `at?`, `dry_run?`, `confirm?` | destructive for merge/rewind/discard | memory branches |
 | `query` | `script`, `params?` | read-only | CozoScript, always run immutable; off unless `--allow-query` |
+| `find_skills`, `get_skill`, `record_skill_outcome`, `propose_skill`, `skill_admin` | see docs/specs/skills.md | find/get read-only; admin confirms | the skill library; the server also implements the skills extension (SEP-2640: `skills/list`, `skills/get`, `skill://` resources, `resources/directory/read`) |
 
 `ns` defaults to the server's default namespace (`--ns`, config, else
 `default`). Results: `content` holds one text block (the context block for
@@ -207,7 +208,7 @@ kleos server --mcp ...                       # HTTP, also serves POST /mcp
 
 ## 4. Skills
 
-`skills/` holds four skills in the open SKILL.md format (YAML `name` and
+`skills/` holds five skills in the open SKILL.md format (YAML `name` and
 `description`, Markdown body), each teaching *when* and *how* with the CLI
 first and the MCP tool names alongside:
 
@@ -217,6 +218,7 @@ first and the MCP tool names alongside:
 | `kleos-documents` | attach files with `remember`/`doc add`, wait for large ones, cite `[file p. N]` |
 | `kleos-ontology` | inspect learned properties, history and undo |
 | `kleos-branches` | fork before risky experiments, diff, merge with a dry run first, discard |
+| `kleos-skills` | find the few skills that fit a task, report outcomes with the route, propose what worked (docs/specs/skills.md) |
 
 The repository root is a Claude Code plugin: `.claude-plugin/plugin.json`
 names the skills directory and an MCP server entry (`kleos mcp`). It
