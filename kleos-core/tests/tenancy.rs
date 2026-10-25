@@ -555,6 +555,16 @@ fn perf_scope_filter() {
     let session = time(&|_| {
         w.call(&ctx, "scopes", json!({})).unwrap();
     });
+    // an uncached ScopeSet (Cedar over the candidate scopes) after every
+    // membership change
+    let mut cold = 0.0;
+    for i in 0..20 {
+        w.t("grant", json!({"ws": "eng", "principal": "carol", "role": if i % 2 == 0 { "reader" } else { "writer" }}));
+        let t = std::time::Instant::now();
+        w.call(&ctx, "scopes", json!({})).unwrap();
+        cold += t.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    }
+    println!("  uncached session + scope set {cold:.2} ms");
     println!("recall p-mean: scoped {scoped:.2} ms, plain {unscoped:.2} ms (4,000 memories, graph off)");
     println!("  one scope as principal {one:.2} ms, one namespace of the partition {part:.2} ms, session + scope set {session:.2} ms");
 }

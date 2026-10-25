@@ -1,6 +1,6 @@
 # Tenancy, identity and access control
 
-Status: implemented (wave7/tenancy, 2026-10-25). Sections marked *later* are not built in v1; "v1 limits" lists what v1 does differently from the full design.
+Status: implemented (wave7/tenancy, 2026-10-25; follow-up closing the first cut's deferred items the same day). "Limits" lists what is still not built and why.
 
 Design basis: [research/tenancy-research.md](../../../research/tenancy-research.md) (in the parent repo), its "Recommendations", "(h) v1 versus later" and "Flags". The decisions below are final for v1.
 
@@ -53,6 +53,7 @@ A scope is a typed tuple. Inside a partition it is stored as the memory **namesp
 | Kind | Tuple | `ns` | Partition | Default writer | Readers |
 |---|---|---|---|---|---|
 | `run` | (agent, user, run) | `run:<agent>:<user\|->:<run>` | workspace | the run's agent | the agent, the user |
+| `session` | (agent, run, members) | `sess:<agent\|->:<run>:<m1>+<m2>…` | workspace | **default target of a shared session** (a context with participants) | its members and its agent: an ad-hoc intersection scope |
 | `agent_user` | (agent, user) | `au:<agent>:<user>` | workspace | **default target of an agent acting for a human** | the agent, the user |
 | `user` | (user) | `user:<user>` | workspace | default target of a human alone | the user; agents acting for the user (link assurance ≥ `issuer_endorsed`) |
 | `agent` | (agent) | `agent:<agent>` | workspace | promotion only | workspace readers |
@@ -62,7 +63,9 @@ A scope is a typed tuple. Inside a partition it is stored as the memory **namesp
 
 `<agent>` is the agent's template when it has one. Namespaces of the implicit `default` workspace that predate tenancy are **legacy scopes**: any other `ns` string is read as kind `ns`, with workspace readers and writers (this is how existing namespaces map into the implicit workspace).
 
-Precedence, narrowest first: `run` > `agent_user` > `user` > `agent` > `team` > `workspace` / `ns` > `org`.
+Precedence, narrowest first: `run` / `session` > `agent_user` > `user` > `agent` > `team` > `workspace` / `ns` > `org`.
+
+A **session** scope's members are the context's human and participants (sorted). A later context reads it only when every one of its actors is a member (or its agent), so a shared conversation's memory is visible to the same group, to each member alone, and to nobody who was not there.
 
 ### Principal context and actor chain
 
@@ -129,10 +132,12 @@ Cedar is evaluated over a handful of **candidate scopes** per request (the actor
 
 `scope_set(ctx, action)` → the namespaces of the partition (and whether the org scope is included) that the context may read or write. Computed once per request, cached by `(context hash, membership epoch, scope epoch)`; the scope epoch moves when a new scope namespace is created. Only scopes that exist (have a namespace row) are returned for reads.
 
+**Why not Cedar partial evaluation (TPE).** `cedar-policy`'s `tpe` (`query_resource`) would enumerate the scopes a principal may read from residual policies instead of evaluating concrete candidates. It is not used: the index pre-filter needs the concrete namespaces of the partition anyway, so enumeration over the partition's namespace list is unavoidable; the candidates are pre-filtered to the actors' own personal and session scopes, their teams, the workspace and agent scopes (a handful per request, whatever the number of namespaces), and Cedar is evaluated over those only. Measured (release, see "Results"): an uncached session plus ScopeSet costs 0.7 ms, a cached one 0.3 ms. TPE is also an experimental API (feature `tpe`, subject to change). If org policies grow beyond what concrete evaluation handles, TPE can replace the per-candidate loop in `tenancy_authz.rs` without changing callers.
+
 ### Enforcement points
 
 1. **Routing (hard wall).** A principal call runs on the workspace's partition view; no relation of another workspace can be named from it.
-2. **Pre-filter in the indexes.** Recall searches with `filter: is_in(ns, $scopes) && current` in HNSW (the filter runs inside the bottom-layer search; the existing exact scan takes over when the projected graph work exceeds a scan, i.e. for very selective filters) and `is_in(ns, $scopes)` in FTS. Never a post-filter of a fixed top-k.
+2. **Pre-filter in the indexes.** Recall searches with `filter: is_in(ns, $scopes) && current, prefixes: $scopes` in HNSW (the filter runs inside the bottom-layer search; for very selective filters the exact scan takes over and reads **only the scopes' key ranges** — the `prefixes` option) and `is_in(ns, $scopes), prefixes: $scopes` in FTS, where BM25's `N` and every document frequency are counted over the scopes' key ranges only, so scores reveal nothing about other scopes. Never a post-filter of a fixed top-k.
 3. **Graph walk.** The PPR walk, inferred-link expansion and entity expansion read only rows of the scope namespaces (facts, mentions, types, entities), so invisible nodes are never loaded: no ranking mass and no `via` explanation can pass through them.
 4. **Derived data.** Profiles and summaries are built per scope namespace (inputs from that scope only) and composed at read time by precedence.
 5. **Writes** check `write` on the target scope; promotion checks `read` on the source and `promote` on the target.
@@ -146,7 +151,8 @@ Cedar is evaluated over a handful of **candidate scopes** per request (the actor
 - Workspace `w` → partition `ws_<w>`; org `o` → `org_<o>`.
 - The implicit `default` workspace is the unpartitioned store, so existing data stays where it is.
 - The root view hides partitioned relations from `::relations`.
-- Process-wide buffers keyed by namespace (the access-count buffer) carry the partition too.
+- Each partition has its own runtime state: access-count buffer, document runner and consolidation runner. `DbInstance::flow_worker` (and so `kleos server --flow-worker`) serves the plain store and every workspace and org partition (re-listed every few seconds), so workflows, document ingestions and Engram workflows of a workspace run without a hand-made partition view; a principal call starts its partitions' document and consolidation runners as `remember` does for the plain store.
+- Cached embeddings are keyed by the caller's workspace and ScopeSet as well as the text (`embed::with_cache_scope`), so cache timing reveals nothing across scopes.
 
 ## Schema
 
@@ -165,7 +171,10 @@ Control plane (global, created by the first `::tenant` op):
 | `kleos_tn_key` | `{principal => key: Bytes, created}` (pseudonym keys; deleted on erasure) |
 | `kleos_tn_promotion` | `{id => ws, from_ns, ids: [String], to, chain: Json, status, approved_by?, at}` |
 | `kleos_tn_audit` | `{ws, seq => ts, op, chain: Json, accountable, targets: Json, relations: [String], scope_set, decision: Json, otel: Json, prev, hash}` |
-| `kleos_tn_meta` | `{key => value}` (`epoch`, `version`) |
+| `kleos_tn_meta` | `{key => value}` (`epoch`, `scope_epoch:<ws>`, `version`) |
+| `kleos_tn_audit_head` | `{ws => seq, hash}` (the chain head, written with each event) |
+| `kleos_tn_request` | `{id => ws, op, ns, ids: [String], args: Json, chain: Json, requested_by, status, approved_by?, result?, at}` (curation requests) |
+| `kleos_tn_jwks` | `{principal => jwks: Json, updated}` (keys for `private_key_jwt`) |
 
 Memory schema **v9** (every partition, and the root store on its next open; created empty):
 
@@ -190,9 +199,10 @@ A v8 store gains both on first use; nothing is backfilled, and nothing is writte
 | `grant` / `revoke` | `ws, principal \| team, role, actions?` | |
 | `policy_set` | `org, cedar?, sponsor_ceiling?` | the Cedar text is validated before it is stored |
 | `apikey_create` / `apikey_revoke` | `principal, actions?, label?` → `{key}` once | |
+| `principal_key_set` | `id, jwks` | the public keys an agent signs `private_key_jwt` assertions with |
 | `principal_disable` | `id` | |
 | `erase` | `principal, reassign_to?` | see "Erasure" |
-| `approve` / `reject` | `promotion, as` | see "Promotion" |
+| `approve` / `reject` | `promotion \| request, as` | see "Promotion" and the curation of agent and org scopes |
 | `audit` | `ws, from_seq?, limit?, principal?` | events; `principal` matches by pseudonym |
 | `audit_verify` | `ws` | `{ok, events, broken_at?}` |
 | `scopes` | `ctx, action?` | the ScopeSet, for debugging |
@@ -206,7 +216,8 @@ The memory ops take the same options as the memory API, plus:
 
 - `remember {scope?}`: target scope: `run`, `agent_user`, `user`, `team:<id>`, `workspace`; default the narrowest sensible scope (agent + human → `agent_user`; human alone → `user`; autonomous agent → `run`; service → error unless given). `agent` and `org` are promotion targets only. Writes the memory's actor row and the audit events.
 - `recall` / `context {scopes?}`: reads across the context's readable scopes (optionally narrowed by kind: `['agent_user', 'team', …]`); every hit has `scope`. Conflicts across scopes resolve by precedence: an exact restatement, or a value of the same subject and single-valued ontology property, in a broader scope is dropped in favour of the narrower one. Supersession never crosses scopes.
-- `forget {ids | scope + filter}`, `set`, `link`: the target ids must be in writable scopes.
+- `forget {ids | scope + filter}`, `set`, `link`: the target ids must be in readable scopes. In scopes the context writes they act directly; in **agent and org scope** a curator (whoever may promote into it: a writing human, the agent with the `promote` grant, an org admin for org scope) acts directly, and anyone else who reads the memory files a **request** (`pending: [{request, scope, ids}]`) that a human approves with `approve {request}` (or `::tenant approve {request, as}`).
+- `query {script, params}` and `reembed {embedder}`: store-wide ops of the partition, for workspace admins; the audit keeps the query's SHA-256, not its text.
 - `reflect {scope?}`, `consolidate {scope?}`: per scope.
 - `promote {ids, to}`: see below.
 - `fork | merge | discard {scope, branch}`: a branch of a scope is namespace `<scope ns>~<branch>` and inherits the scope's readers and writers.
@@ -228,11 +239,11 @@ Promotion is a **copy with provenance**, never a move (declassification).
 
 Append-only, hash-chained per workspace (`kleos_tn_audit`):
 
-- **Writes**: every transaction committed in a principal view appends an event with the relations it wrote (this covers memories, claims, automatic ontology changes, supersession, forget, consolidation, documents, flows, branches and Engram jobs), and each op appends an event with its target ids, the scope set hash and the decision.
+- **Writes**: every transaction in a principal view that writes appends an event with the relations it wrote **inside that transaction**, just before it commits (the chain head `kleos_tn_audit_head` is read and written in the same transaction), so a write and its event commit together or not at all. This covers memories, claims, automatic ontology changes, supersession, forget, consolidation, documents, flows, branches and Engram jobs. Each op also appends an event with its target ids, the scope set hash and the decision.
 - **Reads**: `recall`, `context` and `reflect` append an event with the returned ids (never content).
 - `hash = SHA-256(prev ‖ canonical event)`; `audit_verify` recomputes the chain.
 - Principal ids, `iss` and `sub` in events are **pseudonyms**: `HMAC-SHA-256(key[principal], id)`, with one random key per principal in `kleos_tn_key`. Erasure deletes the key, so the chain stays valid and the events become unlinkable (crypto-shredding).
-- Each event carries GenAI-style attributes in `otel`: `gen_ai.operation.name`, `gen_ai.agent.id`, `gen_ai.conversation.id` (the run), `kleos.scope_set_hash`.
+- Each event carries GenAI-style attributes in `otel`: `gen_ai.operation.name`, `gen_ai.agent.id`, `gen_ai.conversation.id` (the run), `kleos.scope_set_hash`. With the feature `otel`, every audited op is also an OpenTelemetry span of the global tracer `kleos` (`<op> kleos`, the same attributes plus `kleos.decision` and `kleos.targets`); the host installs the tracer provider and exporter.
 
 ### Erasure
 
@@ -250,32 +261,36 @@ Append-only, hash-chained per workspace (`kleos_tn_audit`):
 - **Python**: `db.tenant(op, args)`, `db.memory_as(ctx, op, args)`.
 - **TS** (napi `tenantCall` / `memoryCallAs`; `sdk/ts`): `kleos.tenant(op, args)`, `kleos.memoryAs(ctx, op, args)` (remote: the server derives the principal from the token).
 - **HTTP** (`kleos server`): with `--tenancy <config.json>`, `/memory/:op` and `/mcp` require a credential and run as that principal; `/tenant/:op` needs an org admin; `GET /.well-known/oauth-protected-resource` serves RFC 9728 metadata; 401s carry `WWW-Authenticate: Bearer resource_metadata="…"`.
-  - **JWT access tokens** (RFC 9068) from configured issuers (inline JWKS or PEM keys; HS256 for tests): signature, `iss`, `aud` = the configured resource (RFC 8707), `exp`/`nbf`. `sub` → principal (via `kleos_tn_ident` or directly); `act` (nested, OAuth Actor Profile) → chain links with `sub_profile` (`user` | `ai_agent` | `service`); depth > 6 → `invalid_request`. The outermost `ai_agent` actor is the agent; the subject (when a `user`) is the human.
+  - **JWT access tokens** (RFC 9068) from configured issuers: keys from an inline JWKS, a PEM, a **JWKS URL** or **OIDC discovery** (fetched, cached for `jwks_ttl_secs` (300), refetched when a token names an unknown `kid` — key rotation — at most every 10 s); HS256 for tests. Checks: signature, `iss`, `aud` = the configured resource (RFC 8707), `exp`/`nbf`. `sub` → principal (via `kleos_tn_ident` or directly); `act` (nested, OAuth Actor Profile) → chain links with `sub_profile` (`user` | `ai_agent` | `service`); depth > 6 → `invalid_request`; an unknown presenting AI agent → 403 `actor_unauthorized`. The outermost `ai_agent` actor is the agent; the subject (when a `user`) is the human.
+  - **SPIFFE JWT-SVIDs** for agent workloads: an issuer with `spiffe_trust_domain` verifies SVIDs (which may carry no `iss`) whose `sub` is `spiffe://<domain>/…`, mapped through `kleos_tn_ident` (`["spiffe://<domain>", "<spiffe id>"]`).
+  - **Transaction Tokens** (`Txn-Token` header; issuers with `txn: true`, audience `txn_audience`): alone they are the credential; with an access token their subject must match. Their scope narrows the credential, `txn` goes to the audit, `req_wl` joins the chain as an `issuer_endorsed` service link.
+  - **DPoP** (RFC 9449): a token with `cnf.jkt` needs a `DPoP` proof (asymmetric key, `typ: dpop+jwt`, matching `htm`/`htu`, fresh `iat`, `ath` of the token, unused `jti`) whose key thumbprint (RFC 7638) is the token's; `Authorization: DPoP …` and `Bearer` are both read.
+  - **Token exchange** (RFC 8693, `POST /oauth/token`, on when `signing_secret_env` names a 32+ byte key; metadata at `/.well-known/oauth-authorization-server`): `subject_token` (an access token for this resource) plus an actor — `client_assertion` (`private_key_jwt`, signed with the agent's key registered by `::tenant principal_key_set {id, jwks}`), or `actor_token` (a JWT-SVID, an access token or kleos token of an agent, or an API key) — yields a kleos delegation token: `sub` the subject's principal, `act` the actor with the subject token's own `act` nested inside (inherited links kept, never dropped; depth ≤ 6), scopes only narrowed, `cnf.jkt` when the request carries a DPoP proof. kleos accepts its own tokens like any issuer's.
   - **API keys** (`kl_…`) for simple deployments: the key's principal (usually an agent) is `verified`; `X-Kleos-On-Behalf-Of` names a human as `self_asserted`.
   - Tokens are never forwarded downstream (MCP 2026-07-28).
-- **MCP**: the same credential handling; `recall`, `remember`, `forget` and `reflect` run through `memory_call_as` (`scope` / `scopes` arguments; `ns` is ignored), the other tools answer an error in principal mode (v1). CIMD client ids are accepted as `client_id` and logged.
+- **MCP**: the same credential handling; every tool runs as the principal (`scope` / `scopes` arguments; `ns` is ignored): memory tools through `memory_call_as`, `doc_add` / `doc_status` / `flow` / `ontology` through the principal passthrough ops (documents are listed from every readable scope), `branch` on a scope's branches, `entity_profile` from the readable scopes, `consolidate` per scope (in the call, so the principal's chain is recorded), `reembed` and `query` for workspace admins. CIMD client ids are accepted as `client_id` and logged.
 - **CLI**: `kleos tenant <op> '{json}'`; memory commands take `--as-human`, `--as-agent`, `--workspace`, `--run`, `--scope` (embedded store). Against a server, `--token kl_…` or a JWT is sent as a bearer token and the server derives the principal.
 
-## v1 limits
+## Limits
 
-- `forget` / `set` act on scopes the context can **write**: memories in agent and org scope are removed through the host API (or by an admin), not as a principal.
-- Documents ingested in a workspace partition and workflows of a partition are run by workers started on that partition's view (`DbInstance::partition_view(…).flow_worker(…)`); `kleos server --flow-worker` serves the plain store only.
-- The HNSW exact scan for very selective filters scans the partition's vector relation, not only the allowed namespaces' key ranges.
 - Precedence across scopes recognises exact restatements and same-subject values of single-valued ontology properties; other conflicts are shown side by side, each hit labelled with its `scope`.
-- Audit appends are serialised in-process and use `:insert` to detect a concurrent appender of another process; a write's relation-level event is appended after its commit, so a crash in between loses that event (the memory's own `kleos_mem_actor` row is in the write's transaction).
+- BM25 `avgdl` stays the partition's average document length (`N` and document frequencies, the counts, are per ScopeSet).
+- Document ingestion steps run by the background runner are audited as the runner's writes (no principal chain); the `remember` that queued them carries the chain.
+- Concurrent audit appends from several processes on one store conflict on the chain head like any write-write conflict (RocksDB and TiKV abort the later committer, which then retries as its caller does).
+- Not built (needs infrastructure beyond an embedded store, or an adopted standard): an ID-JAG / XAA authorisation server, mTLS-bound tokens (the TLS terminator owns the client certificate), SPIFFE X.509-SVIDs, chain-integrity drafts and AAuth.
 
 ## Results
 
-Deterministic tests (`cargo test -p kleos --features engram --test tenancy`, fake embedder and decider): workspace isolation and partitions, agent-user scopes across users and autonomous runs, the intersection with participants, credentials and an org `forbid` policy, the PPR walk and entity expansion inside visible scopes, per-scope summaries, promotion (pending, approval, provenance, agent grant, org with approval), supersession and duplicates within a scope and read-time precedence, the erasure cascade with a verifying, shredded audit chain, audit coverage of writes and reads with tamper detection, and the CozoScript ops.
+Deterministic tests (`cargo test -p kleos --features engram --test tenancy`, fake embedder and decider): workspace isolation and partitions, agent-user scopes across users and autonomous runs, the intersection with participants, credentials and an org `forbid` policy, shared-session scopes, the PPR walk and entity expansion inside visible scopes, a selective ScopeSet, per-scope summaries, promotion (pending, approval, provenance, agent grant, org with approval), curation of agent and org scopes with requests, supersession and duplicates within a scope and read-time precedence, per-ScopeSet BM25 and embedding cache, the flow worker serving a workspace partition, the erasure cascade with a verifying, shredded audit chain, audit coverage of writes and reads with tamper detection, admin queries and the CozoScript ops. `kleos-bin/src/auth.rs`: JWT actor chains, API keys, JWKS URL caching and rotation (a local HTTP server), JWT-SVIDs, Transaction Tokens, DPoP, token exchange with `private_key_jwt`. `kleos-bin/tests/mcp.rs::principal_mode_tools`: every tool family as a principal. `--features otel --lib otel`: the span export.
 
-Perf sanity (`perf_scope_filter`, release build, M-series laptop, mem store, 4,000 memories of 64-d fake vectors, graph off, 50 queries): a principal recall over 3 of the workspace's 5 scopes (60% of its memories, one pre-filtered search) takes **62 ms** against **43 ms** for a plain one-namespace recall of a 4,000-memory store; restricted to one scope it takes 43 ms (the partition's own one-namespace recall: 41 ms), and the session plus cached ScopeSet costs 0.3 ms. The remaining gap is the union's filtered index legs (about 13 ms more than `ns == $ns`) and per-scope metadata reads. While measuring, two queries that scanned a whole namespace per id were reordered (the history read binds `id` first; a union reads pending decisions in one pass), which took the union from 150 ms to 62 ms.
+Perf sanity (`perf_scope_filter`, release build, M-series laptop, mem store, 4,000 memories of 64-d fake vectors, graph off, 50 queries): a principal recall over 3 of the workspace's 5 scopes (60% of its memories, one pre-filtered search) takes **41 ms** against **32 ms** for a plain one-namespace recall of a 4,000-memory store (first cut: 62 vs 43 ms on a busier machine); restricted to one scope it takes 34 ms (the partition's own one-namespace recall: 32 ms); the session plus cached ScopeSet costs 0.3 ms, uncached (after a membership change) 0.7 ms. The remaining gap is the union's filtered index legs (about 13 ms more than `ns == $ns`) and per-scope metadata reads. While measuring, two queries that scanned a whole namespace per id were reordered (the history read binds `id` first; a union reads pending decisions in one pass), which took the union from 150 ms to 62 ms.
 
 ## Threat model
 
 | Leak path | Defence |
 |---|---|
 | Filter bug in a shared index crosses tenants | per-workspace partitions; the scope filter only works inside one |
-| BM25 statistics reveal other tenants' vocabulary | per-partition FTS indexes (statistics stay per workspace; within a workspace they span scopes — *later*: filtered statistics for high-assurance tenants) |
+| BM25 statistics reveal other tenants' or scopes' vocabulary | per-partition FTS indexes; within a workspace `N` and document frequencies are counted over the caller's ScopeSet |
 | Low-selectivity filtered HNSW returns too few rows → post-filter temptation | in-loop filter, two-hop expansion, exact scan of the passing rows when cheaper |
 | PPR mass or `via` through invisible nodes | the graph is loaded from visible scope namespaces only |
 | Derived profiles and summaries quote other scopes | built per scope, composed at read time; erased with their sources |
@@ -286,13 +301,16 @@ Perf sanity (`perf_scope_filter`, release build, M-series laptop, mem store, 4,0
 | Stale permissions after revoke | membership epoch invalidates the ScopeSet cache immediately |
 | Existence probing by id | invisible ids are "not found" |
 | Live subscriptions deliver raw rows | principal subscriptions filter by ScopeSet |
-| Shared caches (timing) | ScopeSet cache keyed by context; embedding cache shared by text (*later*: per-partition) |
+| Shared caches (timing) | ScopeSet cache keyed by context; embedding cache keyed by workspace and ScopeSet |
+| Multi-party session memory leaks to one participant's later, different company | session scopes: readable only by a subset of the session's members |
+| A crash between a write and its audit event | the write event commits inside the write's transaction |
+| Stolen bearer token replayed | DPoP-bound tokens need a fresh proof of the holder's key; Transaction Tokens bind a transaction id |
 | Ontology learned schema leaks instance data | only property/type definitions are promoted automatically |
 | Audit log as personal data | ids only, pseudonymised, crypto-shredded on erasure |
 | Token passthrough | inbound tokens are never forwarded |
 
 ## v1 versus later
 
-**v1**: everything above except items marked *later*.
+**v1**: everything above.
 
-**Later**: kleos token-exchange service and delegation tokens; Txn-Token acceptance; ID-JAG/XAA authorisation server; DPoP/mTLS sender constraints and SPIFFE; JWKS fetching by URL with rotation; Cedar TPE (`query_resource`) instead of candidate enumeration; SpiceDB/OpenFGA adapter; per-memory ad-hoc sharing scopes and ad-hoc intersection scopes for multi-party sessions (v1: a shared session sees only scopes every participant can read; its run memory is the caller's); dedicated-store and dedicated-deployment tiers, BYOK; per-org quotas and fair-share scheduling of background work; filtered BM25 statistics; per-partition embedding cache; background document and flow workers for workspace partitions (v1: start them on the partition view); OTel span export.
+**Later**: an ID-JAG / XAA authorisation server; mTLS-bound tokens and X.509-SVIDs; chain-integrity drafts or AAuth if adopted; Cedar TPE if org policies outgrow concrete evaluation; a SpiceDB / OpenFGA adapter; per-memory ad-hoc sharing scopes; dedicated-store and dedicated-deployment tiers, BYOK; per-org quotas and fair-share scheduling of background work; filtered `avgdl`.
