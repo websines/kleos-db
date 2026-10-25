@@ -511,12 +511,11 @@ where
 
     /// Bump the membership epoch: every cached ScopeSet is stale.
     fn bump_epoch(&self) -> Result<()> {
+        // a timestamp, so concurrent bumps from two processes still move it
+        let cur = self.epochs("")?.0;
         self.tn_q(
-            &format!(
-                "?[key, value] := *{TN_META}{{key: 'epoch', value: v}}, key = 'epoch', value = to_int(v) + 1 \
-                 :put {TN_META} {{key => value}}"
-            ),
-            vec![],
+            &format!("?[key, value] <- [['epoch', $v]] :put {TN_META} {{key => value}}"),
+            vec![("v", json_dv(json!(now_micros().max(cur + 1))))],
         )?;
         self.tenancy.scope_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         Ok(())

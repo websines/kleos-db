@@ -1428,7 +1428,19 @@ impl DbInstance {
                 JsonValue::Object(m) => m,
                 _ => Default::default(),
             };
-            let ctx: tenancy::PrincipalContext = serde_json::from_value(a.remove("as").unwrap_or(JsonValue::Null))
+            // `as: parse_json('{…}')`, or flat `as_workspace`, `as_human`,
+            // `as_agent`, `as_run`, `as_participants`
+            let mut who = match a.remove("as") {
+                Some(JsonValue::Object(m)) => m,
+                Some(JsonValue::String(t)) => serde_json::from_str(&t).map_err(|e| miette!("`as`: {e}"))?,
+                _ => Default::default(),
+            };
+            for k in a.keys().filter(|k| k.starts_with("as_")).cloned().collect::<Vec<_>>() {
+                if let Some(v) = a.remove(&k) {
+                    who.insert(k[3..].to_string(), v);
+                }
+            }
+            let ctx: tenancy::PrincipalContext = serde_json::from_value(JsonValue::Object(who))
                 .map_err(|e| miette!("`::principal {op}` needs `as`, a principal context: {e}"))?;
             let out = self.memory_call_as(&ctx, &op, JsonValue::Object(a))?;
             memory::memory_rows(&op, out)
