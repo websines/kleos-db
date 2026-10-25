@@ -22,6 +22,8 @@ pub enum Area {
     Doc,
     Flow,
     Ontology,
+    /// The Postgres connector (feature `pg-cdc`).
+    Pg,
     Skill,
 }
 
@@ -32,6 +34,7 @@ impl Area {
             Area::Doc => "doc",
             Area::Flow => "flow",
             Area::Ontology => "ontology",
+            Area::Pg => "pg",
             Area::Skill => "skill",
         }
     }
@@ -90,6 +93,13 @@ impl Backend {
                         let _ = args;
                         return Err("documents need kleos built with the `docs` feature".into());
                     }
+                    #[cfg(feature = "pg-cdc")]
+                    Area::Pg => kleos_pg::pg_call(db, op, args),
+                    #[cfg(not(feature = "pg-cdc"))]
+                    Area::Pg => {
+                        let _ = args;
+                        return Err("the Postgres connector needs kleos built with the `pg-cdc` feature".into());
+                    }
                 };
                 r.map_err(|e| e.to_string())
             }
@@ -147,7 +157,13 @@ impl Remote {
             .with_timeout(self.timeout.as_secs())
             .with_body(body.to_string());
         if let Some(t) = &self.token {
-            req = req.with_header("x-cozo-auth", t.as_str());
+            // a tenancy credential (API key or JWT access token) goes as a
+            // bearer token; the server's own secret as before
+            if t.starts_with("kl_") || t.matches('.').count() == 2 {
+                req = req.with_header("Authorization", format!("Bearer {t}"));
+            } else {
+                req = req.with_header("x-cozo-auth", t.as_str());
+            }
         }
         let resp = req
             .send()
@@ -159,6 +175,11 @@ impl Remote {
             }
             _ => serde_json::from_str(text).map_err(|_| format!("HTTP {} from {path}: {}", resp.status_code, text.trim())),
         }
+    }
+
+    /// A tenancy admin op (`POST /tenant/:op`).
+    pub fn tenant(&self, op: &str, body: &Value) -> Result<Value, String> {
+        self.post(&format!("/tenant/{op}"), body)
     }
 
     fn post(&self, path: &str, body: &Value) -> Result<Value, String> {

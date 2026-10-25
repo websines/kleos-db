@@ -4,7 +4,7 @@
  *
  * @module
  */
-import type { FlowWorker, FlowWorkerOptions, Json, ModelSpec, NamedRows } from './types.js';
+import type { FlowWorker, FlowWorkerOptions, Json, ModelSpec, NamedRows, PrincipalContext } from './types.js';
 
 /** Error thrown by kleos (bad arguments, a closed store, a failed op). */
 export class KleosError extends Error {
@@ -43,6 +43,16 @@ export interface Backend {
   disableModel(kind: ModelKind, name: string): Promise<boolean>;
   /** Start an in-process workflow worker. Embedded only. */
   flowWorker?(opts: FlowWorkerOptions): FlowWorker;
+  /** Tenancy admin op (docs/specs/tenancy.md). */
+  tenant(op: string, args: Record<string, unknown>): Promise<any>;
+  /**
+   * A memory op as a principal. Embedded: `ctx` is the host-asserted
+   * context; remote: the server derives it from the credential and `ctx` is
+   * ignored.
+   */
+  memoryAs(ctx: PrincipalContext, op: string, args: Record<string, unknown>): Promise<any>;
+  /** The Postgres connector's ops (`POST /pg/:op`). Remote only: the connector runs in `kleos server --pg-cdc`. */
+  pg?(op: string, args: Record<string, unknown>): Promise<any>;
   close(): Promise<void>;
 }
 

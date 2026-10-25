@@ -114,12 +114,23 @@ pub(crate) struct ServerArgs {
     /// (docs/specs/mcp-cli-skills.md).
     #[clap(long, default_value_t = false)]
     mcp: bool,
+    /// Mirror a Postgres source (kleos-pg, feature `pg-cdc`;
+    /// docs/specs/pg-connector.md): the connector's YAML config. Repeat for
+    /// several sources. Each runs as a task of this server.
+    #[clap(long = "pg-cdc")]
+    pg_cdc: Vec<String>,
     /// Default namespace of the MCP tools.
     #[clap(long, default_value_t = String::from("default"))]
     mcp_ns: String,
     /// Offer the read-only `query` tool over MCP.
     #[clap(long, default_value_t = false)]
     mcp_allow_query: bool,
+    /// Principal mode (docs/specs/tenancy.md): a JSON config naming this
+    /// resource and the trusted token issuers. `/memory/:op` and `/mcp`
+    /// then accept JWT access tokens and API keys and run as that principal;
+    /// `/.well-known/oauth-protected-resource` serves RFC 9728 metadata.
+    #[clap(long)]
+    tenancy: Option<String>,
     /// What MCP `skills/list` returns without a task: `top` (the most useful
     /// live skills, a partial listing), `full` (the catalog, paged) or `none`
     /// (docs/specs/skills.md).
@@ -130,6 +141,7 @@ pub(crate) struct ServerArgs {
 #[derive(Clone)]
 struct DbState {
     db: DbInstance,
+    tenancy: Option<Arc<kleos_bin::auth::TenancyConfig>>,
     mcp: Option<Arc<kleos_bin::mcp::McpServer>>,
     origin: Arc<String>,
     backup_dir: Arc<PathBuf>,
@@ -155,12 +167,16 @@ enum Principal {
     Local,
     Admin,
     Bearer([u8; 32]),
+    /// A tenancy principal (its id).
+    Tenant(String),
 }
 
 #[derive(Clone)]
 struct AuthContext {
     mutability: ScriptMutability,
     principal: Principal,
+    /// Principal mode: the authenticated principal context.
+    tenant: Option<Arc<kleos::tenancy::PrincipalContext>>,
 }
 
 struct TransactionLease {
@@ -193,6 +209,14 @@ struct MyAuth {
     allowed_origin: String,
     auth_guard: String,
     token_table: Option<Arc<(String, DbInstance)>>,
+    /// Principal mode: the config and the store that resolves credentials.
+    tenancy: Option<Arc<(kleos_bin::auth::TenancyConfig, DbInstance)>>,
+}
+
+/// Paths a tenancy principal may reach; everything else (raw scripts,
+/// import/export, backups) stays with the admin secret.
+fn tenant_path_ok(path: &str) -> bool {
+    path.starts_with("/memory/") || path == "/mcp" || path.starts_with("/tenant/")
 }
 
 fn has_forbidden_insecure_request(request: &Request<Body>, allowed_origin: &str) -> bool {
@@ -233,7 +257,14 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
         let allowed_origin = self.allowed_origin.clone();
         let auth_guard = self.auth_guard.clone();
         let token_table = self.token_table.clone();
+        let tenancy = self.tenancy.clone();
         Box::pin(async move {
+            // the token endpoint authenticates its own subject and actor tokens
+            if tenancy.is_some() && request.uri().path() == "/oauth/token" {
+                request.extensions_mut().insert(ScriptMutability::Immutable);
+                request.extensions_mut().insert(AuthContext { mutability: ScriptMutability::Immutable, principal: Principal::Local, tenant: None });
+                return Ok(request);
+            }
             if skip_auth {
                 // Loopback is not an authentication boundary for browsers. Reject
                 // requests originating on another site before granting the
@@ -248,8 +279,59 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                 request.extensions_mut().insert(AuthContext {
                     mutability: ScriptMutability::Mutable,
                     principal: Principal::Local,
+                    tenant: None,
                 });
                 return Ok(request);
+            }
+
+            // principal mode: a JWT access token or an API key (never the
+            // admin secret, which keeps its own meaning)
+            let bearer = request
+                .headers()
+                .get("Authorization")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("DPoP ")))
+                .map(|t| t.trim().to_string());
+            let has_txn = request.headers().contains_key("txn-token");
+            let tok = bearer.clone().unwrap_or_default();
+            if let (Some(tn), true) = (&tenancy, bearer.is_some() || has_txn) {
+                if auth_guard.is_empty() || tok != auth_guard {
+                    let (cfg, db) = (tn.0.clone(), tn.1.clone());
+                    let headers = request.headers().clone();
+                    let t2 = bearer.clone();
+                    let info = kleos_bin::auth::RequestInfo {
+                        method: request.method().as_str().to_string(),
+                        url: format!("{}{}", allowed_origin.trim_end_matches('/'), request.uri().path()),
+                    };
+                    let res = spawn_blocking(move || {
+                        let h = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|x| x.to_string());
+                        kleos_bin::auth::authenticate_request(&cfg, &db, t2.as_deref(), &h, &info)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(kleos_bin::auth::AuthError { status: 500, error: "server_error", description: e.to_string() }));
+                    match res {
+                        Ok(ctx) => {
+                            if !tenant_path_ok(request.uri().path()) {
+                                return Err(Response::builder().status(StatusCode::FORBIDDEN).body(Body::empty()).unwrap());
+                            }
+                            let mutability =
+                                if kleos_bin::auth::may_write(&ctx) { ScriptMutability::Mutable } else { ScriptMutability::Immutable };
+                            let id = ctx.human.clone().or(ctx.agent.clone()).or(ctx.service.clone()).unwrap_or_default();
+                            request.extensions_mut().insert(mutability);
+                            request.extensions_mut().insert(AuthContext { mutability, principal: Principal::Tenant(id), tenant: Some(Arc::new(ctx)) });
+                            return Ok(request);
+                        }
+                        // a token-table token is not a tenancy credential: fall through
+                        Err(e) if token_table.is_none() || has_txn || tok.starts_with("kl_") || tok.matches('.').count() == 2 => {
+                            return Err(Response::builder()
+                                .status(StatusCode::from_u16(e.status).unwrap_or(StatusCode::UNAUTHORIZED))
+                                .header(header::WWW_AUTHENTICATE, tn.0.challenge(&allowed_origin, Some(&e)))
+                                .body(Body::empty())
+                                .unwrap());
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
 
             // Token-table bearer auth, evaluated INDEPENDENTLY of any query string.
@@ -275,6 +357,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                             ScriptMutability::Immutable
                         },
                         principal: bearer_principal(token),
+                        tenant: None,
                     }),
                     Err(err) => {
                         eprintln!("Error: {}", err);
@@ -294,6 +377,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                                     return (v == auth_guard.as_str()).then_some(AuthContext {
                                         mutability: ScriptMutability::Mutable,
                                         principal: Principal::Admin,
+                                        tenant: None,
                                     });
                                 }
                             }
@@ -308,7 +392,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                         .and_then(|h| h.to_str().ok())
                         .and_then(|h| h.strip_prefix("Bearer "))
                         .filter(|t| !auth_guard.is_empty() && *t == auth_guard.as_str())
-                        .map(|_| AuthContext { mutability: ScriptMutability::Mutable, principal: Principal::Admin });
+                        .map(|_| AuthContext { mutability: ScriptMutability::Mutable, principal: Principal::Admin, tenant: None });
                     query_grant.or(admin_bearer).or_else(bearer_grant)
                 }
                 Some(data) => match data.to_str() {
@@ -317,6 +401,7 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                             Some(AuthContext {
                                 mutability: ScriptMutability::Mutable,
                                 principal: Principal::Admin,
+                                tenant: None,
                             })
                         } else {
                             None
@@ -330,10 +415,11 @@ impl AsyncAuthorizeRequest<Body> for MyAuth {
                 request.extensions_mut().insert(auth);
                 Ok(request)
             } else {
-                let unauthorized_response = Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .body(Body::empty())
-                    .unwrap();
+                let mut unauthorized_response = Response::builder().status(StatusCode::UNAUTHORIZED);
+                if let Some(tn) = &tenancy {
+                    unauthorized_response = unauthorized_response.header(header::WWW_AUTHENTICATE, tn.0.challenge(&allowed_origin, None));
+                }
+                let unauthorized_response = unauthorized_response.body(Body::empty()).unwrap();
 
                 Err(unauthorized_response)
             }
@@ -488,6 +574,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
             ..Default::default()
         })
     });
+    start_pg(&args.pg_cdc, &db);
     if args.default_query_mem_limit > 0 {
         db.set_default_query_mem_limit(Some(args.default_query_mem_limit as usize));
     }
@@ -537,11 +624,19 @@ pub(crate) async fn server_main(args: ServerArgs) {
         }
     };
 
+    let tenancy: Option<kleos_bin::auth::TenancyConfig> = args.tenancy.as_ref().map(|p| {
+        let c = kleos_bin::auth::TenancyConfig::load(p).unwrap_or_else(|e| panic!("--tenancy: {e}"));
+        db.tenant_call("enable", serde_json::Value::Null).unwrap_or_else(|e| panic!("--tenancy: {e:?}"));
+        eprintln!("principal mode: resource {} ({} issuers)", c.resource, c.issuers.len());
+        c
+    });
+    let metadata = Arc::new(tenancy.as_ref().map(|c| c.metadata()));
     let auth_obj = MyAuth {
         skip_auth,
         allowed_origin: server_origin.clone(),
         auth_guard,
         token_table: args.token_table.map(|t| Arc::new((t, db.clone()))),
+        tenancy: tenancy.clone().map(|c| Arc::new((c, db.clone()))),
     };
 
     let mcp = args.mcp.then(|| {
@@ -553,6 +648,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
         ).with_skills_list(&args.mcp_skills_list))
     });
     let state = DbState {
+        tenancy: tenancy.clone().map(Arc::new),
         mcp,
         origin: Arc::new(server_origin.clone()),
         db,
@@ -609,10 +705,14 @@ pub(crate) async fn server_main(args: ServerArgs) {
     let app = Router::new()
         .route("/text-query", post(text_query))
         .route("/memory/:op", post(memory_op))
+        .route("/tenant/:op", post(tenant_op))
+        .route("/oauth/token", post(oauth_token))
         .route("/mcp", post(mcp_post).get(mcp_not_allowed).delete(mcp_not_allowed))
         .route("/flow/:op", post(flow_op))
         .route("/doc/:op", post(doc_op))
         .route("/ontology/:op", post(ontology_op))
+        .route("/pg/:op", post(pg_op))
+        .route("/pg/debezium/:source", post(pg_debezium))
         .route("/skill/:op", post(skill_op))
         .route("/skills/registry", get(skill_registry_list))
         .route("/skills/registry/:name", get(skill_registry_get))
@@ -633,6 +733,35 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .layer(AsyncRequireAuthorizationLayer::new(auth_obj))
         .fallback(not_found)
         .route("/", get(root))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get({
+                let t = tenancy.clone();
+                let o = server_origin.clone();
+                move || {
+                    let t = t.clone();
+                    let o = o.clone();
+                    async move {
+                        match t.as_ref().filter(|c| c.signing_secret_env.is_some()) {
+                            Some(c) => (StatusCode::OK, Json(c.as_metadata(&o))),
+                            None => (StatusCode::NOT_FOUND, Json(json!({"error": "token exchange is off"}))),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(move || {
+                let m = metadata.clone();
+                async move {
+                    match m.as_ref() {
+                        Some(v) => (StatusCode::OK, Json(v.clone())),
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error": "principal mode is off"}))),
+                    }
+                }
+            }),
+        )
         .layer(cors)
         .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::disable());
@@ -875,10 +1004,24 @@ async fn text_query(
 /// principal.
 async fn memory_op(
     Extension(mutability): Extension<ScriptMutability>,
+    Extension(auth): Extension<AuthContext>,
     State(st): State<DbState>,
     Path(op): Path<String>,
     Json(args): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // principal mode: the op runs as the authenticated principal
+    if let Some(ctx) = auth.tenant.clone() {
+        let reads = ["recall", "context", "reflect", "diff", "scopes"];
+        if matches!(mutability, ScriptMutability::Immutable) && !reads.contains(&op.as_str()) {
+            return (StatusCode::FORBIDDEN, json!({"ok": false, "message": format!("memory {op} needs write access")}).into());
+        }
+        let result = spawn_blocking(move || st.db.memory_call_as(&ctx, &op, args)).await;
+        return match result {
+            Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+            Ok(Err(err)) => (StatusCode::BAD_REQUEST, json!({"ok": false, "message": err.to_string()}).into()),
+            Err(err) => internal_error(err),
+        };
+    }
     if matches!(mutability, ScriptMutability::Immutable) && !["recall", "reflect", "diff", "branches"].contains(&op.as_str()) {
         return (
             StatusCode::FORBIDDEN,
@@ -914,6 +1057,74 @@ fn principal_name(p: &Principal) -> String {
         Principal::Local => "local".into(),
         Principal::Admin => "admin".into(),
         Principal::Bearer(h) => h.iter().map(|b| format!("{b:02x}")).collect(),
+        Principal::Tenant(id) => format!("tenant:{id}"),
+    }
+}
+
+/// RFC 8693 token exchange (docs/specs/tenancy.md): `POST /oauth/token`
+/// with a form body; no other credential (the subject and actor tokens are
+/// the credentials).
+async fn oauth_token(
+    State(st): State<DbState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(cfg) = st.tenancy.clone() else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "invalid_request", "error_description": "principal mode is off"})));
+    };
+    let info = kleos_bin::auth::RequestInfo { method: "POST".into(), url: format!("{}/oauth/token", st.origin.trim_end_matches('/')) };
+    let db = st.db.clone();
+    let res = spawn_blocking(move || {
+        let h = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|x| x.to_string());
+        kleos_bin::auth::token_exchange(&cfg, &db, &form, &h, &info)
+    })
+    .await;
+    match res {
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)),
+        Ok(Err(e)) => (
+            StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(json!({"error": e.error, "error_description": e.description})),
+        ),
+        Err(e) => internal_error(e),
+    }
+}
+
+/// Tenancy admin ops (docs/specs/tenancy.md): `POST /tenant/:op`. The admin
+/// secret may run any; a principal must be an admin of the workspace's org
+/// (and its own credential must allow `admin`).
+async fn tenant_op(
+    Extension(auth): Extension<AuthContext>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let result = spawn_blocking(move || -> miette::Result<serde_json::Value> {
+        match (&auth.principal, auth.tenant.as_deref()) {
+            (Principal::Admin | Principal::Local, _) => st.db.tenant_call(&op, args),
+            (_, Some(ctx)) => {
+                let who = ctx.human.clone().ok_or_else(|| miette!("tenant ops need a human principal"))?;
+                if ctx.token.as_ref().and_then(|t| t.actions.as_ref()).is_some_and(|a| !a.iter().any(|x| x == "admin")) {
+                    miette::bail!("this credential does not allow admin ops");
+                }
+                // the org the op touches, from every object it names; an op
+                // that names none (e.g. `list`) needs the admin secret
+                let org = st.db.tenant_target_org(&args)?.ok_or_else(|| miette!("tenant {op}: name the org, workspace or principal it acts on"))?;
+                if op == "list" || op == "enable" {
+                    miette::bail!("tenant {op} needs the admin secret");
+                }
+                if !st.db.is_org_admin(&who, &org)? {
+                    miette::bail!("'{who}' is not an admin of org '{org}'");
+                }
+                st.db.tenant_call(&op, args)
+            }
+            _ => miette::bail!("tenant ops need the admin secret or a tenancy principal"),
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (StatusCode::FORBIDDEN, json!({"ok": false, "message": err.to_string()}).into()),
+        Err(err) => internal_error(err),
     }
 }
 
@@ -970,6 +1181,7 @@ async fn mcp_post(
         principal: principal_name(&auth.principal),
         read_only: matches!(auth.mutability, ScriptMutability::Immutable),
         legacy: None,
+        as_principal: auth.tenant.as_deref().cloned(),
     };
     if let Some(bv) = &body_version {
         // modern request: the mirrored headers are required and must match
@@ -1067,6 +1279,79 @@ async fn ontology_op(
             StatusCode::BAD_REQUEST,
             json!({"ok": false, "message": err.to_string()}).into(),
         ),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Start the `--pg-cdc` connectors (and the `pg` flow action with `flow-pg`).
+#[cfg(feature = "pg-cdc")]
+fn start_pg(configs: &[String], db: &DbInstance) {
+    #[cfg(feature = "flow-pg")]
+    if let Err(e) = kleos_pg::writeback::register_flow_action() {
+        panic!("flow action pg: {e:?}");
+    }
+    for path in configs {
+        let cfg = kleos_pg::PgConfig::load(path).unwrap_or_else(|e| panic!("--pg-cdc {path}: {e:?}"));
+        eprintln!("pg connector '{}' (slot {}, publication {}) into namespace '{}'", cfg.source, cfg.slot(), cfg.publication(), cfg.ns);
+        kleos_pg::spawn(cfg, db.clone());
+    }
+}
+
+#[cfg(not(feature = "pg-cdc"))]
+fn start_pg(configs: &[String], _db: &DbInstance) {
+    if !configs.is_empty() {
+        panic!("--pg-cdc needs kleos built with the `pg-cdc` feature");
+    }
+}
+
+/// The Postgres connector (kleos fork; docs/specs/pg-connector.md): `POST
+/// /pg/{status|init|resync|drop_slot|map|approve|query|writeback}` with
+/// `{source, …}`. A read-only principal may only read (`status`, `map`,
+/// `query`).
+async fn pg_op(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let reads = ["status", "map", "query"];
+    if matches!(mutability, ScriptMutability::Immutable) && !reads.contains(&op.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            json!({"ok": false, "message": format!("pg {op} needs write access")}).into(),
+        );
+    }
+    if op == "map" && args.get("approve").is_some() && matches!(mutability, ScriptMutability::Immutable) {
+        return (StatusCode::FORBIDDEN, json!({"ok": false, "message": "pg approve needs write access"}).into());
+    }
+    let backend = kleos_bin::backend::Backend::Embedded(st.db.clone());
+    let result = spawn_blocking(move || backend.call(kleos_bin::backend::Area::Pg, &op, args)).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (StatusCode::BAD_REQUEST, json!({"ok": false, "message": err}).into()),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// Debezium Server's HTTP sink target (kleos fork; docs/specs/pg-connector.md,
+/// "Debezium adapter"): `POST /pg/debezium/<source>` with one change event
+/// or a list. Send the auth token with
+/// `debezium.sink.http.headers.x-cozo-auth=<token>`.
+async fn pg_debezium(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(source): Path<String>,
+    Json(events): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if matches!(mutability, ScriptMutability::Immutable) {
+        return (StatusCode::FORBIDDEN, json!({"ok": false, "message": "debezium ingest needs write access"}).into());
+    }
+    let backend = kleos_bin::backend::Backend::Embedded(st.db.clone());
+    let result = spawn_blocking(move || backend.call(kleos_bin::backend::Area::Pg, "debezium", json!({"source": source, "events": events}))).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        // a failed event must be retried by the sender: 5xx
+        Ok(Err(err)) => (StatusCode::SERVICE_UNAVAILABLE, json!({"ok": false, "message": err}).into()),
         Err(err) => internal_error(err),
     }
 }

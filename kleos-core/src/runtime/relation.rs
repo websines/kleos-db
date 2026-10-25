@@ -998,6 +998,7 @@ struct RelNameConflictError(String);
 
 impl<'a> SessionTx<'a> {
     pub(crate) fn relation_exists(&self, name: &str) -> Result<bool> {
+        let name = &*self.route(name);
         let key = DataValue::from(name);
         let encoded = vec![key].encode_as_key(RelationId::SYSTEM);
         if name.starts_with('_') {
@@ -1061,6 +1062,10 @@ impl<'a> SessionTx<'a> {
         input_meta: InputRelationHandle,
     ) -> Result<RelationHandle> {
         validate_temporal_axes(&input_meta)?;
+        let mut input_meta = input_meta;
+        if let std::borrow::Cow::Owned(routed) = self.route(&input_meta.name.name) {
+            input_meta.name.name = SmartString::from(routed);
+        }
         let key = DataValue::Str(input_meta.name.name.clone());
         let encoded = vec![key].encode_as_key(RelationId::SYSTEM);
 
@@ -1141,6 +1146,7 @@ impl<'a> SessionTx<'a> {
         #[diagnostic(code(query::relation_not_found))]
         struct StoredRelationNotFoundError(String);
 
+        let name = &*self.route(name);
         let key = DataValue::from(name);
         let encoded = vec![key].encode_as_key(RelationId::SYSTEM);
 
@@ -1180,6 +1186,8 @@ impl<'a> SessionTx<'a> {
         Ok(())
     }
     pub(crate) fn destroy_relation(&mut self, name: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let routed = self.route(name).into_owned();
+        let name = routed.as_str();
         if self
             .pending_tt_writes
             .iter()
@@ -2086,7 +2094,7 @@ impl<'a> SessionTx<'a> {
 
         // update relation metadata
         let new_encoded =
-            vec![DataValue::from(&rel_name.name as &str)].encode_as_key(RelationId::SYSTEM);
+            vec![DataValue::from(&rel_handle.name as &str)].encode_as_key(RelationId::SYSTEM);
         let mut meta_val = vec![];
         rel_handle
             .serialize(&mut Serializer::new(&mut meta_val).with_struct_map())
@@ -2130,7 +2138,7 @@ impl<'a> SessionTx<'a> {
         }
 
         let new_encoded =
-            vec![DataValue::from(&rel_name.name as &str)].encode_as_key(RelationId::SYSTEM);
+            vec![DataValue::from(&rel.name as &str)].encode_as_key(RelationId::SYSTEM);
         let mut meta_val = vec![];
         rel.serialize(&mut Serializer::new(&mut meta_val).with_struct_map())
             .unwrap();
@@ -2143,17 +2151,17 @@ impl<'a> SessionTx<'a> {
         if old.name.starts_with('_') || new.name.starts_with('_') {
             bail!("Bad name given");
         }
-        let new_key = DataValue::Str(new.name.clone());
+        let new_name = SmartString::from(self.route(&new.name).as_ref());
+        let new_key = DataValue::Str(new_name.clone());
         let new_encoded = vec![new_key].encode_as_key(RelationId::SYSTEM);
 
         if self.store_tx.exists(&new_encoded, true)? {
             bail!(RelNameConflictError(new.name.to_string()))
         };
 
-        let old_key = DataValue::Str(old.name.clone());
-        let old_encoded = vec![old_key].encode_as_key(RelationId::SYSTEM);
-
         let mut rel = self.get_relation(old, true)?;
+        let old_key = DataValue::Str(rel.name.clone());
+        let old_encoded = vec![old_key].encode_as_key(RelationId::SYSTEM);
         if rel.access_level < AccessLevel::Normal {
             bail!(InsufficientAccessLevel(
                 rel.name.to_string(),
@@ -2161,7 +2169,7 @@ impl<'a> SessionTx<'a> {
                 rel.access_level
             ));
         }
-        rel.name = new.name.clone();
+        rel.name = new_name;
 
         let mut meta_val = vec![];
         rel.serialize(&mut Serializer::new(&mut meta_val).with_struct_map())

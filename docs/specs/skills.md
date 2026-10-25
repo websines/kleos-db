@@ -354,23 +354,47 @@ not log its route.
 ## Running the workflows
 
 `skill.learn` and `skill.optimize` run on the flow queue `skills`. A `learn`
-or `optimize` call through `DbInstance` (every binding, HTTP, MCP, CLI)
-starts an in-process runner thread (`DbInstance::skill_kick`) that ticks the
+or `optimize` call through `DbInstance` (every binding, HTTP, MCP, CLI, a
+`::skill` script, a principal op in any partition) starts an in-process
+runner thread (`DbInstance::skill_kick`) that ticks the
 queue with a one-hour lease (their steps replay tasks through an LLM for
 minutes) until nothing is due. Scheduled runs are fired by any flow worker
 that fires schedules (`kleos server --flow-worker`, `DbInstance::flow_worker`);
 give such a worker the `skills` queue and a long lease.
 
-## Merge notes (tenancy)
+## Tenancy
 
-- Scope strings are tenancy namespaces; `scope_kind` / `scope_rank` follow
-  the tenancy scope table. Wiring: fill `actor` from the `PrincipalContext`,
-  derive `scopes` from the ScopeSet (read) and check write/promote on the
-  target (write), make `approve` require the tenancy `promote` right. The
-  skill relations need no schema version of the memory store.
-- `kleos-bin/src/mcp.rs`, `cli.rs`, `server.rs`, `backend.rs` and
-  `kleos-core/src/lib.rs`, `runtime/db.rs`, `parse/sys.rs`,
-  `cozoscript.pest` gain additive arms in both branches.
+As a principal (`::principal skill {as, op, …}`, `memory_call_as(ctx,
+"skill", {op, …})`, and every MCP skill method and tool on a principal
+connection), the skill library follows docs/specs/tenancy.md
+(`kleos-core/src/tenancy_skill.rs`):
+
+- **Partitions.** Skills live in the workspace's partition; org-scope skills
+  in the org partition. Skill scopes are tenancy namespaces (`ws`,
+  `team:<t>`, `user:<u>`, `au:<a>:<u>`, `run:…`, `org`).
+- **Reads** (`find`, `entries` / `skills/list`, `list`, `get`, `entry` /
+  `skills/get`, `read`, `dir`, `history`, `stats`, …) see only the skill
+  scopes Cedar lets the context read; `find` and listings merge the
+  workspace and (when readable) the org partition; anything else is "not
+  found".
+- **Writes** need `write` on the skill's scope (`put`, `propose`, `activate`,
+  `rollback`, `undo`, `retire`, `optimize`, `sign`, `publish`, `install`
+  with a package, …); a new skill's scope defaults to the narrowest sensible
+  one (as `remember`); outcomes, `use`, traces and `eval` need `read`.
+- **Promotion** needs `promote` on the target; into `org` it always waits
+  for a human with the `approve` right (an org admin), however it was
+  requested; `approve` / `reject` need a human in the context and `approve`
+  on the target. The store's auto-promotion policy does not apply to
+  principals.
+- **Actors and audit.** `actor` is `{human, agent, run, chain}` from the
+  context on every version, head change, outcome, trace and log row; every
+  op is appended to the workspace's hash-chained audit (`skill.<op>`,
+  allow / deny / pending) and the data writes go through the session's
+  audit sink.
+- **Refused to principals:** `path` and `url` inputs (server files and
+  network), and store administration (`init`, `config`, `import`,
+  `export`, `erase`, `lifecycle`, keys).
+- A store without tenancy behaves as before.
 
 ## Limits
 

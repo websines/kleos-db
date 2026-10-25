@@ -61,3 +61,13 @@ your own guesses, or secrets (passwords, keys, card numbers).
 `--db PATH` for a local store or `--url URL --token T` for a kleos server; or
 put them in `~/.config/kleos/config.json` (`{"db": "...", "ns": "..."}`).
 Add `--json` for machine-readable output.
+
+## In a shared deployment (principal mode)
+
+When kleos runs with tenancy (docs/specs/tenancy.md), your token says who you
+are and whom you act for; `ns` is ignored. Memory you store goes to your
+private scope with the user (`agent_user`) unless you pass `scope`
+(`team:<id>`, `workspace`). Do not move something private into a shared
+scope on your own: ask the user, then `promote` it (a human may have to
+approve). Recall only returns what everyone in the conversation may see, and
+each hit says its `scope`.

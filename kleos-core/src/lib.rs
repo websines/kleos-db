@@ -201,6 +201,7 @@ pub(crate) mod fts;
 pub use fts::{FTS_BASE_ROW_FETCHES, FTS_LITERAL_SCANS};
 pub mod parse;
 pub mod sched;
+pub mod tenancy;
 pub(crate) mod query;
 pub(crate) mod runtime;
 pub(crate) mod storage;
@@ -448,6 +449,22 @@ impl DbInstance {
     /// query budget) — currently a per-call wall-clock `timeout` in seconds.
     /// See [`crate::Db::run_script_with_options`] for the budget precedence.
     pub fn run_script_with_options(
+        &self,
+        payload: &str,
+        params: BTreeMap<String, DataValue>,
+        mutability: ScriptMutability,
+        options: ScriptRunOptions,
+    ) -> Result<NamedRows> {
+        if let Some(r) = self.tenancy_script(payload, &params, mutability)? {
+            return Ok(r);
+        }
+        let r = self.run_script_plain(payload, params, mutability, options);
+        // `::skill learn` / `optimize` queued a workflow: start the runner
+        self.skill_kick();
+        r
+    }
+
+    fn run_script_plain(
         &self,
         payload: &str,
         params: BTreeMap<String, DataValue>,
@@ -1389,6 +1406,133 @@ impl DbInstance {
             DbInstance::TiKv(db) => db.forget_decider_fit(name, template),
         }
     }
+    /// A view of the store routed to a workspace partition
+    /// (docs/specs/tenancy.md, "Partitions"). See [crate::Db::partition_view].
+    pub fn partition_view(&self, partition: &str) -> Result<Self> {
+        Ok(match self {
+            DbInstance::Mem(db) => DbInstance::Mem(db.partition_view(partition)?),
+            #[cfg(feature = "storage-sqlite")]
+            DbInstance::Sqlite(db) => DbInstance::Sqlite(db.partition_view(partition)?),
+            #[cfg(feature = "storage-rocksdb")]
+            DbInstance::RocksDb(db) => DbInstance::RocksDb(db.partition_view(partition)?),
+            #[cfg(feature = "storage-new-rocksdb")]
+            DbInstance::NewRocksDb(db) => DbInstance::NewRocksDb(db.partition_view(partition)?),
+            #[cfg(feature = "storage-sled")]
+            DbInstance::Sled(db) => DbInstance::Sled(db.partition_view(partition)?),
+            #[cfg(feature = "storage-tikv")]
+            DbInstance::TiKv(db) => DbInstance::TiKv(db.partition_view(partition)?),
+        })
+    }
+    /// `::tenant <op> {…}` and `::principal <op> {as, …}` scripts
+    /// (docs/specs/tenancy.md); `None` for every other script.
+    fn tenancy_script(
+        &self,
+        payload: &str,
+        params: &BTreeMap<String, DataValue>,
+        mutability: ScriptMutability,
+    ) -> Result<Option<NamedRows>> {
+        let t = payload.trim_start();
+        if !(t.starts_with("::tenant") || t.starts_with("::principal")) {
+            return Ok(None);
+        }
+        let Some((principal, op, args)) = dispatch_db!(self, db => db.parse_tenancy_op(payload, params))? else {
+            return Ok(None);
+        };
+        let reads = ["recall", "context", "reflect", "scopes", "diff", "audit", "audit_verify", "list", "get"];
+        if mutability == ScriptMutability::Immutable && !reads.contains(&op.as_str()) {
+            bail!("`::{} {op}` cannot run in read-only mode", if principal { "principal" } else { "tenant" });
+        }
+        Ok(Some(if principal {
+            let mut a = match args {
+                JsonValue::Object(m) => m,
+                _ => Default::default(),
+            };
+            // `as: parse_json('{…}')`, or flat `as_workspace`, `as_human`,
+            // `as_agent`, `as_run`, `as_participants`
+            let mut who = match a.remove("as") {
+                Some(JsonValue::Object(m)) => m,
+                Some(JsonValue::String(t)) => serde_json::from_str(&t).map_err(|e| miette!("`as`: {e}"))?,
+                _ => Default::default(),
+            };
+            for k in a.keys().filter(|k| k.starts_with("as_")).cloned().collect::<Vec<_>>() {
+                if let Some(v) = a.remove(&k) {
+                    who.insert(k[3..].to_string(), v);
+                }
+            }
+            let ctx: tenancy::PrincipalContext = serde_json::from_value(JsonValue::Object(who))
+                .map_err(|e| miette!("`::principal {op}` needs `as`, a principal context: {e}"))?;
+            let out = self.memory_call_as(&ctx, &op, JsonValue::Object(a))?;
+            memory::memory_rows(&op, out)
+        } else {
+            flow::flow_rows(self.tenant_call(&op, args)?)
+        }))
+    }
+    /// Tenancy admin ops (docs/specs/tenancy.md). See [crate::Db::tenant_call].
+    pub fn tenant_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
+        dispatch_db!(self, db => db.tenant_call(op, args))
+    }
+    /// Memory ops as a principal. See [crate::Db::memory_call_as]. The
+    /// document and consolidation runners of the principal's partitions
+    /// start as needed, as they do for the plain store.
+    pub fn memory_call_as(&self, ctx: &tenancy::PrincipalContext, op: &str, args: JsonValue) -> Result<JsonValue> {
+        let r = dispatch_db!(self, db => db.memory_call_as(ctx, op, args))?;
+        let running = r
+            .get("documents")
+            .and_then(|d| d.as_array())
+            .is_some_and(|d| d.iter().any(|x| x.get("status").and_then(|s| s.as_str()) == Some("running")));
+        for p in dispatch_db!(self, db => db.principal_partitions(ctx)).unwrap_or_default() {
+            if let Ok(v) = self.partition_view(&p) {
+                v.docs_kick(running);
+                v.consolidate_kick();
+                v.skill_kick();
+            }
+        }
+        self.skill_kick();
+        Ok(r)
+    }
+    /// Every workspace and org partition of the store. See
+    /// [crate::Db::tenancy_partitions].
+    pub fn tenancy_partitions(&self) -> Result<Vec<String>> {
+        dispatch_db!(self, db => db.tenancy_partitions())
+    }
+    /// A live subscription filtered to a principal's scopes. See
+    /// [crate::Db::subscribe_as].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn subscribe_as(
+        &self,
+        ctx: &tenancy::PrincipalContext,
+        relation: &str,
+    ) -> Result<(u32, Receiver<(CallbackOp, NamedRows, NamedRows)>)> {
+        dispatch_db!(self, db => db.subscribe_as(ctx, relation))
+    }
+    /// Whether the store has a tenancy control plane.
+    pub fn tenancy_enabled(&self) -> bool {
+        dispatch_db!(self, db => db.tenancy_enabled())
+    }
+    /// The principal and actions of an API key (server mode).
+    pub fn resolve_apikey(&self, key: &str) -> Result<Option<(String, Vec<String>)>> {
+        dispatch_db!(self, db => db.resolve_apikey(key))
+    }
+    /// A principal's registered public keys. See [crate::Db::principal_jwks].
+    pub fn principal_jwks(&self, id: &str) -> Result<Option<JsonValue>> {
+        dispatch_db!(self, db => db.principal_jwks(id))
+    }
+    /// The principal an external identity `(iss, sub)` maps to.
+    pub fn resolve_ident(&self, iss: &str, sub: &str) -> Result<Option<String>> {
+        dispatch_db!(self, db => db.resolve_ident(iss, sub))
+    }
+    /// The kind of an active principal.
+    pub fn principal_kind(&self, id: &str) -> Result<Option<String>> {
+        dispatch_db!(self, db => db.principal_kind(id))
+    }
+    /// The org an admin op touches. See [crate::Db::tenant_target_org].
+    pub fn tenant_target_org(&self, args: &JsonValue) -> Result<Option<String>> {
+        dispatch_db!(self, db => db.tenant_target_org(args))
+    }
+    /// Whether `principal` administers `org`.
+    pub fn is_org_admin(&self, principal: &str, org: &str) -> Result<bool> {
+        dispatch_db!(self, db => db.is_org_admin(principal, org))
+    }
     /// Dispatcher method. See [crate::Db::memory_init].
     pub fn memory_init(&self, opts: memory::InitOpts) -> Result<memory::MemConfig> {
         dispatch_db!(self, db => db.memory_init(opts))
@@ -1656,30 +1800,63 @@ impl DbInstance {
                 let (cb, changes) = db.register_callback(flow::FLOW_TASK, Some(64));
                 let queues = if opts.queues.is_empty() { vec!["default".to_string()] } else { opts.queues.clone() };
                 let args = json!({"worker": opts.worker, "queues": queues, "lease_ms": opts.lease_ms, "max": 64});
+                // the store and, with tenancy, every workspace and org
+                // partition (re-listed every few seconds)
+                let mut views: Vec<(Option<String>, DbInstance)> = vec![(None, db.clone())];
+                let mut listed = std::time::Instant::now() - std::time::Duration::from_secs(60);
+                let mut part_cbs: Vec<(DbInstance, u32, Receiver<(CallbackOp, NamedRows, NamedRows)>)> = vec![];
                 while !st.load(Ordering::SeqCst) {
-                    let busy = match db.flow_call("tick", args.clone()) {
-                        Ok(r) => {
-                            r.get("ran").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
-                                || r.get("fired").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
+                    if listed.elapsed() > std::time::Duration::from_secs(5) {
+                        listed = std::time::Instant::now();
+                        for p in db.tenancy_partitions().unwrap_or_default() {
+                            if views.iter().any(|(q, _)| q.as_deref() == Some(p.as_str())) {
+                                continue;
+                            }
+                            if let Ok(v) = db.partition_view(&p) {
+                                let (id, rx) = v.register_callback(flow::FLOW_TASK, Some(64));
+                                part_cbs.push((v.clone(), id, rx));
+                                views.push((Some(p), v));
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("kleos flow worker: {e}");
-                            false
+                    }
+                    let mut busy = false;
+                    let now = flow::now_us();
+                    let mut wait_ms = opts.poll_ms.max(1);
+                    for (p, v) in &views {
+                        match v.flow_call("tick", args.clone()) {
+                            Ok(r) => {
+                                busy |= r.get("ran").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty())
+                                    || r.get("fired").and_then(|x| x.as_array()).map_or(false, |a| !a.is_empty());
+                            }
+                            // a partition without workflows yet has no flow relations
+                            Err(e) if p.is_some() && format!("{e:?}").contains("kleos_flow") => {}
+                            Err(e) => eprintln!("kleos flow worker: {e}"),
                         }
-                    };
+                        if let Ok(Some(due)) = dispatch_db!(v, d => d.flow_next_due(&queues)) {
+                            wait_ms = wait_ms.min(((due - now).max(0) / 1000) as u64);
+                        }
+                    }
                     if busy {
                         continue;
                     }
-                    let now = flow::now_us();
-                    let mut wait_ms = opts.poll_ms.max(1);
-                    if let Ok(Some(due)) = dispatch_db!(&db, d => d.flow_next_due(&queues)) {
-                        wait_ms = wait_ms.min(((due - now).max(0) / 1000) as u64);
+                    if part_cbs.iter().any(|(_, _, rx)| !rx.is_empty()) {
+                        for (_, _, rx) in &part_cbs {
+                            while rx.try_recv().is_ok() {}
+                        }
+                        continue;
+                    }
+                    // partition commits are seen within a short poll
+                    if views.len() > 1 {
+                        wait_ms = wait_ms.min(200);
                     }
                     crossbeam::select! {
                         recv(changes) -> _ => {}
                         recv(wake_rx) -> _ => {}
                         default(std::time::Duration::from_millis(wait_ms)) => {}
                     }
+                }
+                for (v, id, _) in part_cbs {
+                    v.unregister_callback(id);
                 }
                 db.unregister_callback(cb);
             })

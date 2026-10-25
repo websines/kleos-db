@@ -255,6 +255,43 @@ pub struct Db<S> {
     /// must repair. Set via [`Db::legacy_next_import_for_tests`].
     #[cfg(any(test, feature = "test-hooks"))]
     legacy_next_import: Arc<AtomicBool>,
+    /// Workspace partition of this view (docs/specs/tenancy.md,
+    /// "Partitions"); `None` on the plain store.
+    pub(crate) partition: Option<SmartString<LazyCompact>>,
+    /// Principal-view state, set only on views made by the tenancy layer.
+    pub(crate) view: Option<Arc<ViewCtx>>,
+    /// Access-count buffers of the partitions (each view uses its own).
+    access_bufs: Arc<Mutex<BTreeMap<String, PartState>>>,
+    /// Process-side tenancy state: ScopeSet cache, audit chain heads,
+    /// queued write events (tenancy.rs).
+    pub(crate) tenancy: Arc<crate::tenancy::TenancyState>,
+}
+
+/// The per-partition runtime state of a store: each workspace partition has
+/// its own access-count buffer and its own document and consolidation
+/// runners (docs/specs/tenancy.md, "Partitions").
+#[derive(Clone, Default)]
+pub(crate) struct PartState {
+    mem_access: Arc<crate::memory::AccessBuf>,
+    #[cfg(feature = "docs")]
+    docs_state: Arc<crate::docs::DocsState>,
+    consol_state: Arc<crate::memory::consolidate::ConsolState>,
+    skill_state: Arc<crate::skill_learn::SkillState>,
+}
+
+/// Principal-view state (docs/specs/tenancy.md): what a principal call
+/// adds to the database it runs on.
+#[derive(Default)]
+pub(crate) struct ViewCtx {
+    /// A read union of scope namespaces, narrowest first: `mem_scope` of
+    /// the first returns all of them (a union scope, read-only).
+    pub(crate) union: Option<Vec<String>>,
+    /// Written with every new memory (`kleos_mem_actor`): `[human, agent,
+    /// run, chain]`.
+    pub(crate) actor: Option<[DataValue; 4]>,
+    /// Writes the audit event of each committing transaction's writes
+    /// into that transaction.
+    pub(crate) sink: Option<Arc<dyn crate::runtime::transact::CommitAudit>>,
 }
 
 impl<S> Debug for Db<S> {
@@ -437,6 +474,9 @@ impl<'s, S: Storage<'s>> Db<S> {
                 registry: rerankers.clone(),
             })),
         );
+        let mem_access: Arc<crate::memory::AccessBuf> = Default::default();
+        let root_state = PartState { mem_access: mem_access.clone(), ..Default::default() };
+        let access_bufs = Arc::new(Mutex::new(BTreeMap::from([(String::new(), root_state.clone())])));
         let ret = Self {
             db: storage,
             temp_db: Default::default(),
@@ -449,11 +489,11 @@ impl<'s, S: Storage<'s>> Db<S> {
             running_queries: Default::default(),
             fixed_rules: Arc::new(ShardedLock::new(fixed_rules)),
             rerankers,
-            mem_access: Default::default(),
+            mem_access,
             #[cfg(feature = "docs")]
-            docs_state: Default::default(),
-            consol_state: Default::default(),
-            skill_state: Default::default(),
+            docs_state: root_state.docs_state.clone(),
+            consol_state: root_state.consol_state.clone(),
+            skill_state: root_state.skill_state.clone(),
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
@@ -477,8 +517,64 @@ impl<'s, S: Storage<'s>> Db<S> {
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(any(test, feature = "test-hooks"))]
             legacy_next_import: Arc::new(AtomicBool::new(false)),
+            partition: None,
+            view: None,
+            access_bufs,
+            tenancy: Default::default(),
         };
         Ok(ret)
+    }
+
+    /// A view of the store in which every stored relation name is routed to
+    /// `<partition>@<name>` (docs/specs/tenancy.md, "Partitions"): it
+    /// behaves like a separate database inside the same storage. The
+    /// tenancy control plane (`kleos_tn_*`) stays global.
+    pub fn partition_view(&self, partition: &str) -> Result<Self> {
+        if partition.is_empty()
+            || partition.len() > 80
+            || !partition.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            bail!("invalid partition name '{partition}'");
+        }
+        let mut v = self.clone();
+        v.partition = Some(SmartString::from(partition));
+        v.view = None;
+        v.set_part_state(partition);
+        Ok(v)
+    }
+
+    fn set_part_state(&mut self, partition: &str) {
+        let st = self.access_bufs.lock().unwrap_or_else(|e| e.into_inner()).entry(partition.to_string()).or_default().clone();
+        self.mem_access = st.mem_access;
+        #[cfg(feature = "docs")]
+        {
+            self.docs_state = st.docs_state;
+        }
+        self.consol_state = st.consol_state;
+        self.skill_state = st.skill_state;
+    }
+
+    /// The plain store under this view (no partition, no principal).
+    pub(crate) fn root_view(&self) -> Self {
+        let mut v = self.clone();
+        if v.partition.is_some() {
+            v.partition = None;
+            v.set_part_state("");
+        }
+        v.view = None;
+        v
+    }
+
+    /// This view with principal state attached.
+    pub(crate) fn with_view(&self, view: ViewCtx) -> Self {
+        let mut v = self.clone();
+        v.view = Some(Arc::new(view));
+        v
+    }
+
+    /// The partition this view routes to, if any.
+    pub fn partition(&self) -> Option<&str> {
+        self.partition.as_deref()
     }
 
     /// Must be called after creation of the database to initialize the runtime state.
@@ -667,6 +763,30 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// script does not get the budget afresh per statement); triggers fired by
     /// the script inherit it. A budget expiry aborts before any commit, so a
     /// killed mutable script leaves no partial writes.
+    /// `::tenant` / `::principal` scripts, parsed but not run: `(is
+    /// principal op, op, args)` (DbInstance runs them; docs/specs/tenancy.md).
+    pub(crate) fn parse_tenancy_op(
+        &'s self,
+        payload: &str,
+        params: &BTreeMap<String, DataValue>,
+    ) -> Result<Option<(bool, String, JsonValue)>> {
+        let script = parse_script(
+            payload,
+            params,
+            &self.get_fixed_rules(),
+            crate::data::aggr::CustomAggrRegistries {
+                meet: &self.get_custom_aggrs(),
+                bounded: &self.get_custom_bounded_meets(),
+            },
+            current_validity(),
+        )?;
+        Ok(match script {
+            CozoScript::Sys(SysOp::Tenant(op, args)) => Some((false, op, args)),
+            CozoScript::Sys(SysOp::Principal(op, args)) => Some((true, op, args)),
+            _ => None,
+        })
+    }
+
     pub fn run_script_with_options(
         &'s self,
         payload: &str,
@@ -1992,6 +2112,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         } else {
             unbounded()
         };
+        let relation = &*crate::runtime::transact::route_name(self.partition.as_deref(), relation);
         let cb = CallbackDeclaration {
             dependent: SmartString::from(relation),
             sender,
@@ -2113,6 +2234,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             commit_inflight: false,
             live: self.live.clone(),
             read_log: None,
+            partition: self.partition.clone(),
+            write_sink: self.view.as_ref().and_then(|v| v.sink.clone()),
+            written: Default::default(),
         };
         Ok(ret)
     }
@@ -2140,6 +2264,9 @@ impl<'s, S: Storage<'s>> Db<S> {
             commit_inflight: false,
             live: self.live.clone(),
             read_log: None,
+            partition: self.partition.clone(),
+            write_sink: self.view.as_ref().and_then(|v| v.sink.clone()),
+            written: Default::default(),
         };
         Ok(ret)
     }
@@ -2794,6 +2921,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             SysOp::Flow(op, _) => bail!("`::flow {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::Doc(op, _) => bail!("`::doc {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::Ontology(op, _) => bail!("`::ontology {op}` must run as a script of its own, not inside an imperative block"),
+            SysOp::Tenant(op, _) | SysOp::Principal(op, _) => bail!("`::tenant` / `::principal` ({op}) must run as a script of its own"),
             SysOp::Skill(op, _) => bail!("`::skill {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
@@ -3646,6 +3774,11 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let out = self.ontology_call(op, args.clone())?;
                 return Ok(crate::flow::flow_rows(out));
             }
+            // kleos fork: tenancy ops need the concrete store; DbInstance
+            // runs them (docs/specs/tenancy.md)
+            SysOp::Tenant(op, _) | SysOp::Principal(op, _) => {
+                bail!("`::tenant` / `::principal` ({op}) run through DbInstance (or Db::tenant_call / Db::memory_call_as)")
+            }
             SysOp::KillRunning(id) => {
                 let queries = self.running_queries.lock().unwrap();
                 return Ok(match queries.get(id) {
@@ -4160,7 +4293,13 @@ impl<'s, S: Storage<'s>> Db<S> {
             let n_keys = meta.metadata.keys.len();
             let n_dependents = meta.metadata.non_keys.len();
             let arity = n_keys + n_dependents;
-            let name = meta.name;
+            // a partition view lists its own relations, unprefixed; the
+            // plain store hides partitioned ones
+            let name = match (&tx.partition, meta.name.split_once('@')) {
+                (None, None) => meta.name,
+                (Some(p), Some((q, rest))) if p.as_str() == q => SmartString::from(rest),
+                _ => continue,
+            };
             let access_level = if name.contains(':') {
                 "index".to_string()
             } else {

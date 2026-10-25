@@ -334,3 +334,49 @@ fn ontology_and_reembed_tools() {
         assert!(res.get("isError").is_none() || res["isError"] == true, "{r}");
     }
 }
+
+#[test]
+fn principal_mode_tools() {
+    // a store with tenancy: alice and bob in workspace eng
+    let db = kleos::DbInstance::new("mem", "", "").unwrap();
+    for (op, a) in [
+        ("org_create", json!({"org": "acme", "owner": "alice"})),
+        ("principal_create", json!({"id": "bob", "org": "acme", "kind": "human"})),
+        ("ws_create", json!({"ws": "eng", "org": "acme"})),
+        ("grant", json!({"ws": "eng", "principal": "alice", "role": "writer"})),
+        ("grant", json!({"ws": "eng", "principal": "bob", "role": "writer"})),
+    ] {
+        db.tenant_call(op, a).unwrap();
+    }
+    let s = McpServer::new(Backend::Embedded(db), "default", false).with_state_key("test-key");
+    let who = |h: &str| kleos::tenancy::PrincipalContext { workspace: Some("eng".into()), human: Some(h.into()), ..Default::default() };
+    let mut alice = Conn { principal: "tenant:alice".into(), as_principal: Some(who("alice")), ..Default::default() };
+    let mut bob = Conn { principal: "tenant:bob".into(), as_principal: Some(who("bob")), ..Default::default() };
+    // `ns` is ignored: alice's default scope is her own
+    let r = tool(&s, &mut alice, "remember", json!({"text": "My salary is 90k.", "ns": "shared"}));
+    assert_eq!(r["structuredContent"]["scope"], "user:alice", "{r}");
+    tool(&s, &mut alice, "remember", json!({"text": "The standup moved to 10am.", "scope": "workspace"}));
+    let r = tool(&s, &mut bob, "recall", json!({"query": "salary standup", "format": "list"}));
+    let hits = r["structuredContent"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{r}");
+    assert_eq!(hits[0]["scope"], "ws");
+    // every other tool runs as the principal, inside its scopes
+    let r = tool(&s, &mut bob, "entity_profile", json!({"name": "standup"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    assert!(!r["content"][0]["text"].as_str().unwrap().contains("salary"), "{r}");
+    let r = tool(&s, &mut bob, "flow", json!({"action": "list"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    let r = tool(&s, &mut bob, "ontology", json!({"action": "list"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    // (documents need the `docs` feature; without it the error says so)
+    let r = tool(&s, &mut bob, "doc_status", json!({}));
+    assert!(r.get("isError").is_none() || r.to_string().contains("docs"), "{r}");
+    let r = tool(&s, &mut bob, "consolidate", json!({"scope": "workspace"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    let r = tool(&s, &mut bob, "branch", json!({"action": "fork", "branch": "try", "scope": "workspace"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    // store-wide tools need the workspace admin role
+    let r = tool(&s, &mut bob, "reembed", json!({"embedder": "none"}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("admin"), "{r}");
+}

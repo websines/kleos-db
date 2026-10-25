@@ -44,6 +44,23 @@ pub struct ConnArgs {
     /// Built-in embedder to enable in embedded mode, `name=model[:precision[:device[:dim]]]` (repeatable)
     #[arg(long = "embedder")]
     pub embedders: Vec<String>,
+    /// Principal mode (docs/specs/tenancy.md), embedded store: act as this
+    /// human principal
+    #[arg(long = "as-human")]
+    pub as_human: Option<String>,
+    /// Principal mode: act as (or through) this agent principal
+    #[arg(long = "as-agent")]
+    pub as_agent: Option<String>,
+    /// Principal mode: the workspace (default `default`)
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// Principal mode: the run / session id
+    #[arg(long)]
+    pub run: Option<String>,
+    /// Principal mode: the scope to write (agent_user, user, run, team:<id>,
+    /// workspace), or the scope kinds to read (comma-separated)
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 /// The CLI commands.
@@ -125,6 +142,14 @@ pub enum CliCmd {
         #[command(subcommand)]
         cmd: BranchCmd,
     },
+    /// Tenancy admin op (docs/specs/tenancy.md): `kleos tenant org_create '{"org": "acme"}'`
+    Tenant {
+        op: String,
+        /// The op's options as a JSON object
+        args: Option<String>,
+        #[command(flatten)]
+        conn: ConnArgs,
+    },
     /// The skill library: `kleos skill <op> [JSON] [flags]` for every op
     /// (find, import, export, list, get, history, activate, rollback, undo,
     /// retire, outcome, stats, scan, learn, optimize, eval, promote, approve,
@@ -175,6 +200,11 @@ pub enum CliCmd {
         params: Option<String>,
         #[command(flatten)]
         conn: ConnArgs,
+    },
+    /// Postgres coexistence: CDC status, resync, mapping, live queries (feature pg-cdc)
+    Pg {
+        #[command(subcommand)]
+        cmd: crate::pg::PgCmd,
     },
     /// Serve MCP (protocol 2026-07-28) over stdio
     Mcp {
@@ -338,6 +368,51 @@ struct Ctx {
     backend: Backend,
     ns: String,
     json: bool,
+    /// Principal mode (embedded store): calls run as this principal.
+    principal: Option<kleos::tenancy::PrincipalContext>,
+    scope: Option<String>,
+}
+
+impl Ctx {
+    /// One op, as the principal when one is given: memory ops through
+    /// `memory_call_as` (`scope` in place of `ns`), workflows, documents
+    /// and ontologies through the principal passthrough ops.
+    fn call(&self, area: Area, op: &str, mut args: Value) -> Result<Value, String> {
+        let (Some(p), Backend::Embedded(db)) = (&self.principal, &self.backend) else {
+            return self.backend.call(area, op, args);
+        };
+        if let Value::Object(m) = &mut args {
+            m.remove("ns");
+            if let Some(sc) = &self.scope {
+                match op {
+                    "recall" => {
+                        m.insert("scopes".into(), json!(sc.split(',').map(|x| x.trim()).collect::<Vec<_>>()));
+                    }
+                    _ => {
+                        m.insert("scope".into(), json!(sc));
+                    }
+                }
+            }
+        }
+        let r = match area {
+            Area::Memory => {
+                let op = if op == "recall" && args.get("format").and_then(|f| f.as_str()) == Some("context") { "context" } else { op };
+                db.memory_call_as(p, op, args)
+            }
+            other => {
+                let fam = match other {
+                    Area::Flow => "flow",
+                    Area::Doc => "doc",
+                    _ => "ontology",
+                };
+                if let Value::Object(m) = &mut args {
+                    m.insert("op".into(), json!(op));
+                }
+                db.memory_call_as(p, fam, args)
+            }
+        };
+        r.map_err(|e| e.to_string())
+    }
 }
 
 fn connect(c: &ConnArgs) -> Result<(Ctx, Config), String> {
@@ -352,7 +427,14 @@ fn connect(c: &ConnArgs) -> Result<(Ctx, Config), String> {
     };
     let ns = target.ns(&cfg);
     let backend = target.connect(&cfg)?;
-    Ok((Ctx { backend, ns, json: c.json }, cfg))
+    let principal = (c.as_human.is_some() || c.as_agent.is_some()).then(|| kleos::tenancy::PrincipalContext {
+        workspace: c.workspace.clone(),
+        human: c.as_human.clone(),
+        agent: c.as_agent.clone(),
+        run: c.run.clone(),
+        ..Default::default()
+    });
+    Ok((Ctx { backend, ns, json: c.json, principal, scope: c.scope.clone() }, cfg))
 }
 
 fn parse_json(label: &str, s: Option<&str>) -> Result<Value, String> {
@@ -424,6 +506,15 @@ fn remember_summary(v: &Value) -> Option<String> {
 /// Runs a CLI command; the error is printed by the caller.
 pub fn run(cmd: CliCmd) -> Result<(), String> {
     match cmd {
+        CliCmd::Tenant { op, args, conn } => {
+            let (ctx, _) = connect(&conn)?;
+            let a = parse_json("args", args.as_deref())?;
+            let v = match &ctx.backend {
+                Backend::Embedded(db) => db.tenant_call(&op, a).map_err(|e| e.to_string())?,
+                Backend::Remote(r) => r.tenant(&op, &a)?,
+            };
+            print(&ctx, &v, |v| serde_json::to_string_pretty(v).ok());
+        }
         CliCmd::Remember { text, attach, entities, at, conn } => {
             let (ctx, _) = connect(&conn)?;
             let mut a = json!({"ns": ctx.ns, "text": text});
@@ -436,7 +527,7 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
             if let Some(at) = at {
                 a["at"] = json!(at);
             }
-            let v = ctx.backend.call(Area::Memory, "remember", a)?;
+            let v = ctx.call(Area::Memory, "remember", a)?;
             print(&ctx, &v, remember_summary);
         }
         CliCmd::Recall { query, k, list, budget, as_of, conn } => {
@@ -450,7 +541,7 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
                     a[key] = json!(v);
                 }
             }
-            let v = ctx.backend.call(Area::Memory, "recall", a)?;
+            let v = ctx.call(Area::Memory, "recall", a)?;
             print(&ctx, &v, |v| {
                 if list {
                     let hits = v.as_array()?;
@@ -472,12 +563,12 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
             let (ctx, _) = connect(&conn)?;
             let mode = if erase { "erase" } else { "retract" };
             confirm(&format!("{} {} memor{} in '{}'?", if erase { "Erase (permanently delete)" } else { "Retract" }, ids.len(), if ids.len() == 1 { "y" } else { "ies" }, ctx.ns), yes)?;
-            let v = ctx.backend.call(Area::Memory, "forget", json!({"ns": ctx.ns, "ids": ids, "mode": mode}))?;
+            let v = ctx.call(Area::Memory, "forget", json!({"ns": ctx.ns, "ids": ids, "mode": mode}))?;
             print(&ctx, &v, |_| None);
         }
         CliCmd::Reflect { conn } => {
             let (ctx, _) = connect(&conn)?;
-            let v = ctx.backend.call(Area::Memory, "reflect", json!({"ns": ctx.ns}))?;
+            let v = ctx.call(Area::Memory, "reflect", json!({"ns": ctx.ns}))?;
             print(&ctx, &v, |_| None);
         }
         CliCmd::Profile { name, conn } => {
@@ -488,12 +579,12 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
         CliCmd::Doc { cmd } => match cmd {
             DocCmd::Add { file, text, conn } => {
                 let (ctx, _) = connect(&conn)?;
-                let v = ctx.backend.call(Area::Memory, "remember", json!({"ns": ctx.ns, "text": text.unwrap_or_default(), "attachments": [abs(&file)]}))?;
+                let v = ctx.call(Area::Memory, "remember", json!({"ns": ctx.ns, "text": text.unwrap_or_default(), "attachments": [abs(&file)]}))?;
                 print(&ctx, &v, remember_summary);
             }
             DocCmd::Status { doc, conn } => {
                 let (ctx, _) = connect(&conn)?;
-                let v = ctx.backend.call(Area::Doc, "get", json!({"ns": ctx.ns, "doc": doc}))?;
+                let v = ctx.call(Area::Doc, "get", json!({"ns": ctx.ns, "doc": doc}))?;
                 if v.is_null() {
                     return Err(format!("no document '{doc}' in namespace '{}'", ctx.ns));
                 }
@@ -501,7 +592,7 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
             }
             DocCmd::List { conn } => {
                 let (ctx, _) = connect(&conn)?;
-                let v = ctx.backend.call(Area::Doc, "list", json!({"ns": ctx.ns}))?;
+                let v = ctx.call(Area::Doc, "list", json!({"ns": ctx.ns}))?;
                 print(&ctx, &v, |v| {
                     let a = v.as_array()?;
                     Some(if a.is_empty() {
@@ -530,7 +621,7 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
             if op == "list" {
                 a = json!({});
             }
-            let v = ctx.backend.call(Area::Ontology, op, a)?;
+            let v = ctx.call(Area::Ontology, op, a)?;
             print(&ctx, &v, |_| None);
         }
         CliCmd::Flow { cmd } => {
@@ -548,18 +639,18 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
                 FlowCmd::List { status, conn } => ("list", conn, status.map(|s| json!({"status": s})).unwrap_or(json!({}))),
             };
             let (ctx, _) = connect(&conn)?;
-            let v = ctx.backend.call(Area::Flow, op, a)?;
+            let v = ctx.call(Area::Flow, op, a)?;
             print(&ctx, &v, |_| None);
         }
         CliCmd::Branch { cmd } => match cmd {
             BranchCmd::Fork { to, from, conn } => {
                 let (ctx, _) = connect(&conn)?;
-                let v = ctx.backend.call(Area::Memory, "fork", json!({"from": from.unwrap_or_else(|| ctx.ns.clone()), "to": to}))?;
+                let v = ctx.call(Area::Memory, "fork", json!({"from": from.unwrap_or_else(|| ctx.ns.clone()), "to": to}))?;
                 print(&ctx, &v, |_| None);
             }
             BranchCmd::Diff { a, b, conn } => {
                 let (ctx, _) = connect(&conn)?;
-                let v = ctx.backend.call(Area::Memory, "diff", json!({"a": a, "b": b}))?;
+                let v = ctx.call(Area::Memory, "diff", json!({"a": a, "b": b}))?;
                 print(&ctx, &v, |_| None);
             }
             BranchCmd::Merge { from, into, dry_run, yes, conn } => {
@@ -571,24 +662,24 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
                 if let Some(i) = into {
                     a["into"] = json!(i);
                 }
-                let v = ctx.backend.call(Area::Memory, "merge", a)?;
+                let v = ctx.call(Area::Memory, "merge", a)?;
                 print(&ctx, &v, |_| None);
             }
             BranchCmd::Rewind { target, at, yes, conn } => {
                 let (ctx, _) = connect(&conn)?;
                 confirm(&format!("Rewind '{target}' to {at}? (undoable)"), yes)?;
-                let v = ctx.backend.call(Area::Memory, "rewind", json!({"ns": target, "to": at}))?;
+                let v = ctx.call(Area::Memory, "rewind", json!({"ns": target, "to": at}))?;
                 print(&ctx, &v, |_| None);
             }
             BranchCmd::Discard { target, yes, conn } => {
                 let (ctx, _) = connect(&conn)?;
                 confirm(&format!("Discard branch '{target}'?"), yes)?;
-                let v = ctx.backend.call(Area::Memory, "discard", json!({"ns": target}))?;
+                let v = ctx.call(Area::Memory, "discard", json!({"ns": target}))?;
                 print(&ctx, &v, |_| None);
             }
             BranchCmd::List { conn } => {
                 let (ctx, _) = connect(&conn)?;
-                let v = ctx.backend.call(Area::Memory, "branches", json!({}))?;
+                let v = ctx.call(Area::Memory, "branches", json!({}))?;
                 print(&ctx, &v, |_| None);
             }
         },
@@ -637,6 +728,11 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
             let (ctx, _) = connect(&conn)?;
             let params = parse_json("--params", params.as_deref())?;
             let v = ctx.backend.query(&script, &params)?;
+            print(&ctx, &v, |_| None);
+        }
+        CliCmd::Pg { cmd } => {
+            let (ctx, _) = connect(cmd.conn())?;
+            let v = crate::pg::run(cmd, &ctx.backend)?;
             print(&ctx, &v, |_| None);
         }
         CliCmd::Mcp { allow_query, skills_list, conn } => {
@@ -719,8 +815,10 @@ impl CliCmd {
             | CliCmd::Reflect { conn }
             | CliCmd::Profile { conn, .. }
             | CliCmd::Query { conn, .. }
+            | CliCmd::Tenant { conn, .. }
             | CliCmd::Skill { conn, .. }
             | CliCmd::Mcp { conn, .. } => j(conn),
+            CliCmd::Pg { cmd } => j(cmd.conn()),
             CliCmd::Doc { cmd } => match cmd {
                 DocCmd::Add { conn, .. } | DocCmd::Status { conn, .. } | DocCmd::List { conn } => j(conn),
             },

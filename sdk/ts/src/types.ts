@@ -347,6 +347,29 @@ export interface HybridQuery {
 }
 
 /** The outcome of `decide` (label, p, band, decided_by, ...). */
+/** Who is calling, in principal mode (docs/specs/tenancy.md). */
+export interface PrincipalContext {
+  /** Target workspace; default `default`. */
+  workspace?: string;
+  /** The originating human principal. */
+  human?: string;
+  /** The acting agent principal. */
+  agent?: string;
+  /** A service principal. */
+  service?: string;
+  /** Run / session id. */
+  run?: string;
+  /** Other principals of a shared session (they only take access away). */
+  participants?: string[];
+  /** The delegation chain, innermost first: `{kind, iss?, sub, principal?, assurance}`. */
+  chain?: { kind: string; iss?: string; sub: string; principal?: string; assurance?: 'verified' | 'issuer_endorsed' | 'host_asserted' | 'self_asserted' }[];
+  /** What the credential allows. */
+  token?: { actions?: string[]; kinds?: string[] };
+  purpose?: string;
+  txn?: string;
+  client_id?: string;
+}
+
 export interface DecideResult {
   label?: string;
   p?: number;

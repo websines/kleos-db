@@ -68,14 +68,14 @@ fn md(name: &str, desc: &str, body: &str) -> String {
 fn interop_round_trip_retrieval_and_sep2640() {
     let db = db();
     let r = call(&db, "import", json!({"path": repo_skills(), "activate": true}));
-    assert_eq!(r["imported"].as_array().unwrap().len(), 5);
+    assert_eq!(r["imported"].as_array().unwrap().len(), 6);
     let list = call(&db, "list", json!({}));
-    assert_eq!(list.as_array().unwrap().iter().filter(|s| s["status"] == "active").count(), 5);
+    assert_eq!(list.as_array().unwrap().iter().filter(|s| s["status"] == "active").count(), 6);
 
     // lossless export: byte-identical folders
     let out = tmp();
     call(&db, "export", json!({"path": out.path()}));
-    for name in ["kleos-memory", "kleos-documents", "kleos-ontology", "kleos-branches", "kleos-skills"] {
+    for name in ["kleos-memory", "kleos-documents", "kleos-ontology", "kleos-branches", "kleos-skills", "kleos-postgres"] {
         let a = std::fs::read(repo_skills().join(name).join("SKILL.md")).unwrap();
         let b = std::fs::read(out.path().join(name).join("SKILL.md")).unwrap();
         assert_eq!(a, b, "{name} changed in the round trip");
@@ -113,7 +113,7 @@ fn interop_round_trip_retrieval_and_sep2640() {
     let full = call(&db, "entries", json!({"mode": "full", "limit": 3}));
     assert_eq!(full["nextCursor"], "3");
     let page2 = call(&db, "entries", json!({"mode": "full", "limit": 3, "cursor": "3"}));
-    assert_eq!(page2["skills"].as_array().unwrap().len(), 2);
+    assert_eq!(page2["skills"].as_array().unwrap().len(), 3);
     let tk = call(&db, "entries", json!({"task": "what did the user say about the project deadline", "k": 1}));
     assert_eq!(tk["skills"][0]["frontmatter"]["name"], "kleos-memory");
 
@@ -418,4 +418,15 @@ fn learning_loop_and_optimizer_with_a_mock_llm() {
     }
     let s = db.flow_call("status", json!({"id": id})).unwrap();
     assert_eq!(s["status"], "completed", "{s}");
+
+    // queued from CozoScript: the in-process runner starts too
+    let r = db.run_script("::skill learn {}", Default::default(), kleos::ScriptMutability::Mutable).unwrap();
+    let id = r.rows[0][r.headers.iter().position(|h| h == "id").unwrap()].get_str().unwrap().to_string();
+    for _ in 0..50 {
+        if db.flow_call("status", json!({"id": id})).unwrap()["status"] == "completed" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(db.flow_call("status", json!({"id": id})).unwrap()["status"], "completed");
 }

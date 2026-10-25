@@ -331,7 +331,9 @@ impl<'s, S: Storage<'s>> Db<S> {
         let pol = self.skill_policy();
         let stats = self.skill_outcome_counts(&[ver.clone()])?.remove(&ver).unwrap_or_default();
         let scripts = row["scan"]["scripts"].as_u64().unwrap_or(0);
-        let auto = pol.auto_promote_to.iter().any(|k| k == scope_kind(&to))
+        // `auto: false` (principal mode): Cedar decides, not the store policy
+        let auto = args.get("auto").and_then(|v| v.as_bool()).unwrap_or(true)
+            && pol.auto_promote_to.iter().any(|k| k == scope_kind(&to))
             && scope_kind(&to) != "org"
             && stats.uses >= pol.auto_min_uses
             && (stats.uses == 0 || stats.successes as f64 / stats.uses as f64 >= pol.auto_min_success)
@@ -377,6 +379,12 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// The copy: a new version in the target scope with the source's exact
     /// files, then live there (if the scan allows).
     fn skill_apply_promotion(&'s self, id: &str, approver: &JsonValue) -> Result<JsonValue> {
+        self.skill_apply_promotion_into(id, approver, self)
+    }
+
+    /// Apply a pending promotion of this store into `target` (this store, or
+    /// another partition's view: org scope lives in the org partition).
+    pub(crate) fn skill_apply_promotion_into(&'s self, id: &str, approver: &JsonValue, target: &'s Self) -> Result<JsonValue> {
         let p = self.skill_promo(id)?;
         if p["status"] != "pending" {
             bail!("promotion '{id}' is {}", p["status"].as_str().unwrap_or("?"));
@@ -385,17 +393,17 @@ impl<'s, S: Storage<'s>> Db<S> {
         let files = self.skill_files(&src["files"])?;
         let to = p["to"].as_str().unwrap_or_default().to_string();
         let prov = json!({"promotion": id, "from_ver": src["ver"], "from_scope": src["scope"], "approver": approver, "requested_by": p["actor"]});
-        let put = self.skill_put_files(&to, files, "promoted", None, prov, &p["actor"], None)?;
+        let put = target.skill_put_files(&to, files, "promoted", None, prov, &p["actor"], None)?;
         let new_ver = put["ver"].as_str().unwrap_or_default().to_string();
         // signatures cover the manifest, which the copy shares
         for s in self.skill_sigs(src["ver"].as_str().unwrap_or_default())?.as_array().cloned().unwrap_or_default() {
-            self.sk_w(
+            target.sk_w(
                 &format!("?[ver, kid, signature, at] <- [[$v, $k, $s, $now]] :put {SKILL_SIG} {{ver, kid => signature, at}}"),
                 vec![("v", sv(&new_ver)), ("k", sv(s["kid"].as_str().unwrap_or_default())), ("s", sv(s["signature"].as_str().unwrap_or_default())), ("now", DataValue::from(now_us()))],
             )?;
         }
         let activated = if put["status"] == "candidate" || put["status"] == "active" {
-            Some(self.skill_activate_ver(&new_ver, approver, &format!("promotion {id}"))?)
+            Some(target.skill_activate_ver(&new_ver, approver, &format!("promotion {id}"))?)
         } else {
             None
         };

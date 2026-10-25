@@ -7,7 +7,7 @@
  */
 import { enableScript, KleosError, scriptLiteral } from './backend.js';
 import type { AdminOp, Backend, ModelKind } from './backend.js';
-import type { Json, ModelSpec, NamedRows } from './types.js';
+import type { Json, ModelSpec, NamedRows, PrincipalContext } from './types.js';
 
 /** Options of {@link HttpBackend}. */
 export interface ConnectOptions {
@@ -72,6 +72,13 @@ export class HttpBackend implements Backend {
     return j;
   }
 
+  async tenant(op: string, args: Record<string, unknown>) {
+    return (await this.post(`/tenant/${op}`, args, `tenant.${op}`)).result;
+  }
+  /** The server runs the op as the principal of this client's token; `ctx` is not sent. */
+  async memoryAs(_ctx: PrincipalContext, op: string, args: Record<string, unknown>) {
+    return (await this.post(`/memory/${op}`, args, `principal.${op}`)).result;
+  }
   async memory(op: string, args: Record<string, unknown>) {
     return (await this.post(`/memory/${op}`, args, `memory.${op}`)).result;
   }
@@ -83,6 +90,9 @@ export class HttpBackend implements Backend {
   }
   async doc(op: string, args: Record<string, unknown>) {
     return (await this.post(`/doc/${op}`, args, `doc.${op}`)).result;
+  }
+  async pg(op: string, args: Record<string, unknown>) {
+    return (await this.post(`/pg/${op}`, args, `pg.${op}`)).result;
   }
   async skill(op: string, args: Record<string, unknown>) {
     return (await this.post(`/skill/${op}`, args, `skill.${op}`)).result;

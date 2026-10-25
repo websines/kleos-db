@@ -1,83 +1,111 @@
 # kleos — Roadmap
 
-kleos is an embedded memory engine for AI agents. It is derived from
+kleos is a memory engine for AI agents. It is derived from
 [CozoDB](https://github.com/cozodb/cozo) via the mnestic fork (see [`NOTICE.md`](NOTICE.md)).
-This is the public, forward-looking roadmap. Shipped detail lives in
-[`CHANGELOG.md`](CHANGELOG.md), and implementation contracts live in [`docs/specs/`](docs/specs/).
+This is the public, forward-looking roadmap, updated 2026-10-25. Shipped detail lives in
+[`CHANGELOG.md`](CHANGELOG.md), implementation contracts in [`docs/specs/`](docs/specs/),
+measurements in [`docs/benchmarks/`](docs/benchmarks/), and the item-by-item research plan
+(IDs such as E7 below) in [`UPGRADE_PLAN.md`](UPGRADE_PLAN.md).
 
 ## North star
 
-An agent's long-term memory should live in one embedded engine, not be stitched together from
-a vector store, a search index, a graph database and an audit log. kleos combines:
+An agent's memory should live in one engine, not be stitched together from a vector store, a
+search index, a graph database, a workflow engine and an audit log. kleos combines:
 
-- vector (HNSW), full-text (BM25) and graph retrieval, fusable in a single query;
-- valid-time and transaction-time history ("what did the agent believe, and when?");
-- recursive Datalog inference with proof-carrying results;
-- incremental indexes and budgeted, interruptible operations; and
-- transactional storage with no separate database service.
+- vector (HNSW), full-text (BM25) and graph retrieval, fused in one query;
+- valid-time and transaction-time history, with facts superseded instead of overwritten
+  ("what did the agent believe, and when?");
+- a self-building ontology, entity resolution and consolidation into profiles and summaries;
+- small built-in models (embedder, decider, entity extractor, OCR) that run in-process;
+- durable workflows, memory branches and live subscriptions; and
+- transactional storage, embedded or as a server, with no separate database service.
 
 A change belongs in kleos when it makes that combination more correct, more robust, faster or
-easier to adopt. It has to be a general engine mechanism, not a special case for one consumer.
+easier to adopt. Built-in models stay small (about 600M parameters or fewer); quality comes from
+templates, calibration and verification, not large models.
 
 ## Current state
 
-- Code base: mnestic 0.18.0+ (`352bf205`), renamed. The engine is functionally identical to mnestic.
-- **Nothing has been published under the kleos name yet.** The `kleos` crate, `kleos-rocks` and
-  the `kleos` Python package exist in this repository only.
-- Maintained surfaces: the Rust crate, the RocksDB bridge, the server/REPL binary, and the Python
-  package with its LangChain, LlamaIndex, LangGraph and MCP integrations.
-- Unmaintained and excluded from the workspace: the C, Java, Node.js, Swift and WASM bindings.
+- Nothing is published under the kleos name yet (crates.io, PyPI and npm are held). Everything
+  lives in this repository.
+- Maintained surfaces: the Rust crates, the RocksDB bridge, the `kleos` server and CLI with a
+  stateless MCP server, the Python package, the TypeScript SDK (napi-rs binding plus HTTP and
+  MCP clients), and an Agent Skills plugin.
+- Unmaintained and excluded from the workspace: the C, Java, Swift and WASM bindings.
 
-## Phase 1 — Hardening (current)
+## Shipped
 
-An embedded database runs inside its host's process, so its panics crash the host and its bugs
-corrupt the host's data. Before adding features, kleos has to be boringly reliable.
+Work shipped in waves; each wave merged with targeted tests and before/after measurements.
 
-| Work | Done when |
+| Wave | What shipped |
 |---|---|
-| Green CI on current stable Rust | Every gate in `build.yml` passes on the latest stable toolchain |
-| Triage inherited upstream bugs | Each open CozoDB/mnestic bug is fixed with a regression test, or recorded as not reproducible |
-| Panic-proof user-input paths | Malformed scripts, parameters, imports and stored data return errors instead of panicking. `unwrap`/`panic!` remain only where an invariant is proven |
-| Fuzzing | `cargo-fuzz` targets cover the CozoScript parser, the query pipeline and the value codec, and CI runs a short fuzz pass |
-| HNSW integrity verification | A read-only verifier detects damaged vector indexes (inherited mnestic #56). `::reindex` remains the repair path |
-| Storage upgrade | RocksDB moves from v8.8.1 to a current release, with storage-compatibility tests against databases written by the old version |
-| Release pipeline | The first kleos release publishes `kleos-rocks`, `kleos` and the Python package from tags, with the version gates green |
+| 1 | Filters inside HNSW search (A1); TurboQuant-style compressed vector codes (A2); weighted fusion and a re-rank stage (C1, C2); `embed()` and the `kleos-infer` engine with EmbeddingGemma and Model2Vec (D2, D3, D6); supersession and provenance (E1, E2); live query subscriptions (F1) |
+| 2 | `decide()` with the built-in decider (D5, [Mazino0/kleos-decider-nano](https://huggingface.co/Mazino0/kleos-decider-nano)); the memory API: `remember` / `recall` / `forget` / `reflect` in every maintained binding (E10, H1); entity resolution (E3); memory scoring (E4, C6); contradiction candidates (E6); typed claims; Engram overlays fed by `remember` |
+| 3 | Recall context blocks; date normalisation; the knowledge-update fix; the GLiNER entity extractor ([Mazino0/kleos-gliner](https://huggingface.co/Mazino0/kleos-gliner)) |
+| 4 | Durable workflows `::flow` with retries, schedules, signals and child workflows (F4, F5); memory branches: fork, diff, merge, rewind (E9) |
+| 5 | Ontologies that build and maintain themselves (cardinality-driven supersession, learning, maintenance, history and undo); a memory budget and concurrency lanes; the documents pipeline (G2): a Rust port of Indra OCR, Chonkie-style chunking, durable ingestion with page citations; EmbeddingGemma 2 as the default embedder, with `::memory reembed` |
+| 6 | Graph recall: personalized PageRank (C4) and inferred ontology links, on by default; units of typed literals; consolidation into entity profiles and session summaries, automatic by default (E7); the stateless MCP server (protocol 2026-07-28), the `kleos` CLI and agent skills (J3); the TypeScript SDK (J2); native OCR kernels and streaming ingestion (500-page scanned book 590 → 217 s); hybrid fusion retuned on memory data; ontology quality fixes |
+| 7 | Tenancy and access (E5, K2): orgs, workspaces and nested teams; humans and agents as principals with actor chains recorded on every write and read; Cedar scope filtering inside vector, full-text and graph search; per-workspace partitions and workers; per-scope derived data and BM25 statistics; session scopes; audited promotion and approvals; an in-transaction hash-chained audit log; erasure with crypto-shredding; JWT/OIDC with JWKS, DPoP, SPIFFE, Transaction Tokens and RFC 8693 token exchange; every MCP tool as the principal; OpenTelemetry spans |
 
-## Phase 2 — Candidate work (not yet scheduled)
+## In progress (wave 7)
 
-These items are inherited from the mnestic backlog (mnestic issue numbers in brackets) or follow
-from the north star. Phase 1 findings decide the order.
+Tenancy and access (E5, K2) shipped on 2026-10-25 ([spec](docs/specs/tenancy.md)): see the wave 7 row above.
 
-| Area | Item |
-|---|---|
-| Correctness | Diagnostic for surprising top-level temporary relations [#12]; sled valid-time scans [#5] |
-| Operability | Versioned schema migrations with diff and rollback [#10]; backup and restore ergonomics; operational metrics |
-| Performance | Baseline benchmark suite first; then plan caching, SQLite `WITHOUT ROWID` [#6], vector quantization with float rescore [#57] |
-| Retrieval | Multi-token phrase-prefix FTS [#19]; phrases inside `NEAR` [#20]; filtered-vector search at low selectivity |
-| Interop | Arrow query-result export [#11]; first-class ULID keys [#8] |
-| Reach | Node.js/TypeScript bindings, the most-requested ecosystem for agent frameworks |
+
+| Work | What it adds | Spec (lands with the branch) |
+|---|---|---|
+| **Skill library** (E8) | Procedural memory: Agent Skills with immutable versions and digests, task-to-skill routing within a token budget, skills over MCP (SEP-2640), success tracking, automatic rollback and retirement, a security scanner and signing, a learning loop from successful runs, a SkillOpt-style optimizer, promotion and a registry | `docs/specs/skills.md` |
+| **Postgres coexistence connector** | Postgres logical replication into memory and ontology (rows become entities, foreign keys become edges, updates supersede, commit time is valid time), exactly-once resume, ledger-based write-back from workflows, a Debezium event adapter for other databases, and live joins through DataFusion | `docs/specs/pg-connector.md` |
+
+## Next
+
+- **Quality close-out:** re-measure LongMemEval QA with the lift-only graph re-rank; v2
+  over-typing; summaries that drop superseded claims; a benchmark for inferred-link recall.
+- **SQL front door:** DataFusion read-only SQL over kleos snapshots and the Postgres wire protocol
+  (`pgwire`), so psql, drivers, ORMs and BI tools connect; it builds on tenancy so SQL respects
+  the same access rules (H4, I5).
+
+## Later
+
+- **Postgres compatibility track:** SQL writes mapped onto kleos transactions, constraints,
+  migrations (H5), roles and row-level security, replication and point-in-time recovery.
+- **Code memory:** a tree-sitter symbols / calls / imports graph updated as files change, with edit
+  history tied to conversations (G1).
+- **Multimodal memory:** images and audio through EmbeddingGemma 2's vision and audio paths
+  (G3, G4); EmbeddingGemma 2 speed.
+- **Operations:** metrics, backups that keep search indexes, encryption at rest (K1, K3, K4).
+- **Text search:** block-max WAND, highlighting, typo tolerance, code-aware tokens, more
+  languages (B1–B4).
+- **Vector search:** compressed codes in adjacency rows, Matryoshka indexing, in-place delete
+  repair, sparse and multi-vector retrieval (A4–A11).
+- **Incremental maintenance:** rules and graph projections updated from deltas (F2, F3).
+- **Document re-ingestion:** page fingerprints, pipeline-version upgrades, version matching by
+  similarity, a cross-namespace cache.
+- **Engram serving:** loading Engram overlays into vLLM, SGLang and llama.cpp.
+- **Platform:** a Studio UI, a hosted service, harness as a service.
+- **Publishing:** crates.io, PyPI and npm releases (J1) when the owner decides.
 
 ## Scope boundaries
 
 kleos will not pursue:
 
-- federation, virtualization, lakehouse breadth, or an extension marketplace;
-- document, KV or time-series multi-model breadth, or multiple write languages;
-- distributed clustering or consensus inside the embedded engine;
-- Cypher writes, CRDT sync, or browser/WASM persistence;
-- native RDF/triple storage, SPARQL, or OWL reasoning;
-- worst-case-optimal joins or competitive cyclic-subgraph matching; or
-- a from-scratch FTS engine or embedded Tantivy.
-
-Boundary readers, read-only interoperability, and targeted general primitives remain in scope
-when they preserve the relational/Datalog core.
+- hosting or training general-purpose generative models (generation goes through a configured
+  external endpoint; built-in models stay small);
+- full PostgreSQL parity: the aim is Postgres-compatible for agent applications, not a
+  replacement for every Postgres workload;
+- distributed consensus inside the embedded engine (replication, if it comes, belongs to the
+  server);
+- CRDT sync or browser/WASM persistence;
+- native RDF/triple storage, SPARQL or OWL reasoning (RDF stays at the boundary); or
+- a from-scratch full-text engine or embedded Tantivy.
 
 ## Contributing and releases
 
 - Discuss larger features in an issue before implementation.
-- Make performance work baseline-first and keep inherited semantics green.
+- Measure before and after every retrieval or speed change, and keep inherited semantics green.
 - Use the SQLite backend for planner and stored-relation tests; see
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - Preserve MPL-2.0 and the inherited CozoDB and mnestic attribution.
 - Publish `kleos-rocks` before `kleos` whenever the bridge changes.
-- Treat roadmap text as intent. Releases, registries, source, tests and CI are the evidence.
+- Treat roadmap text as intent. Releases, registries, source, tests and benchmarks are the
+  evidence.

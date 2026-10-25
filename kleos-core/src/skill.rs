@@ -205,8 +205,8 @@ pub fn actor_of(v: Option<&JsonValue>) -> JsonValue {
 /// A scope string, normalised: empty is the default scope.
 pub fn norm_scope(s: Option<&str>) -> Result<String> {
     let s = s.map(str::trim).filter(|x| !x.is_empty()).unwrap_or(DEFAULT_SCOPE);
-    if s.len() > 200 || !s.chars().all(|c| c.is_ascii_alphanumeric() || "._:~@-".contains(c)) {
-        bail!("skill scope '{s}' has characters outside [A-Za-z0-9._:~@-]");
+    if s.len() > 200 || !s.chars().all(|c| c.is_ascii_alphanumeric() || "._:~@+-".contains(c)) {
+        bail!("skill scope '{s}' has characters outside [A-Za-z0-9._:~@+-]");
     }
     Ok(s.to_string())
 }
@@ -218,6 +218,7 @@ pub fn scope_kind(s: &str) -> &'static str {
     match s.split(':').next().unwrap_or("") {
         "run" => "run",
         "au" => "agent_user",
+        "sess" => "run",
         "user" => "user",
         "agent" => "agent",
         "team" => "team",
@@ -708,7 +709,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
     }
 
-    fn sk_has(&'s self, name: &str) -> bool {
+    pub(crate) fn sk_has(&'s self, name: &str) -> bool {
         self.transact().map(|tx| tx.get_relation(name, false).is_ok()).unwrap_or(false)
     }
 

@@ -29,6 +29,7 @@ import type {
   RememberResult,
   HybridQuery,
   DecideResult,
+  PrincipalContext,
   FindSkillsOptions,
   FindSkillsResult,
   SkillOutcome,
@@ -189,6 +190,25 @@ export class Kleos {
     return this.backend.doc(op, snakeKeys(args));
   }
 
+  /**
+   * A Postgres connector op (docs/specs/pg-connector.md): `status` (lag,
+   * slot, per-table sync state, alerts), `resync`, `map`, `approve`,
+   * `query` (live SQL joining Postgres tables with kleos facts), `init`,
+   * `drop_slot`. Remote only: connectors run in `kleos server --pg-cdc`.
+   *
+   * ```ts
+   * const [s] = await kleos.pg('status');
+   * if (s.alerts.length) console.warn(s.alerts);
+   * const r = await kleos.pg('query', { sql: "SELECT name FROM pg.public.customers WHERE plan = 'pro' LIMIT 5" });
+   * ```
+   */
+  pg(op: string, args?: Record<string, unknown>): Promise<any> {
+    if (!this.backend.pg) {
+      return Promise.reject(new KleosError('the Postgres connector runs in a kleos server (--pg-cdc): use connect({ url })', { op: `pg.${op}` }));
+    }
+    return this.backend.pg(op, snakeKeys(args));
+  }
+
   // ---- skills (procedural memory; docs/specs/skills.md) ------------------
 
   /**
@@ -308,6 +328,21 @@ export class Kleos {
   }
   extractors(): Promise<NamedRows> {
     return this.run('::extractor list', {}, { immutable: true });
+  }
+
+  // ---- tenancy (docs/specs/tenancy.md) ------------------------------------
+
+  /** A tenancy admin op: `orgCreate`-style ops are `tenant('org_create', {...})`. */
+  tenant(op: string, args: Record<string, unknown> = {}): Promise<any> {
+    return this.backend.tenant(op, args);
+  }
+
+  /**
+   * A memory op as a principal (`remember`, `recall`, `context`, `forget`,
+   * `promote`, `approve`, ...), with `scope` in place of `ns`.
+   */
+  memoryAs(ctx: PrincipalContext, op: string, args: Record<string, unknown> = {}): Promise<any> {
+    return this.backend.memoryAs(ctx, op, snakeKeys(args));
   }
 
   /** Close the store (embedded) or release the client (remote). */

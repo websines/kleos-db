@@ -1060,7 +1060,15 @@ impl<'s, S: Storage<'s>> Db<S> {
         for n in &names {
             docs.push(self.onto_load(n)?);
         }
-        for l in lineage.iter().rev() {
+        let mut layers: Vec<&str> = lineage.iter().rev().map(|x| x.as_str()).collect();
+        // a tenancy scope also reads its workspace's learned layer, where
+        // schema-level knowledge is promoted (docs/specs/tenancy.md)
+        if !layers.contains(&"ws")
+            && lineage.iter().any(|l| !matches!(crate::tenancy::ScopeKey::parse(l, false), crate::tenancy::ScopeKey::Legacy { .. }))
+        {
+            layers.insert(0, "ws");
+        }
+        for l in layers {
             let name = learned_name(l);
             if !names.contains(&name) {
                 if let Some(d) = self.onto_get(&name, None)? {

@@ -499,6 +499,25 @@ impl<'s, S: Storage<'s>> Db<S> {
         }))
     }
 
+    /// Merge the learned properties of namespace `from` that namespace
+    /// `to`'s learned layer lacks into it: the automatic promotion of
+    /// schema-level knowledge (docs/specs/tenancy.md, "Promotion"). Instance
+    /// facts are never promoted this way. Returns the number added.
+    pub(crate) fn onto_promote_learned(&'s self, from: &str, to: &str) -> Result<usize> {
+        let Some(src) = self.onto_get(&learned_name(from), None)? else { return Ok(0) };
+        let mut dst = self.learned_doc(to)?;
+        let have: std::collections::BTreeSet<String> = dst.properties.iter().map(|p| p.name.clone()).collect();
+        let new: Vec<OntoProp> = src.properties.iter().filter(|p| !have.contains(&p.name)).cloned().collect();
+        if new.is_empty() {
+            return Ok(0);
+        }
+        dst.properties.extend(new.iter().cloned());
+        let v: u64 = dst.version.parse().unwrap_or(0);
+        dst.version = (v + 1).to_string();
+        self.onto_define(&dst, true)?;
+        Ok(new.len())
+    }
+
     /// Write a new version of the learned layer and log the change.
     #[allow(clippy::too_many_arguments)]
     fn learned_save(

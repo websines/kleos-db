@@ -19,6 +19,7 @@
 //! commit together with the step's event or not at all.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam::channel::bounded;
@@ -30,6 +31,67 @@ use crate::data::value::DataValue;
 use crate::runtime::db::{Db, NamedRows, ScriptMutability, TransactionPayload};
 use crate::storage::Storage;
 use crate::JsonData;
+
+/// What an application-provided engine action knows about the step it runs
+/// (see [`register_action`]).
+#[derive(Debug, Clone)]
+pub struct ActionCtx {
+    /// The workflow id.
+    pub workflow: String,
+    /// The step's command key (its path in a built-in graph, `<n>:<name>` in
+    /// code mode): the same on every attempt and every replay.
+    pub key: String,
+    /// The step's name.
+    pub name: String,
+    /// The claim's fencing token.
+    pub token: i64,
+}
+
+impl ActionCtx {
+    /// A key that is the same on every retry and replay of this step and
+    /// differs between steps: `<workflow>/<key>`. Actions with external
+    /// effects store it next to the effect (an idempotency-key ledger) so a
+    /// repeated attempt finds the first one's result instead of repeating it.
+    pub fn idem_key(&self) -> String {
+        format!("{}/{}", self.workflow, self.key)
+    }
+}
+
+/// An engine action registered by the embedding application.
+pub type ExternalAction = Arc<dyn Fn(&ActionCtx, &JsonValue) -> Result<JsonValue> + Send + Sync>;
+
+lazy_static::lazy_static! {
+    static ref EXTERNAL_ACTIONS: RwLock<BTreeMap<String, ExternalAction>> = RwLock::new(BTreeMap::new());
+}
+
+const BUILTIN_ACTIONS: [&str; 7] = ["query", "remember", "recall", "embed", "decide", "http", "consolidate"];
+
+/// Register an engine action (`{"<name>": args}` in a built-in graph or a
+/// code-mode `step {action}`), e.g. kleos-bin's `pg` write-back step
+/// (feature `flow-pg`, docs/specs/pg-connector.md). The action runs outside
+/// the step's transaction, so its effects are at least once; its result is
+/// recorded exactly once with the step's event. An action with external
+/// effects makes them exactly once in effect with [`ActionCtx::idem_key`].
+/// Built-in action names cannot be replaced.
+pub fn register_action(name: &str, action: ExternalAction) -> Result<()> {
+    if BUILTIN_ACTIONS.contains(&name) {
+        bail!("flow action '{name}' is built in");
+    }
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        bail!("flow action name '{name}' must be a non-empty identifier");
+    }
+    EXTERNAL_ACTIONS.write().unwrap().insert(name.to_string(), action);
+    Ok(())
+}
+
+/// Remove a registered action; true when there was one.
+pub fn unregister_action(name: &str) -> bool {
+    EXTERNAL_ACTIONS.write().unwrap().remove(name).is_some()
+}
+
+pub(crate) fn external_action(name: &str) -> Option<ExternalAction> {
+    EXTERNAL_ACTIONS.read().unwrap().get(name).cloned()
+}
 
 /// Workflow instances.
 pub const FLOW_WF: &str = "kleos_flow_wf";
@@ -1231,7 +1293,18 @@ impl<'s, S: Storage<'s>> Db<S> {
                 record(serde_json::to_value(&out).into_diagnostic()?)
             }
             "http" => record(flow_http(args)?),
-            other => bail!("flow step: unknown action '{other}' (query, remember, recall, embed, decide, http)"),
+            other => match external_action(other) {
+                Some(f) => {
+                    let ctx = ActionCtx {
+                        workflow: id.to_string(),
+                        key: key.to_string(),
+                        name: name.to_string(),
+                        token,
+                    };
+                    record(f(&ctx, args)?)
+                }
+                None => bail!("flow step: unknown action '{other}' (query, remember, recall, embed, decide, http)"),
+            },
         }
     }
 

@@ -62,7 +62,7 @@ fn kind_of(step: &JsonValue) -> Result<(&str, &JsonValue)> {
     let obj = step.as_object().ok_or_else(|| miette!("flow graph: a step must be an object, got {step}"))?;
     let kinds: Vec<(&String, &JsonValue)> = obj.iter().filter(|(k, _)| !STEP_FIELDS.contains(&k.as_str())).collect();
     match kinds.as_slice() {
-        [(k, v)] if KINDS.contains(&k.as_str()) => Ok((k.as_str(), v)),
+        [(k, v)] if KINDS.contains(&k.as_str()) || crate::flow::external_action(k).is_some() => Ok((k.as_str(), v)),
         [(k, _)] => bail!("flow graph: unknown step kind '{k}' (expected one of {})", KINDS.join(", ")),
         _ => bail!("flow graph: a step needs exactly one kind, got {step}"),
     }
@@ -298,7 +298,9 @@ impl<'s, S: Storage<'s>> Run<'s, S> {
         let (kind, args) = kind_of(step)?;
         let name = step.get("name").and_then(|x| x.as_str()).unwrap_or(kind).to_string();
         match kind {
-            k if ACTIONS.contains(&k) => self.action(step, key, &name, k, args, env),
+            k if ACTIONS.contains(&k) || crate::flow::external_action(k).is_some() => {
+                self.action(step, key, &name, k, args, env)
+            }
             "sleep" => {
                 self.visit(key);
                 self.check(key, &name, &["timer", "timer_fired"])?;

@@ -195,6 +195,7 @@ impl<'a> SessionTx<'a> {
         literal: &FtsLiteral,
         idx_handle: &RelationHandle,
         candidates: Option<&FxHashSet<Tuple>>,
+        prefixes: Option<&[DataValue]>,
     ) -> Result<(Vec<LiteralStats>, usize)> {
         crate::fts::FTS_LITERAL_SCANS.with(|c| c.set(c.get() + 1));
         let start_key_str = &literal.value as &str;
@@ -218,6 +219,10 @@ impl<'a> SessionTx<'a> {
                 break;
             }
 
+            // tenancy: postings of other scopes neither match nor count
+            if prefixes.is_some_and(|ps| !key_tuple.get(1).is_some_and(|v| ps.contains(v))) {
+                continue;
+            }
             global_doc_frequency += 1;
             let found_key = key_tuple[1..].to_vec();
             if candidates.is_some_and(|allowed| !allowed.contains(&found_key)) {
@@ -281,7 +286,7 @@ impl<'a> SessionTx<'a> {
             FtsExpr::Literal(l) => {
                 let mut res = FxHashMap::default();
                 let (found_docs, global_doc_frequency) =
-                    self.fts_search_literal(l, &config.idx_handle, config.candidates.as_deref())?;
+                    self.fts_search_literal(l, &config.idx_handle, config.candidates.as_deref(), config.prefixes.as_deref())?;
                 for el in found_docs {
                     let score = Self::fts_compute_score(
                         el.position_info.len(),
@@ -326,7 +331,7 @@ impl<'a> SessionTx<'a> {
                 // span covers the whole phrase occurrence (spec §6.1).
                 let mut coll: FxHashMap<Tuple, Vec<(u32, u32, u32)>> = FxHashMap::default();
                 for first_el in self
-                    .fts_search_literal(&as_literal(first_tok), &config.idx_handle, None)?
+                    .fts_search_literal(&as_literal(first_tok), &config.idx_handle, None, config.prefixes.as_deref())?
                     .0
                 {
                     doc_lens.insert(first_el.key.clone(), first_el.doc_len);
@@ -345,7 +350,7 @@ impl<'a> SessionTx<'a> {
                     }
                     let delta = tok.position - q0;
                     let el_res = self
-                        .fts_search_literal(&as_literal(tok), &config.idx_handle, None)?
+                        .fts_search_literal(&as_literal(tok), &config.idx_handle, None, config.prefixes.as_deref())?
                         .0;
                     let mut nxt_coll: FxHashMap<Tuple, Vec<(u32, u32, u32)>> = FxHashMap::default();
                     for x in el_res {
@@ -448,7 +453,7 @@ impl<'a> SessionTx<'a> {
                 let mut occ_spans: FxHashMap<Tuple, FxHashMap<u32, (u32, u32)>> =
                     FxHashMap::default();
                 for first_el in self
-                    .fts_search_literal(l_it.next().unwrap(), &config.idx_handle, None)?
+                    .fts_search_literal(l_it.next().unwrap(), &config.idx_handle, None, config.prefixes.as_deref())?
                     .0
                 {
                     doc_lens.insert(first_el.key.clone(), first_el.doc_len);
@@ -475,7 +480,7 @@ impl<'a> SessionTx<'a> {
                 // (results were unchanged: self-distance 0 always survived).
                 for lit_nxt in l_it {
                     let el_res = self
-                        .fts_search_literal(lit_nxt, &config.idx_handle, None)?
+                        .fts_search_literal(lit_nxt, &config.idx_handle, None, config.prefixes.as_deref())?
                         .0;
                     coll = el_res
                         .into_iter()
@@ -636,6 +641,21 @@ impl<'a> SessionTx<'a> {
                 };
                 (n_docs as usize, avgdl)
             }
+        };
+        // tenancy: `N` over the allowed key ranges only (document frequencies
+        // are counted the same way in `fts_search_literal`)
+        let n = match (&config.prefixes, config.score_kind) {
+            (Some(ps), FtsScoreKind::Bm25 | FtsScoreKind::TfIdf) => {
+                let mut c = 0usize;
+                for p in ps {
+                    for row in config.base_handle.scan_prefix(self, &vec![p.clone()]) {
+                        row?;
+                        c += 1;
+                    }
+                }
+                c
+            }
+            _ => n,
         };
         let mut result: Vec<_> = self
             .fts_search_impl(&ast, config, n, avgdl)?
