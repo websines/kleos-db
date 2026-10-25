@@ -12,7 +12,7 @@ the order of [`ROADMAP.md`](ROADMAP.md):
 |---|---|
 | **Done** | A1, A2; C1, C2, C4, C6; D1, D2, D3, D5, D6; E1, E2, E3, E4, E6, E7, E9, E10; F1, F4; G2; H1; J2, J3; L1 |
 | **Partly done** | D4 (re-rank stage and hook; no built-in cross-encoder ships); D7 (late chunking and multimodal encoders not started; EmbeddingGemma 2 is in place for them); D8 (stores record their embedding model and `::memory reembed` migrates them; no general model registry); F5 (durable workflows run slow work outside transactions; no stored procedures); L2 (internal LoCoMo and LongMemEval runs in `docs/benchmarks/memory.md`; no published standard-judge run) |
-| **In progress (wave 7)** | E5 and K2 (tenancy and access); E8 (skill library); plus a Postgres coexistence connector that was not in the original list |
+| **In progress (wave 7)** | E5 and K2 (tenancy and access: merged, finishing work continues); E8 (skill library); plus a Postgres coexistence connector that was not in the original list |
 | **Open** | A3–A11; B1–B4; C3, C5; F2, F3, F6, F7; G1, G3–G6; H2–H5; I1–I6; J4, J5; K1, K3, K4; L3 |
 | **Held** | J1 (publishing to crates.io and PyPI waits for the owner) |
 

@@ -48,9 +48,11 @@ Work shipped in waves; each wave merged with targeted tests and before/after mea
 
 ## In progress (wave 7)
 
+Tenancy and access (E5, K2) merged on 2026-10-25 ([spec](docs/specs/tenancy.md)); finishing work continues (partition-aware workers, the remaining MCP tools as principals, JWKS and token exchange).
+
+
 | Work | What it adds | Spec (lands with the branch) |
 |---|---|---|
-| **Tenancy and access** (E5, K2) | Orgs, workspaces and nested teams. Humans and agents are both first-class principals, and every write and read records the actor chain (human, agent, run). Scopes run / agent×user / user / agent / team / workspace / org; permissions intersected across the chain and session participants; enforcement inside vector, full-text and graph search; per-scope profiles and summaries; audited promotion; a hash-chained audit log; erasure that reaches derived data | `docs/specs/tenancy.md` |
 | **Skill library** (E8) | Procedural memory: Agent Skills with immutable versions and digests, task-to-skill routing within a token budget, skills over MCP (SEP-2640), success tracking, automatic rollback and retirement, a security scanner and signing, a learning loop from successful runs, a SkillOpt-style optimizer, promotion and a registry | `docs/specs/skills.md` |
 | **Postgres coexistence connector** | Postgres logical replication into memory and ontology (rows become entities, foreign keys become edges, updates supersede, commit time is valid time), exactly-once resume, ledger-based write-back from workflows, a Debezium event adapter for other databases, and live joins through DataFusion | `docs/specs/pg-connector.md` |
 
