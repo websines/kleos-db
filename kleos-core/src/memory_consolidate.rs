@@ -60,6 +60,9 @@ const DEFAULT_MAX_SUMMARY: usize = 6;
 const DEFAULT_MIN_FACTS: usize = 2;
 const MMR_LAMBDA: f64 = 0.7;
 const PROFILE_VALUE_CHARS: usize = 90;
+/// An older single-valued claim this similar to a newer one of the same
+/// subject and property is a replaced value (left out of summaries).
+const REPLACED_SIM: f64 = 0.6;
 
 /// Options of `::memory consolidate`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -551,8 +554,17 @@ impl<'s, S: Storage<'s>> Db<S> {
                 rows.push((id, t, memory_recall::source_group(&src).to_string()));
             }
         }
+        // replaced values never reach a summary: a claim a newer one may
+        // supersede (pending), or an older value of a single-valued property
+        // whose newer value (same subject) says nearly the same thing
+        let replaced = self.replaced_claims(&sc, ns, &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), now, cfg.dim.is_some())?;
         let mut groups: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        let mut dropped = 0usize;
         for (id, t, g) in rows {
+            if replaced.contains(&id) {
+                dropped += 1;
+                continue;
+            }
             if memory_claims::is_declarative(&t) && t.split_whitespace().count() >= 4 {
                 groups.entry(g).or_default().push((id, t));
             }
@@ -656,8 +668,78 @@ impl<'s, S: Storage<'s>> Db<S> {
         Ok(serde_json::json!({
             "built": built, "unchanged": same, "removed": gone.len(), "groups": keep.len(), "method": method,
             "llm_calls": llm_calls, "llm_errors": llm_errors,
-            "source_tokens": src_tokens, "summary_tokens": sum_tokens,
+            "source_tokens": src_tokens, "summary_tokens": sum_tokens, "replaced_dropped": dropped,
         }))
+    }
+
+    /// Current claims among `ids` that a summary must not quote: the
+    /// candidates of a pending supersession, and older values of a
+    /// single-valued property when a newer current claim of the same
+    /// subject and property is similar to them (cosine at least
+    /// [`REPLACED_SIM`]; a store without vectors uses the pending rule only).
+    fn replaced_claims(&'s self, sc: &Scope, ns: &str, ids: &[String], now: i64, vectors: bool) -> Result<BTreeSet<String>> {
+        let mut out = BTreeSet::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let current: BTreeSet<&String> = ids.iter().collect();
+        if self.consol_exists(MEM_DECISION) {
+            for r in self
+                .mem_q(
+                    &format!("?[id] := *{MEM_DECISION}{{ns: $ns, cand: id, template: 'supersedes', status: 'pending'}}"),
+                    vec![("ns", s(ns))],
+                )?
+                .rows
+            {
+                if let Some(id) = cell_str(&r[0]).filter(|i| current.contains(i)) {
+                    out.insert(id);
+                }
+            }
+        }
+        // the property rule needs vectors: a shared property alone ("adopted
+        // a dog" / "plans to adopt a second dog") is no replacement
+        let Some(act) = self.onto_active(ns)? else { return Ok(out) };
+        if !vectors || !self.consol_exists(crate::ontology::MEM_TYPE) {
+            return Ok(out);
+        }
+        let mut by: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        for r in self
+            .mem_q(
+                &format!(
+                    "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop}}, cls = 'fact', !is_null(subject), !is_null(prop)",
+                    crate::ontology::MEM_TYPE
+                ),
+                vec![("ns", s(ns))],
+            )?
+            .rows
+        {
+            if let (Some(id), Some(sub), Some(p)) = (cell_str(&r[0]), cell_str(&r[1]), cell_str(&r[2])) {
+                if current.contains(&id) && act.prop(&p).is_some_and(|x| x.single()) {
+                    by.entry((sub, p)).or_default().push(id);
+                }
+            }
+        }
+        by.retain(|_, v| v.len() >= 2);
+        if by.is_empty() {
+            return Ok(out);
+        }
+        let all: Vec<String> = by.values().flatten().cloned().collect();
+        let iv = intervals(&self.mem_history(sc, &all)?, now);
+        let vm = self.vecs_of(sc, &all)?;
+        for v in by.values_mut() {
+            v.sort_by_key(|i| (iv.get(i).map_or(0, |x| x.0), i.clone()));
+            for (k, old) in v.iter().enumerate() {
+                let newer = &v[k + 1..];
+                let hit = newer.iter().any(|n| match (vm.get(old), vm.get(n)) {
+                    (Some(a), Some(b)) => cosine(a, b) >= REPLACED_SIM,
+                    _ => false,
+                });
+                if hit {
+                    out.insert(old.clone());
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn retract_summaries(&'s self, ns: &str, sids: &[String], at: i64) -> Result<()> {

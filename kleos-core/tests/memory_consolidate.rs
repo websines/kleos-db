@@ -170,3 +170,40 @@ fn auto_consolidation_runs_in_process() {
     let ctx = db.recall_context("Where do I live?", RecallOpts { ns: Some("u".into()), ..Default::default() }).unwrap();
     assert!(ctx.text.starts_with("Profiles (current facts"), "{}", ctx.text);
 }
+
+#[test]
+fn summaries_leave_out_replaced_values() {
+    let db = db();
+    let lines = [
+        "I work as a nurse at the city hospital.",
+        "I volunteer at the animal shelter on weekends.",
+        "I am training for the city marathon this autumn.",
+        "I bake sourdough bread every Sunday morning.",
+        "I started learning Portuguese with an online tutor.",
+        "I repainted the kitchen walls a pale green colour.",
+        "I planted tomatoes and basil on the balcony garden.",
+        "I adopted a grey cat from the animal shelter.",
+        "I work as a teacher at the primary school now.",
+    ];
+    let ids: Vec<String> = lines.iter().enumerate().map(|(i, t)| rem(&db, t, i as i64, &format!("chat-9#{i}"))).collect();
+    // the newest claim may replace the first (a pending supersession, as a
+    // decider in the uncertain band leaves it)
+    db.run_script(
+        "?[ns, new, cand, template, label, p, band, decided_by, reason, status, at] <- \
+         [['u', $new, $old, 'supersedes', 'yes', 0.7, 'pending', 'test', null, 'pending', 0]] \
+         :put kleos_mem_decision {ns, new, cand, template => label, p, band, decided_by, reason, status, at}",
+        [("new".to_string(), kleos::DataValue::from(ids[8].as_str())), ("old".to_string(), kleos::DataValue::from(ids[0].as_str()))].into_iter().collect(),
+        ScriptMutability::Mutable,
+    )
+    .unwrap();
+    let r = db.memory_call("consolidate", json!({"ns": "u", "min_claims": 8, "max_summary": 8, "profiles": false})).unwrap();
+    assert!(r["summaries"]["replaced_dropped"].as_u64().unwrap() >= 1, "{r}");
+    let t = db
+        .run_script("?[text] := *kleos_mem{ns: 'u', kind: 'summary', text @ 'NOW'}", Default::default(), ScriptMutability::Immutable)
+        .unwrap();
+    assert_eq!(t.rows.len(), 1, "{r}");
+    for row in &t.rows {
+        let s = row[0].get_str().unwrap();
+        assert!(!s.contains("nurse"), "a replaced value in a summary: {s}");
+    }
+}

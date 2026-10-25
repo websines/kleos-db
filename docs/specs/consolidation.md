@@ -38,7 +38,13 @@ session) with at least `min_claims` (default 8) declarative claims:
   `min(max_summary, max(2, ⌈n/5⌉))` of them (default `max_summary` 6);
 - the summary is those claims in time order: `Summary of <group> (<first> – <last>): …`;
 - its valid-from is the group's newest claim, it has its own vector, and it is
-  found by `recall` like any memory (`kind: '!summary'` leaves it out).
+  found by `recall` like any memory (`kind: '!summary'` leaves it out);
+- **replaced values are left out** (wave7/closeout): a claim a newer one may
+  supersede (a pending `supersedes` decision), and an older value of a
+  single-valued property when a newer current claim of the same subject and
+  property is similar to it (cosine ≥ 0.6; stores with vectors only). Superseded
+  claims were already out (summaries read current memories). The run reports
+  `replaced_dropped`.
 
 **Optional abstractive summaries:** `llm: {url, model, api_key_env,
 max_tokens}` (an OpenAI-compatible endpoint; the key is read from the named
