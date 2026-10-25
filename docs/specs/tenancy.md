@@ -1,19 +1,18 @@
 # Tenancy, identity and access control
 
-Status: spec (wave7/tenancy, 2026-10-25). Sections marked *later* are not built in v1.
+Status: implemented (wave7/tenancy, 2026-10-25). Sections marked *later* are not built in v1; "v1 limits" lists what v1 does differently from the full design.
 
 Design basis: [research/tenancy-research.md](../../../research/tenancy-research.md) (in the parent repo), its "Recommendations", "(h) v1 versus later" and "Flags". The decisions below are final for v1.
 
-Code (planned):
-- `kleos-core/src/runtime/relation.rs`, `transact.rs`, `db.rs`: workspace **partitions** (relation-name routing) and the write sink;
-- `kleos-core/src/tenancy.rs`: the model, admin ops, `PrincipalContext`, actor chains, scope keys;
-- `kleos-core/src/tenancy_authz.rs`: Cedar policies, the `ScopeSet` and its cache;
-- `kleos-core/src/tenancy_mem.rs`: memory ops as a principal, recall across scopes, promotion, erasure;
-- `kleos-core/src/tenancy_audit.rs`: the hash-chained audit log and pseudonyms;
-- `kleos-core/src/memory_branch.rs` / `memory.rs` / `memory_graph.rs`: the union read scope;
-- surfaces: `::tenant` and `::principal` sys ops, `DbInstance`, `kleos-bin` (HTTP, MCP, CLI), Python, TS.
+Code:
+- `kleos-core/src/runtime/transact.rs`, `relation.rs`, `db.rs`: workspace **partitions** (relation-name routing, `Db::partition_view`), the principal view state (`ViewCtx`) and the commit-time write sink;
+- `kleos-core/src/tenancy.rs`: the model, admin ops (`tenant_call`), `PrincipalContext` and actor chains, scope keys, the hash-chained audit log with pseudonyms, erasure;
+- `kleos-core/src/tenancy_authz.rs`: the Cedar policies, the projected entity graph, the intersection rule and the cached `ScopeSet`;
+- `kleos-core/src/tenancy_mem.rs`: memory ops as a principal (`memory_call_as`), recall across scopes, promotion and approvals, filtered subscriptions;
+- `kleos-core/src/memory_branch.rs` (`Scope::union`), `memory.rs` (the union pre-filter, read-time precedence, per-scope profile composition, `kleos_mem_actor` rows, schema v9, the erase cascade to graph attributes), `ontology.rs` / `ontology_learn.rs` (the workspace learned layer);
+- surfaces: `::tenant` / `::principal` (run by `DbInstance`), `kleos-bin/src/auth.rs` (JWT, API keys, RFC 9728), `server.rs` (`--tenancy`), `mcp.rs` (tools as a principal), `cli.rs` (`kleos tenant`, `--as-human`, `--as-agent`), `kleos-lib-python`, `kleos-lib-nodejs`, `sdk/ts`.
 
-Tests: `kleos-core/tests/tenancy.rs`.
+Tests: `kleos-core/tests/tenancy.rs` (11 tests plus an ignored perf test), `kleos-bin/src/auth.rs` (2), `kleos-bin/tests/mcp.rs::principal_mode_tools`.
 
 ## Goal
 
@@ -199,7 +198,9 @@ A v8 store gains both on first use; nothing is backfilled, and nothing is writte
 | `scopes` | `ctx, action?` | the ScopeSet, for debugging |
 | `get` / `list` | `kind` | the model rows |
 
-### As a principal (`::principal <op> {as: ctx, …}`, `Db::memory_call_as(ctx, op, args)`)
+### As a principal (`::principal <op> {as_human: 'alice', as_workspace: 'eng', …}`, `Db::memory_call_as(ctx, op, args)`)
+
+In CozoScript the context is either flat `as_*` fields (`as_workspace`, `as_human`, `as_agent`, `as_run`, `as_participants`) or `as: '<json>'` / `as: parse_json('…')`.
 
 The memory ops take the same options as the memory API, plus:
 
@@ -209,7 +210,9 @@ The memory ops take the same options as the memory API, plus:
 - `reflect {scope?}`, `consolidate {scope?}`: per scope.
 - `promote {ids, to}`: see below.
 - `fork | merge | discard {scope, branch}`: a branch of a scope is namespace `<scope ns>~<branch>` and inherits the scope's readers and writers.
-- `subscribe {relation}` (Rust/`DbInstance` only): a live subscription whose rows are filtered to the ScopeSet.
+- `subscribe {relation}` (Rust/`DbInstance` only: `subscribe_as`): a live subscription whose rows are filtered to the ScopeSet, re-evaluated per change.
+- `flow | doc | ontology {op, scope?, …}`: the workflow, document and ontology ops of the partition; the namespace they address is a scope (default the workspace scope), read ops need read on it, the others write.
+- `scopes {action?}`: the ScopeSet (debugging).
 
 ### Promotion
 
@@ -242,16 +245,30 @@ Append-only, hash-chained per workspace (`kleos_tn_audit`):
 
 ## Surfaces
 
-- **Rust**: `Db::tenant_call`, `Db::memory_call_as`, typed helpers (`Db::tenant()`), `Db::partition_view`; `DbInstance` mirrors them.
+- **Rust**: `Db::tenant_call`, `Db::memory_call_as`, `Db::subscribe_as`, `Db::partition_view`, `Db::audit_verify`; `DbInstance` mirrors them (and runs `::tenant` / `::principal`).
 - **CozoScript**: `::tenant <op> {…}`, `::principal <op> {as: {…}, …}`.
-- **Python**: `db.tenant(op, args)`, `db.memory_as(ctx, op, args)`, `db.remember_as / recall_as`.
-- **TS** (napi + `sdk/ts`): `db.tenant(op, args)`, `db.memoryAs(ctx, op, args)`.
+- **Python**: `db.tenant(op, args)`, `db.memory_as(ctx, op, args)`.
+- **TS** (napi `tenantCall` / `memoryCallAs`; `sdk/ts`): `kleos.tenant(op, args)`, `kleos.memoryAs(ctx, op, args)` (remote: the server derives the principal from the token).
 - **HTTP** (`kleos server`): with `--tenancy <config.json>`, `/memory/:op` and `/mcp` require a credential and run as that principal; `/tenant/:op` needs an org admin; `GET /.well-known/oauth-protected-resource` serves RFC 9728 metadata; 401s carry `WWW-Authenticate: Bearer resource_metadata="…"`.
   - **JWT access tokens** (RFC 9068) from configured issuers (inline JWKS or PEM keys; HS256 for tests): signature, `iss`, `aud` = the configured resource (RFC 8707), `exp`/`nbf`. `sub` → principal (via `kleos_tn_ident` or directly); `act` (nested, OAuth Actor Profile) → chain links with `sub_profile` (`user` | `ai_agent` | `service`); depth > 6 → `invalid_request`. The outermost `ai_agent` actor is the agent; the subject (when a `user`) is the human.
   - **API keys** (`kl_…`) for simple deployments: the key's principal (usually an agent) is `verified`; `X-Kleos-On-Behalf-Of` names a human as `self_asserted`.
   - Tokens are never forwarded downstream (MCP 2026-07-28).
-- **MCP**: the same credential handling; the tools run through `memory_call_as`. CIMD client ids are accepted as `client_id` and logged.
-- **CLI**: `kleos tenant <op> '{json}'`; memory commands take `--as-human`, `--as-agent`, `--workspace`, `--run`.
+- **MCP**: the same credential handling; `recall`, `remember`, `forget` and `reflect` run through `memory_call_as` (`scope` / `scopes` arguments; `ns` is ignored), the other tools answer an error in principal mode (v1). CIMD client ids are accepted as `client_id` and logged.
+- **CLI**: `kleos tenant <op> '{json}'`; memory commands take `--as-human`, `--as-agent`, `--workspace`, `--run`, `--scope` (embedded store). Against a server, `--token kl_…` or a JWT is sent as a bearer token and the server derives the principal.
+
+## v1 limits
+
+- `forget` / `set` act on scopes the context can **write**: memories in agent and org scope are removed through the host API (or by an admin), not as a principal.
+- Documents ingested in a workspace partition and workflows of a partition are run by workers started on that partition's view (`DbInstance::partition_view(…).flow_worker(…)`); `kleos server --flow-worker` serves the plain store only.
+- The HNSW exact scan for very selective filters scans the partition's vector relation, not only the allowed namespaces' key ranges.
+- Precedence across scopes recognises exact restatements and same-subject values of single-valued ontology properties; other conflicts are shown side by side, each hit labelled with its `scope`.
+- Audit appends are serialised in-process and use `:insert` to detect a concurrent appender of another process; a write's relation-level event is appended after its commit, so a crash in between loses that event (the memory's own `kleos_mem_actor` row is in the write's transaction).
+
+## Results
+
+Deterministic tests (`cargo test -p kleos --features engram --test tenancy`, fake embedder and decider): workspace isolation and partitions, agent-user scopes across users and autonomous runs, the intersection with participants, credentials and an org `forbid` policy, the PPR walk and entity expansion inside visible scopes, per-scope summaries, promotion (pending, approval, provenance, agent grant, org with approval), supersession and duplicates within a scope and read-time precedence, the erasure cascade with a verifying, shredded audit chain, audit coverage of writes and reads with tamper detection, and the CozoScript ops.
+
+Perf sanity (`perf_scope_filter`, release build, M-series laptop, mem store, 4,000 memories of 64-d fake vectors, graph off): PERF_RESULT.
 
 ## Threat model
 

@@ -52,6 +52,8 @@ Created by `::memory init` (Rust `memory_init`) or lazily by the first `remember
 
 Ids are time-sortable strings: `m_…` for memories and `e_…` for entities. `kind` defaults to `fact`, `ns` to `default`.
 
+Schema version 9 adds `kleos_mem_actor` (who wrote a memory in principal mode) and `kleos_mem_promoted` (provenance of promoted copies), both empty outside principal mode. With tenancy ([tenancy.md](tenancy.md)), a namespace is a scope inside a workspace partition and recall hits carry `scope`; `forget {mode: 'erase'}` now also removes the ontology facts, nodes and claim types the erased memories are evidence of.
+
 The schema version is 6 (6 added the branch relations). A v1 or v2 store gains `kleos_mem_ns`, `kleos_mem_access`, `kleos_mem_life` and the entity merge and link relations on first use; a v3 store gains `kleos_mem_role`; a v4 store gains `kleos_mem_event`, filled from the stored memories (each text parsed against its first valid-from). A v5 store gains the branch relations, empty.
 
 **Why vectors live in a sibling relation.**

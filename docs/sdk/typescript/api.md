@@ -152,6 +152,24 @@ const rows = await kleos.run("?[count(id)] := *kleos_mem{ns: $ns, id @ 'NOW'}", 
 Models are process-wide in an embedded store. Remotely, the enable and
 disable calls run `::embedder enable …` and its siblings on the server.
 
+## Tenancy
+
+Principal mode (docs/specs/tenancy.md): orgs, workspaces, teams, human and agent principals, scoped memory with an audit trail.
+
+```ts
+await kleos.tenant('org_create', { org: 'acme', owner: 'alice' });
+await kleos.tenant('principal_create', { id: 'bot', org: 'acme', kind: 'agent', sponsor: 'alice' });
+await kleos.tenant('ws_create', { ws: 'eng', org: 'acme' });
+await kleos.tenant('grant', { ws: 'eng', principal: 'alice', role: 'writer' });
+
+const alice = { workspace: 'eng', human: 'alice', agent: 'bot' };
+await kleos.memoryAs(alice, 'remember', { text: 'I prefer morning meetings.' }); // scope au:bot:alice
+const hits = await kleos.memoryAs(alice, 'recall', { query: 'meetings' });     // each hit has `scope`
+```
+
+- `tenant(op, args)`: admin ops (`org_create`, `ws_create`, `team_create`, `principal_create`, `member_add`, `grant`, `revoke`, `policy_set`, `apikey_create`, `erase`, `approve`, `audit`, `audit_verify`, `scopes`, `list`). Embedded: the host is trusted; remote: `POST /tenant/:op` needs the admin secret or an org admin's token.
+- `memoryAs(ctx, op, args)`: `remember`, `recall`, `context`, `forget`, `set`, `link`, `reflect`, `consolidate`, `promote`, `approve`, `reject`, `fork`, `merge`, `discard`, `diff`, `flow`, `doc`, `ontology`, `scopes`, with `scope` in place of `ns`. Remote: `ctx` is ignored and the server runs the op as the principal of the client's token (a JWT access token or a `kl_…` API key).
+
 ## MCP client
 
 | Export | Description |
