@@ -553,6 +553,14 @@ pub fn gate(act: &Active, c: &ClaimType, d: &ClaimType) -> Gate {
         (Some(a), Some(b)) => {
             let single = act.prop(a).map_or(true, |p| p.single());
             if a == b && single {
+                // a thin pair is not shown to be about one property unless
+                // both types are sure: prototype matches on short, contentless
+                // turns ("I'm doing my best with my health." / "Got issues
+                // with my health") agree by topic, not by value (EmbeddingGemma
+                // 2 allowed 13 of 180 wrong LoCoMo replacements this way)
+                if thin && !(sure(c) && sure(d)) {
+                    return Gate::CapPending;
+                }
                 return match act.prop(a) {
                     Some(p) if !p.temporal => Gate::CapPending,
                     _ => Gate::Allow,
@@ -813,6 +821,22 @@ mod tests {
         assert_eq!(gate(&a, &f("caroline", "lives_in"), &f("melanie", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &st, &f("user", "lives_in")), Gate::Block);
         assert_eq!(gate(&a, &f("user", "birthday"), &f("user", "birthday")), Gate::CapPending);
+        // a thin pair typed to one property by prototypes alone is capped at
+        // pending; with both types sure (cue-backed) it stays allowed
+        let mut t1 = f("sam", "lives_in");
+        t1.by = "proto".into();
+        t1.score = 0.57;
+        t1.concrete = false;
+        t1.content = 3;
+        let mut t2 = t1.clone();
+        t2.content = 2;
+        assert_eq!(gate(&a, &t2, &t1), Gate::CapPending);
+        let (mut s1, mut s2) = (f("sam", "lives_in"), f("sam", "lives_in"));
+        s1.concrete = false;
+        s1.content = 3;
+        s2.concrete = false;
+        s2.content = 3;
+        assert_eq!(gate(&a, &s2, &s1), Gate::Allow);
         // prototype-only types never keep a pair out of `supersedes`
         let mut p1 = f("user", "vehicle");
         p1.by = "proto".into();

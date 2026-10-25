@@ -803,6 +803,16 @@ three bikes") was kept out of `supersedes` by two prototype-only types
 
 ## Left
 
+- **v2 over-typing, policy fix (wave7/closeout):** a thin pair (either side
+  with nothing concrete and under 5 content words) that two types put on one
+  single-valued property is capped at pending unless both types are sure
+  (cue- or rule-backed). Replayed offline on the 180 pairs (types from
+  EmbeddingGemma 2 on 0af7f19, gate rule applied): allowed 13 → 7 (v1's 7);
+  the 22 held-out true KU pairs are unaffected (none is thin). The end-to-end
+  typing audit, KU and life-stream runs were **not re-run** (measurement cut
+  short by the user). The 7 left are untyped or cue-typed pairs with 5+
+  content words (two tournament turns, a self-portrait, a park, health
+  remarks, books, pets).
 - **v2 over-typing is reduced, not gone:** under EmbeddingGemma 2, 13 of the
   180 known-wrong LoCoMo replacements are still allowed by the policy (v1: 7),
   4× more claims are typed than under v1, and the life stream has one wrong
