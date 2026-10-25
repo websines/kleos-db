@@ -120,6 +120,11 @@ pub(crate) struct ServerArgs {
     /// Offer the read-only `query` tool over MCP.
     #[clap(long, default_value_t = false)]
     mcp_allow_query: bool,
+    /// What MCP `skills/list` returns without a task: `top` (the most useful
+    /// live skills, a partial listing), `full` (the catalog, paged) or `none`
+    /// (docs/specs/skills.md).
+    #[clap(long, default_value_t = String::from("top"))]
+    mcp_skills_list: String,
 }
 
 #[derive(Clone)]
@@ -545,7 +550,7 @@ pub(crate) async fn server_main(args: ServerArgs) {
             kleos_bin::backend::Backend::Embedded(db.clone()),
             args.mcp_ns.clone(),
             args.mcp_allow_query,
-        ))
+        ).with_skills_list(&args.mcp_skills_list))
     });
     let state = DbState {
         mcp,
@@ -608,6 +613,9 @@ pub(crate) async fn server_main(args: ServerArgs) {
         .route("/flow/:op", post(flow_op))
         .route("/doc/:op", post(doc_op))
         .route("/ontology/:op", post(ontology_op))
+        .route("/skill/:op", post(skill_op))
+        .route("/skills/registry", get(skill_registry_list))
+        .route("/skills/registry/:name", get(skill_registry_get))
         .route("/export/:relations", get(export_relations))
         .route("/import", put(import_relations))
         .route("/backup", post(backup))
@@ -1091,6 +1099,61 @@ async fn doc_op(
             StatusCode::BAD_REQUEST,
             json!({"ok": false, "message": err.to_string()}).into(),
         ),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// The skill library (kleos fork; docs/specs/skills.md): `POST /skill/:op`
+/// with the op's JSON options, as `::skill <op>`. Read-only principals may
+/// call only the read ops.
+async fn skill_op(
+    Extension(mutability): Extension<ScriptMutability>,
+    State(st): State<DbState>,
+    Path(op): Path<String>,
+    Json(args): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    const READS: [&str; 18] = [
+        "get", "list", "history", "as_of", "find", "entry", "entries", "read", "dir", "stats", "traces", "evals", "scan", "proposals",
+        "promotions", "keys", "verify", "registry",
+    ];
+    let mut args = args;
+    if matches!(mutability, ScriptMutability::Immutable) {
+        if !READS.contains(&op.as_str()) {
+            return (StatusCode::FORBIDDEN, json!({"ok": false, "message": format!("skill {op} needs write access")}).into());
+        }
+        if op == "find" {
+            if let serde_json::Value::Object(m) = &mut args {
+                m.insert("log".into(), json!(false));
+            }
+        }
+    }
+    let result = spawn_blocking(move || st.db.skill_call(&op, args)).await;
+    match result {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (StatusCode::BAD_REQUEST, json!({"ok": false, "message": err.to_string()}).into()),
+        Err(err) => internal_error(err),
+    }
+}
+
+/// The skill registry of this store: `GET /skills/registry?query=` lists the
+/// published packages, `GET /skills/registry/:name` returns one signed
+/// package (what `::skill install {url, name}` fetches from another store).
+async fn skill_registry_list(
+    State(st): State<DbState>,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let args = json!({"query": q.get("query")});
+    match spawn_blocking(move || st.db.skill_call("registry", args)).await {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (StatusCode::BAD_REQUEST, json!({"ok": false, "message": err.to_string()}).into()),
+        Err(err) => internal_error(err),
+    }
+}
+
+async fn skill_registry_get(State(st): State<DbState>, Path(name): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
+    match spawn_blocking(move || st.db.skill_call("registry", json!({"name": name}))).await {
+        Ok(Ok(v)) => (StatusCode::OK, json!({"ok": true, "result": v}).into()),
+        Ok(Err(err)) => (StatusCode::NOT_FOUND, json!({"ok": false, "message": err.to_string()}).into()),
         Err(err) => internal_error(err),
     }
 }

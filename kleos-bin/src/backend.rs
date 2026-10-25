@@ -7,7 +7,7 @@
 //! Where the CLI and the MCP server send their calls (kleos fork;
 //! docs/specs/mcp-cli-skills.md): an embedded store opened in this process,
 //! or a running `kleos server` over HTTP. Both take the same JSON options as
-//! `::memory`, `::doc`, `::flow` and `::ontology`.
+//! `::memory`, `::doc`, `::flow`, `::ontology` and `::skill`.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -22,6 +22,7 @@ pub enum Area {
     Doc,
     Flow,
     Ontology,
+    Skill,
 }
 
 impl Area {
@@ -31,6 +32,7 @@ impl Area {
             Area::Doc => "doc",
             Area::Flow => "flow",
             Area::Ontology => "ontology",
+            Area::Skill => "skill",
         }
     }
 }
@@ -80,6 +82,7 @@ impl Backend {
                     Area::Memory => db.memory_call(op, args),
                     Area::Flow => db.flow_call(op, args),
                     Area::Ontology => db.ontology_call(op, args),
+                    Area::Skill => db.skill_call(op, args),
                     #[cfg(feature = "docs")]
                     Area::Doc => db.doc_call(op, args),
                     #[cfg(not(feature = "docs"))]

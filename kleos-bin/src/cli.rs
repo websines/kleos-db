@@ -125,6 +125,48 @@ pub enum CliCmd {
         #[command(subcommand)]
         cmd: BranchCmd,
     },
+    /// The skill library: `kleos skill <op> [JSON] [flags]` for every op
+    /// (find, import, export, list, get, history, activate, rollback, undo,
+    /// retire, outcome, stats, scan, learn, optimize, eval, promote, approve,
+    /// sign, verify, package, publish, install, keygen, trust, …)
+    Skill {
+        /// The op (docs/specs/skills.md)
+        op: String,
+        /// The op's options as a JSON object (flags below are merged in)
+        args: Option<String>,
+        /// Skill name
+        #[arg(long)]
+        name: Option<String>,
+        /// Skill scope (default "default")
+        #[arg(long)]
+        scope: Option<String>,
+        /// A version id
+        #[arg(long)]
+        ver: Option<String>,
+        /// A task (find, learn)
+        #[arg(long)]
+        task: Option<String>,
+        /// A folder or file (import, export, install, scan)
+        #[arg(long)]
+        path: Option<String>,
+        /// Number of skills (find)
+        #[arg(short, long)]
+        k: Option<usize>,
+        /// Token budget (find)
+        #[arg(long)]
+        budget: Option<usize>,
+        /// Activate after import/put/install (when the scan is clean)
+        #[arg(long)]
+        activate: bool,
+        /// Run learn/optimize inside the command instead of as a workflow
+        #[arg(long)]
+        wait: bool,
+        /// Confirm a destructive op without asking
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        conn: ConnArgs,
+    },
     /// Run a read-only CozoScript query
     Query {
         script: String,
@@ -139,6 +181,9 @@ pub enum CliCmd {
         /// Offer the read-only `query` tool
         #[arg(long)]
         allow_query: bool,
+        /// What `skills/list` returns without a task: top (default), full, none
+        #[arg(long, default_value = "top")]
+        skills_list: String,
         #[command(flatten)]
         conn: ConnArgs,
     },
@@ -547,20 +592,102 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
                 print(&ctx, &v, |_| None);
             }
         },
+        CliCmd::Skill { op, args, name, scope, ver, task, path, k, budget, activate, wait, yes, conn } => {
+            let (ctx, _) = connect(&conn)?;
+            let mut a = match parse_json("the skill options", args.as_deref())? {
+                Value::Null => json!({}),
+                v @ Value::Object(_) => v,
+                _ => return Err("the skill options must be a JSON object".into()),
+            };
+            let op = match op.as_str() {
+                "outcome" => "record_outcome".to_string(),
+                "trace" => "record_trace".to_string(),
+                o => o.to_string(),
+            };
+            for (key, val) in [("name", name), ("scope", scope), ("ver", ver), ("task", task)] {
+                if let Some(v) = val {
+                    a[key] = json!(v);
+                }
+            }
+            if let Some(p) = path {
+                a["path"] = json!(if op == "export" { crate::config::expand(&p).to_string_lossy().into_owned() } else { abs(&p) });
+            }
+            if let Some(k) = k {
+                a["k"] = json!(k);
+            }
+            if let Some(b) = budget {
+                a["budget"] = json!(b);
+            }
+            if activate {
+                a["activate"] = json!(true);
+            }
+            if wait {
+                a["wait"] = json!(true);
+            }
+            if matches!(op.as_str(), "rollback" | "undo" | "retire" | "erase" | "release") {
+                confirm(&format!("{op} skill '{}'?", a.get("name").or(a.get("ver")).and_then(|v| v.as_str()).unwrap_or("?")), yes)?;
+                if matches!(op.as_str(), "erase" | "release") {
+                    a["confirm"] = json!(true);
+                }
+            }
+            let v = ctx.backend.call(Area::Skill, &op, a)?;
+            print(&ctx, &v, |v| skill_human(&op, v));
+        }
         CliCmd::Query { script, params, conn } => {
             let (ctx, _) = connect(&conn)?;
             let params = parse_json("--params", params.as_deref())?;
             let v = ctx.backend.query(&script, &params)?;
             print(&ctx, &v, |_| None);
         }
-        CliCmd::Mcp { allow_query, conn } => {
+        CliCmd::Mcp { allow_query, skills_list, conn } => {
             let (ctx, _) = connect(&conn)?;
-            let server = crate::mcp::McpServer::new(ctx.backend, ctx.ns, allow_query);
+            let server = crate::mcp::McpServer::new(ctx.backend, ctx.ns, allow_query).with_skills_list(&skills_list);
             eprintln!("kleos MCP {} on stdio", crate::mcp::MODERN);
             crate::mcp::serve_stdio(&server).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
+}
+
+/// Short human output for the common skill ops.
+fn skill_human(op: &str, v: &Value) -> Option<String> {
+    match op {
+        "find" => {
+            let a = v.get("skills")?.as_array()?;
+            if a.is_empty() {
+                return Some("(no skill fits this task)".into());
+            }
+            let mut out: Vec<String> = a
+                .iter()
+                .map(|s| {
+                    let rate = s["stats"]["success_rate"].as_f64().map(|r| format!("  {:.0}%/{}", r * 100.0, s["stats"]["uses"])).unwrap_or_default();
+                    format!("{:.3}  {}  [{}]{rate}\n       {}", s["score"].as_f64().unwrap_or(0.0), s["name"].as_str().unwrap_or(""), s["scope"].as_str().unwrap_or(""), s["description"].as_str().unwrap_or(""))
+                })
+                .collect();
+            out.push(format!("route {}", v["route"].as_str().unwrap_or("")));
+            Some(out.join("\n"))
+        }
+        "list" => {
+            let a = v.as_array()?;
+            Some(if a.is_empty() {
+                "(no skills)".into()
+            } else {
+                a.iter()
+                    .map(|s| format!("{:<32} {:<12} {:<11} {}", s["name"].as_str().unwrap_or(""), s["scope"].as_str().unwrap_or(""), s["status"].as_str().unwrap_or(""), s["uri"].as_str().unwrap_or("")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        }
+        "import" => Some(
+            v.get("imported")?
+                .as_array()?
+                .iter()
+                .map(|r| format!("{}  {}  {}{}", r["name"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""), r["ver"].as_str().unwrap_or(""), if r["existing"] == true { "  (unchanged)" } else { "" }))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
+    }
 }
 
 /// Attachment paths are made absolute here (a remote server can read them
@@ -592,6 +719,7 @@ impl CliCmd {
             | CliCmd::Reflect { conn }
             | CliCmd::Profile { conn, .. }
             | CliCmd::Query { conn, .. }
+            | CliCmd::Skill { conn, .. }
             | CliCmd::Mcp { conn, .. } => j(conn),
             CliCmd::Doc { cmd } => match cmd {
                 DocCmd::Add { conn, .. } | DocCmd::Status { conn, .. } | DocCmd::List { conn } => j(conn),

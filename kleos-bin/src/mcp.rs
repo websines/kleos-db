@@ -32,6 +32,11 @@ const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
 const META_SERVER: &str = "io.modelcontextprotocol/serverInfo";
 const TASKS_EXT: &str = "io.modelcontextprotocol/tasks";
+/// SEP-2640, the skills extension (Final): `skills/list`, `skills/get`,
+/// `skill://` resources and `resources/directory/read`.
+pub const SKILLS_EXT: &str = "io.modelcontextprotocol/skills";
+/// Skills in a `skills/list` answered with a task (kleos extension: `task`).
+const SKILLS_TOP_K: u64 = 8;
 
 pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
@@ -50,7 +55,10 @@ const INSTRUCTIONS: &str = "kleos is a memory engine. Call `recall` (format `con
 questions about the user, their projects or earlier decisions; call `remember` with stable facts, \
 preferences and decisions worth keeping (not chit-chat). Recall marks replaced facts as \"previously\" \
 and uncertain replacements as pending. Documents go in with `doc_add` and come back cited by page. \
-Pass the same `ns` for one user or project.";
+Pass the same `ns` for one user or project. \
+For a task that a known procedure may cover, call `find_skills` with the task: it returns the few skills that \
+fit (never the whole library); load one with `get_skill`, follow it, then report how it went with \
+`record_skill_outcome` (pass the `route` from `find_skills`).";
 
 /// Server options.
 #[derive(Clone)]
@@ -58,6 +66,10 @@ pub struct McpServer {
     backend: Backend,
     default_ns: String,
     allow_query: bool,
+    /// What `skills/list` returns without a task: `top` (default; the most
+    /// useful live skills, a partial listing), `full` (the catalog, paged) or
+    /// `none` (empty; hosts use `find_skills` and `skills/get`).
+    skills_list: String,
     state_key: [u8; 32],
     /// In-process worker for background jobs (re-embed, consolidate) of an
     /// embedded store, started on first use; a remote server runs its own.
@@ -157,7 +169,13 @@ impl McpServer {
                 rand::thread_rng().fill_bytes(&mut state_key);
             }
         }
-        Self { backend, default_ns: default_ns.into(), allow_query, state_key, worker: Default::default() }
+        Self { backend, default_ns: default_ns.into(), allow_query, skills_list: "top".into(), state_key, worker: Default::default() }
+    }
+
+    /// `skills/list` without a task: `top`, `full` or `none`.
+    pub fn with_skills_list(mut self, mode: &str) -> Self {
+        self.skills_list = mode.to_string();
+        self
     }
 
     /// Fixes the confirmation key (tests, or several instances sharing one key).
@@ -174,7 +192,7 @@ impl McpServer {
         json!({
             "tools": {"listChanged": false},
             "resources": {"listChanged": false},
-            "extensions": {TASKS_EXT: {}}
+            "extensions": {TASKS_EXT: {}, SKILLS_EXT: {"directoryRead": true}}
         })
     }
 
@@ -302,6 +320,28 @@ impl McpServer {
             "resources/read" => {
                 let uri = params.get("uri").and_then(|u| u.as_str()).ok_or_else(|| RpcError::new(INVALID_PARAMS, "resources/read needs 'uri'"))?;
                 let mut r = self.resource_read(uri)?;
+                if matches!(era, Era::Modern { .. }) {
+                    r["ttlMs"] = json!(5_000);
+                    r["cacheScope"] = json!("private");
+                }
+                r
+            }
+            "skills/list" => {
+                let mut r = self.skills_list(params)?;
+                if matches!(era, Era::Modern { .. }) {
+                    r["ttlMs"] = json!(if params.get("task").is_some() { 5_000 } else { LIST_TTL_MS });
+                    r["cacheScope"] = json!("private");
+                }
+                r
+            }
+            "skills/get" => {
+                let uri = params.get("uri").and_then(|u| u.as_str()).ok_or_else(|| RpcError::new(INVALID_PARAMS, "skills/get needs 'uri'"))?;
+                let e = self.backend.call(Area::Skill, "entry", json!({"uri": uri})).map_err(|e| RpcError::new(INVALID_PARAMS, e))?;
+                json!({"skill": e})
+            }
+            "resources/directory/read" => {
+                let uri = params.get("uri").and_then(|u| u.as_str()).ok_or_else(|| RpcError::new(INVALID_PARAMS, "resources/directory/read needs 'uri'"))?;
+                let mut r = self.backend.call(Area::Skill, "dir", json!({"uri": uri})).map_err(|e| RpcError::new(INVALID_PARAMS, e))?;
                 if matches!(era, Era::Modern { .. }) {
                     r["ttlMs"] = json!(5_000);
                     r["cacheScope"] = json!("private");
@@ -489,6 +529,64 @@ impl McpServer {
                 }, "required": ["action"]},
                 "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}
             }),
+            json!({
+                "name": "find_skills",
+                "title": "Find skills",
+                "description": "The few skills (procedures) that fit a task, ranked by fit and measured success; budget-aware. Load one with get_skill; report back with record_skill_outcome and the returned route.",
+                "inputSchema": {"type": "object", "properties": {
+                    "task": {"type": "string", "description": "What you are about to do"},
+                    "k": {"type": "integer", "description": "Skills to return (default 5)"},
+                    "budget": {"type": "integer", "description": "Token budget of the answer (default 2000)"},
+                    "disclosure": {"type": "string", "enum": ["descriptions", "body", "auto"], "description": "'body' includes the top skill's instructions"},
+                    "scope": {"type": "string"}, "scopes": {"type": "array", "items": {"type": "string"}}
+                }, "required": ["task"]},
+                "annotations": {"readOnlyHint": true, "openWorldHint": false}
+            }),
+            json!({
+                "name": "get_skill",
+                "title": "Load a skill",
+                "description": "A skill's instructions (SKILL.md body) and its file list, or one of its files. Scripts are content only: kleos never runs them.",
+                "inputSchema": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "uri": {"type": "string", "description": "skill://… URI"},
+                    "scope": {"type": "string"}, "file": {"type": "string", "description": "A file path inside the skill"}
+                }},
+                "annotations": {"readOnlyHint": true, "openWorldHint": false}
+            }),
+            json!({
+                "name": "record_skill_outcome",
+                "title": "Report a skill outcome",
+                "description": "Whether following a skill worked. Feeds its success rate, automatic rollback and the skill router.",
+                "inputSchema": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "ver": {"type": "string"}, "scope": {"type": "string"},
+                    "success": {"type": "boolean"}, "route": {"type": "string", "description": "The route id find_skills returned"},
+                    "run": {"type": "string"}, "task": {"type": "string"},
+                    "latency_ms": {"type": "number"}, "tokens": {"type": "integer"}, "cost": {"type": "number"}, "model": {"type": "string"}
+                }, "required": ["success"]},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+            }),
+            json!({
+                "name": "propose_skill",
+                "title": "Propose a skill",
+                "description": "Propose a new skill (a SKILL.md, optional files and test cases). It is scanned and stored as a candidate; it is never activated by this call.",
+                "inputSchema": {"type": "object", "properties": {
+                    "skill_md": {"type": "string"}, "files": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "scope": {"type": "string"}, "evidence": {"description": "Runs or memories it comes from"},
+                    "eval": {"type": "array", "items": {"type": "object", "properties": {"task": {"type": "string"}, "expected": {"type": "string"}}}}
+                }, "required": ["skill_md"]},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
+            }),
+            json!({
+                "name": "skill_admin",
+                "title": "Manage skills",
+                "description": "Skill lifecycle: history, stats, activate, rollback, undo, retire, promote (to a broader scope), learn (from successful runs), optimize. activate/rollback/undo/retire ask for confirmation.",
+                "inputSchema": {"type": "object", "properties": {
+                    "action": {"type": "string", "enum": ["history", "stats", "activate", "rollback", "undo", "retire", "promote", "learn", "optimize"]},
+                    "name": {"type": "string"}, "ver": {"type": "string"}, "scope": {"type": "string"},
+                    "to": {"type": "string", "description": "promote: target scope; rollback: version"},
+                    "confirm": {"type": "boolean", "description": "Set after the user agreed (clients without elicitation)"}
+                }, "required": ["action"]},
+                "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}
+            }),
         ];
         if self.allow_query {
             tools.push(json!({
@@ -512,11 +610,15 @@ impl McpServer {
             Some(v @ Value::Object(_)) => v.clone(),
             Some(_) => return Err(RpcError::new(INVALID_PARAMS, "'arguments' must be an object")),
         };
-        let known = ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "branch", "ontology", "reembed", "consolidate"];
+        let known = [
+            "recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "branch", "ontology", "reembed", "consolidate",
+            "find_skills", "get_skill", "record_skill_outcome", "propose_skill", "skill_admin",
+        ];
         if !known.contains(&name) && !(name == "query" && self.allow_query) {
             return Err(RpcError::new(INVALID_PARAMS, format!("Unknown tool: {name}")));
         }
-        let read_tool = matches!(name, "recall" | "reflect" | "entity_profile" | "doc_status" | "query")
+        let read_tool = matches!(name, "recall" | "reflect" | "entity_profile" | "doc_status" | "query" | "get_skill" | "find_skills")
+            || (name == "skill_admin" && matches!(args.get("action").and_then(|a| a.as_str()), Some("history" | "stats")))
             || (name == "branch" && matches!(args.get("action").and_then(|a| a.as_str()), Some("diff" | "list")))
             || (name == "flow" && matches!(args.get("action").and_then(|a| a.as_str()), Some("status" | "list")))
             || (name == "ontology" && matches!(args.get("action").and_then(|a| a.as_str()), Some("list" | "facts" | "infer" | "history")));
@@ -648,6 +750,8 @@ impl McpServer {
             "ontology" => self.ontology(&ns, args, params, era, conn)?,
             "reembed" => self.reembed(&ns, args, era),
             "consolidate" => self.consolidate(&ns, args, era),
+            "find_skills" | "get_skill" | "record_skill_outcome" | "propose_skill" => self.skill_tool(name, args, conn),
+            "skill_admin" => self.skill_admin(args, params, era, conn)?,
             "query" => {
                 let Some(script) = args.get("script").and_then(|v| v.as_str()) else { return Ok(tool_error("query needs 'script'")) };
                 match b.query(script, args.get("params").unwrap_or(&Value::Null)) {
@@ -700,6 +804,151 @@ impl McpServer {
             }));
         }
         done(r)
+    }
+
+    // ----- skills (docs/specs/skills.md) -----
+
+    /// `skills/list` (SEP-2640): with a `task` (kleos extension), its top-k;
+    /// else per the server's listing mode. Listings other than `full` are
+    /// partial, as the extension allows: the catalog stays reachable through
+    /// `skills/get` and `find_skills`.
+    fn skills_list(&self, params: &Value) -> Result<Value, RpcError> {
+        let task = params.get("task").or_else(|| params.get("query")).and_then(|t| t.as_str()).filter(|t| !t.trim().is_empty());
+        let mut a = json!({});
+        if let Some(sc) = params.get("scopes").filter(|v| v.is_array()) {
+            a["scopes"] = sc.clone();
+        } else if let Some(sc) = params.get("scope").and_then(|v| v.as_str()) {
+            a["scope"] = json!(sc);
+        }
+        match (task, self.skills_list.as_str()) {
+            (Some(t), _) => {
+                a["task"] = json!(t);
+                a["k"] = json!(params.get("k").and_then(|k| k.as_u64()).unwrap_or(SKILLS_TOP_K));
+            }
+            (None, "none") => return Ok(json!({"skills": []})),
+            (None, "full") => {
+                a["mode"] = json!("full");
+                if let Some(c) = params.get("cursor") {
+                    a["cursor"] = c.clone();
+                }
+            }
+            _ => a["mode"] = json!("top"),
+        }
+        let r = self.backend.call(Area::Skill, "entries", a).map_err(|e| RpcError::new(INTERNAL_ERROR, e))?;
+        let mut out = json!({"skills": r.get("skills").cloned().unwrap_or_else(|| json!([]))});
+        if let Some(n) = r.get("nextCursor") {
+            out["nextCursor"] = n.clone();
+        }
+        Ok(out)
+    }
+
+    fn skill_tool(&self, name: &str, args: &Value, conn: &Conn) -> ToolOut {
+        let b = &self.backend;
+        let mut a = args.clone();
+        match name {
+            "find_skills" => {
+                if conn.read_only {
+                    a["log"] = json!(false);
+                }
+                match b.call(Area::Skill, "find", a) {
+                    Ok(v) => {
+                        let mut text = String::new();
+                        for s in v["skills"].as_array().cloned().unwrap_or_default() {
+                            let st = &s["stats"];
+                            let rate = match st["success_rate"].as_f64() {
+                                Some(r) => format!(", {:.0}% of {} uses", r * 100.0, st["uses"]),
+                                None => String::new(),
+                            };
+                            text.push_str(&format!("{}. {} (scope {}, fit {:.2}{rate}) — {}\n   {}\n", s["rank"], s["name"].as_str().unwrap_or(""), s["scope"].as_str().unwrap_or(""),
+                                s["score"].as_f64().unwrap_or(0.0), s["description"].as_str().unwrap_or(""), s["uri"].as_str().unwrap_or("")));
+                            if let Some(body) = s["body"].as_str() {
+                                text.push_str(&format!("\n{body}\n\n"));
+                            }
+                        }
+                        if text.is_empty() {
+                            text = "(no skill fits this task)".into();
+                        } else {
+                            text.push_str(&format!("route: {} (pass it to record_skill_outcome)", v["route"].as_str().unwrap_or("")));
+                        }
+                        ToolOut::Done { text, structured: v, is_error: false }
+                    }
+                    Err(e) => tool_error(e),
+                }
+            }
+            "get_skill" => {
+                if let Some(uri) = args.get("uri").and_then(|u| u.as_str()) {
+                    return match b.call(Area::Skill, "read", json!({"uri": uri})) {
+                        Ok(v) => {
+                            let text = v["contents"][0]["text"].as_str().unwrap_or("(binary file)").to_string();
+                            ToolOut::Done { text, structured: v, is_error: false }
+                        }
+                        Err(e) => tool_error(e),
+                    };
+                }
+                match b.call(Area::Skill, "get", a) {
+                    Ok(v) if v.get("text").is_some() || v.get("b64").is_some() => {
+                        let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("(binary file)").to_string();
+                        ToolOut::Done { text, structured: v, is_error: false }
+                    }
+                    Ok(v) => {
+                        let files: Vec<String> = v["resources"].as_array().map(|r| r.iter().filter(|x| x["path"] != "SKILL.md").map(|x| x["path"].as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+                        let mut text = v["body"].as_str().unwrap_or("").to_string();
+                        if !files.is_empty() {
+                            text.push_str(&format!("\n\nFiles (read with get_skill file=…): {}", files.join(", ")));
+                        }
+                        let structured = json!({"name": v["name"], "scope": v["scope"], "ver": v["ver"], "uri": v["uri"], "digest": v["digest"],
+                                                "frontmatter": v["frontmatter"], "body": v["body"], "resources": v["resources"], "stats": v["stats"]});
+                        ToolOut::Done { text, structured, is_error: false }
+                    }
+                    Err(e) => tool_error(e),
+                }
+            }
+            "record_skill_outcome" => match b.call(Area::Skill, "record_outcome", a) {
+                Ok(v) => done(v),
+                Err(e) => tool_error(e),
+            },
+            "propose_skill" => {
+                if let Some(o) = a.as_object_mut() {
+                    o.remove("activate");
+                }
+                match b.call(Area::Skill, "propose", a) {
+                    Ok(v) => done(v),
+                    Err(e) => tool_error(e),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn skill_admin(&self, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
+        let action = args.get("action").and_then(|a| a.as_str()).unwrap_or_default().to_string();
+        let mut a = args.clone();
+        if let Some(o) = a.as_object_mut() {
+            o.remove("action");
+            o.remove("confirm");
+        }
+        let call = |op: &str, a: Value| match self.backend.call(Area::Skill, op, a) {
+            Ok(v) => done(v),
+            Err(e) => tool_error(e),
+        };
+        let what = args.get("name").or_else(|| args.get("ver")).and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        Ok(match action.as_str() {
+            "history" | "stats" | "learn" | "optimize" => call(&action, a),
+            "promote" => call("promote", a),
+            "activate" | "rollback" | "undo" | "retire" => {
+                if action == "rollback" {
+                    if let Some(to) = args.get("to").cloned() {
+                        a["to"] = to;
+                    }
+                }
+                let msg = format!("{} skill '{what}'? This changes which instructions agents get.", action[..1].to_uppercase() + &action[1..]);
+                match self.confirm("skill_admin", args, params, era, conn, &msg)? {
+                    Confirm::Yes => call(&action, a),
+                    other => other.into_out(),
+                }
+            }
+            other => tool_error(format!("skill_admin: unknown action '{other}' (history, stats, activate, rollback, undo, retire, promote, learn, optimize)")),
+        })
     }
 
     fn ontology(&self, ns: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
@@ -1033,6 +1282,9 @@ impl McpServer {
 
     fn resource_read(&self, uri: &str) -> Result<Value, RpcError> {
         let missing = || RpcError::new(INVALID_PARAMS, format!("Resource not found: {uri}"));
+        if uri.starts_with("skill://") {
+            return self.backend.call(Area::Skill, "read", json!({"uri": uri})).map_err(|_| missing());
+        }
         let rest = uri.strip_prefix("kleos://").ok_or_else(missing)?;
         let parts: Vec<String> = rest.split('/').map(unpct).collect();
         let body = match parts.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice() {
