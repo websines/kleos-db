@@ -53,7 +53,7 @@ fn load_key() {
 }
 
 fn llm() -> LlmOpts {
-    LlmOpts { url: URL.into(), model: MODEL.into(), api_key_env: Some("SYNTHETIC_KEY".into()), max_tokens: Some(6000) }
+    LlmOpts { url: URL.into(), model: MODEL.into(), api_key_env: Some("SYNTHETIC_KEY".into()), max_tokens: Some(16000) }
 }
 
 fn call(db: &DbInstance, op: &str, args: Value) -> Value {
@@ -67,29 +67,55 @@ fn open_store(dir: &Path, name: &str) -> DbInstance {
     db
 }
 
-/// Ask the LLM which skill to load from `skills` (name, description);
-/// `None` = no skill.
-fn choose(l: &LlmOpts, task: &str, skills: &[(String, String)]) -> (Option<String>, i64) {
+/// What the LLM answered when asked which skill to load.
+#[derive(Clone, Debug)]
+enum Pick {
+    Skill(String),
+    /// it answered NONE (or a name not in the list)
+    NoSkill,
+    /// no answer: the request failed, or the reasoning used every token
+    NoAnswer,
+}
+
+impl Pick {
+    fn name(&self) -> Option<&str> {
+        match self {
+            Pick::Skill(n) => Some(n),
+            _ => None,
+        }
+    }
+    fn label(&self) -> Value {
+        match self {
+            Pick::Skill(n) => json!(n),
+            Pick::NoSkill => json!("NONE"),
+            Pick::NoAnswer => json!("(no answer)"),
+        }
+    }
+}
+
+/// Ask the LLM which skill to load from `skills` (name, description).
+fn choose(l: &LlmOpts, task: &str, skills: &[(String, String)]) -> Pick {
     let list: String = skills.iter().map(|(n, d)| format!("- {n}: {d}\n")).collect();
     let user = format!("Available skills:\n{list}\nTask: {task}\n\nWhich ONE skill should be loaded for this task? Reply with its exact name only, or NONE if no skill fits.");
     let system = "You route an AI agent's tasks to skills (packaged procedures). Pick the single best skill for the task from the list, by name.";
     for _ in 0..2 {
-        if let Ok((text, tok)) = kleos::skill_learn::llm_chat(l, system, &user, 0.0) {
-            let t = text.trim().trim_matches('`').trim().to_lowercase();
-            let first = t.lines().rev().find(|x| !x.trim().is_empty()).unwrap_or("").trim().trim_matches(|c: char| !c.is_alphanumeric() && c != '-').to_string();
-            if first == "none" {
-                return (None, tok);
-            }
-            // the exact name, else the listed name it mentions (longest first)
-            if skills.iter().any(|(n, _)| *n == first) {
-                return (Some(first), tok);
-            }
-            let mut names: Vec<&String> = skills.iter().map(|(n, _)| n).collect();
-            names.sort_by_key(|n| std::cmp::Reverse(n.len()));
-            return (names.into_iter().find(|n| t.contains(n.as_str())).cloned(), tok);
+        let Ok((text, _)) = kleos::skill_learn::llm_chat(l, system, &user, 0.0) else { continue };
+        let t = text.trim().trim_matches('`').trim().to_lowercase();
+        if t.is_empty() {
+            continue;
         }
+        let first = t.lines().rev().find(|x| !x.trim().is_empty()).unwrap_or("").trim().trim_matches(|c: char| !c.is_alphanumeric() && c != '-').to_string();
+        if first == "none" {
+            return Pick::NoSkill;
+        }
+        if skills.iter().any(|(n, _)| *n == first) {
+            return Pick::Skill(first);
+        }
+        let mut names: Vec<&String> = skills.iter().map(|(n, _)| n).collect();
+        names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+        return names.into_iter().find(|n| t.contains(n.as_str())).map(|n| Pick::Skill(n.clone())).unwrap_or(Pick::NoSkill);
     }
-    (None, 0)
+    Pick::NoAnswer
 }
 
 fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
@@ -134,7 +160,10 @@ fn routing(data: &Path, out: &Path) {
         }
     }
     let import_s = t0.elapsed().as_secs_f64();
-    let sizes: Vec<(&str, Vec<&str>)> = vec![("30", vec!["default"]), ("230", vec!["default", "d1"]), ("1030", vec!["default", "d1", "d2"])];
+    let mut sizes: Vec<(&str, Vec<&str>)> = vec![("30", vec!["default"]), ("230", vec!["default", "d1"]), ("1030", vec!["default", "d1", "d2"])];
+    if let Ok(only) = std::env::var("BENCH_SIZES") {
+        sizes.retain(|(l, _)| only.split(',').any(|x| x == *l));
+    }
     let use_llm = std::env::var("KLEOS_ENV_FILE").is_ok();
     if use_llm {
         load_key();
@@ -178,12 +207,12 @@ fn routing(data: &Path, out: &Path) {
             flat.sort_by_key(|(n, _)| kleos::skill::digest_of(n.as_bytes()));
             let flat_tokens: usize = flat.iter().map(|(n, d)| kleos::skill::est_tokens(n) + kleos::skill::est_tokens(d) + 3).sum();
             let picks = par_map(&tasks, 4, |t| choose(&l, t["task"].as_str().unwrap(), &flat));
-            let ok = tasks.iter().zip(&picks).filter(|(t, p)| p.0.as_deref() == t["target"].as_str()).count() as f64 / n;
-            let none = picks.iter().filter(|p| p.0.is_none()).count() as f64 / n;
+            let ok = tasks.iter().zip(&picks).filter(|(t, p)| p.name() == t["target"].as_str()).count() as f64 / n;
             s["flat_llm_accuracy"] = json!(ok);
-            s["flat_llm_none"] = json!(none);
+            s["flat_llm_none"] = json!(picks.iter().filter(|p| matches!(p, Pick::NoSkill)).count() as f64 / n);
+            s["flat_llm_no_answer"] = json!(picks.iter().filter(|p| matches!(p, Pick::NoAnswer)).count() as f64 / n);
             s["flat_list_tokens"] = json!(flat_tokens);
-            let kpicks: Option<Vec<(Option<String>, i64)>> = (*label != "230").then(|| {
+            let kpicks: Option<Vec<Pick>> = (*label != "230").then(|| {
                 par_map(&found.iter().zip(&tasks).collect::<Vec<_>>(), 4, |(f, t)| {
                     let top: Vec<(String, String)> = f["skills"].as_array().unwrap().iter().take(5)
                         .map(|s| (s["name"].as_str().unwrap().to_string(), s["description"].as_str().unwrap().to_string())).collect();
@@ -191,12 +220,13 @@ fn routing(data: &Path, out: &Path) {
                 })
             });
             if let Some(kp) = &kpicks {
-                s["kleos_top5_llm_accuracy"] = json!(tasks.iter().zip(kp).filter(|(t, p)| p.0.as_deref() == t["target"].as_str()).count() as f64 / n);
-                s["kleos_top5_llm_none"] = json!(kp.iter().filter(|p| p.0.is_none()).count() as f64 / n);
+                s["kleos_top5_llm_accuracy"] = json!(tasks.iter().zip(kp).filter(|(t, p)| p.name() == t["target"].as_str()).count() as f64 / n);
+                s["kleos_top5_llm_none"] = json!(kp.iter().filter(|p| matches!(p, Pick::NoSkill)).count() as f64 / n);
+                s["kleos_top5_llm_no_answer"] = json!(kp.iter().filter(|p| matches!(p, Pick::NoAnswer)).count() as f64 / n);
             }
             for (i, t) in tasks.iter().enumerate() {
                 records.push(json!({"size": label, "target": t["target"], "task": t["task"], "kleos_rank": ranks[i].map(|r| r + 1),
-                    "kleos_top": found[i]["skills"][0]["name"], "flat_pick": picks[i].0, "kleos_llm_pick": kpicks.as_ref().map(|k| k[i].0.clone())}));
+                    "kleos_top": found[i]["skills"][0]["name"], "flat_pick": picks[i].label(), "kleos_llm_pick": kpicks.as_ref().map(|k| k[i].label())}));
             }
         } else {
             for (i, t) in tasks.iter().enumerate() {
@@ -264,7 +294,7 @@ fn learn(data: &Path, out: &Path) {
     std::fs::create_dir_all(&dir).unwrap();
     let db = open_store(&dir, "learn.db");
     let l = llm();
-    call(&db, "config", json!({"learn": {"llm": {"url": l.url, "model": l.model, "api_key_env": "SYNTHETIC_KEY", "max_tokens": 6000},
+    call(&db, "config", json!({"learn": {"llm": {"url": l.url, "model": l.model, "api_key_env": "SYNTHETIC_KEY", "max_tokens": 16000},
                                          "min_support": 3, "margin": 0.2, "cron": "off", "parallel": 4, "holdout": 0.5, "cluster_threshold": 0.75}}));
     let mut rng = 42u64;
     for i in 0..8 {
@@ -282,7 +312,28 @@ fn learn(data: &Path, out: &Path) {
     let learn_s = t0.elapsed().as_secs_f64();
     eprintln!("learn: {}", learned["admit"]);
 
-    // optimizer: a hand-written shipping skill that misses two rules
+    // optimizer 1: the learned shipping skill, on a larger held-out set
+    let learned_ship = learned["admit"]["results"].as_array().into_iter().flatten()
+        .find(|r| r["admitted"] == true && r["name"].as_str().is_some_and(|n| n.contains("ship")))
+        .and_then(|r| r["name"].as_str().map(String::from));
+    let mut opt_learned = Value::Null;
+    if let Some(name) = &learned_ship {
+        let mut rng = 99u64;
+        let cases: Vec<Value> = (0..12)
+            .map(|i| {
+                let (task, _, ans) = shipping(&mut rng, 200 + i);
+                json!({"task": task, "expected": ans, "split": if i % 2 == 0 { "holdout" } else { "train" }})
+            })
+            .collect();
+        call(&db, "eval_add", json!({"name": name, "cases": cases}));
+        let t = Instant::now();
+        let o = call(&db, "optimize", json!({"name": name, "rounds": 4, "wait": true}));
+        let live = call(&db, "get", json!({"name": name}));
+        eprintln!("optimize learned: {}", o["finish"]);
+        opt_learned = json!({"name": name, "seconds": t.elapsed().as_secs_f64(), "finish": o["finish"], "prepare": o["prepare"], "rounds": o["rounds"], "final_body": live["body"], "final_origin": live["origin"]});
+    }
+
+    // optimizer 2: a hand-written shipping skill that misses three rules
     let weak = "---\nname: acme-shipping-manual\ndescription: Compute the Acme shipping charge for an order. Use when asked what Acme charges for shipping.\n---\n\
 ## Steps\n1. Start from the base charge of USD 4.50.\n2. Add USD 1.25 per kg of parcel weight.\n3. Give the result as `USD x.xx`.\n";
     call(&db, "put", json!({"skill_md": weak, "activate": true}));
@@ -308,6 +359,7 @@ fn learn(data: &Path, out: &Path) {
     let res = json!({"benchmark": "skills-learn", "model": MODEL, "learn_s": learn_s, "optimize_s": opt_s,
                      "learn": {"harvest": learned["harvest"]["stats"], "results": learned["admit"]["results"], "verify": learned["verify"]},
                      "learned_skills": bodies,
+                     "optimize_learned": opt_learned,
                      "optimize": {"finish": opt["finish"], "rounds": opt["rounds"], "base_body": weak, "final_body": live["body"], "final_origin": live["origin"]}});
     std::fs::write(out, serde_json::to_string_pretty(&res).unwrap()).unwrap();
 }

@@ -253,6 +253,37 @@ fn norm(s: &str) -> String {
         .to_string()
 }
 
+/// Does a final answer match the expected result? Equal after
+/// normalization; or the expected text appears in the answer at token
+/// boundaries; or the same numbers in the same order with every longer word
+/// of the expected text present (`8.55` for `USD 8.55`, not `07` for `007`).
+pub fn answer_matches(ans: &str, exp: &str) -> bool {
+    let (a, e) = (norm(ans), norm(exp));
+    if e.is_empty() {
+        return false;
+    }
+    if a == e {
+        return true;
+    }
+    let bytes = a.as_bytes();
+    let mut from = 0;
+    while let Some(i) = a[from..].find(&e) {
+        let s = from + i;
+        let end = s + e.len();
+        let left_ok = s == 0 || !(bytes[s - 1] as char).is_alphanumeric();
+        let right_ok = end == a.len() || !(bytes[end] as char).is_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        from = s + 1;
+    }
+    let toks = |s: &str| -> Vec<String> { s.split(|c: char| !(c.is_alphanumeric() || c == '.')).map(|t| t.trim_matches('.').to_string()).filter(|t| !t.is_empty()).collect() };
+    let nums = |t: &[String]| -> Vec<String> { t.iter().filter(|x| x.chars().all(|c| c.is_ascii_digit() || c == '.') && x.chars().any(|c| c.is_ascii_digit())).cloned().collect() };
+    let (ta, te) = (toks(&a), toks(&e));
+    let (na, ne) = (nums(&ta), nums(&te));
+    !ne.is_empty() && na == ne && te.iter().filter(|w| w.chars().any(|c| c.is_alphabetic()) && w.chars().count() > 3).all(|w| ta.contains(w))
+}
+
 /// The final answer of a response: the text after the last `ANSWER:`, else
 /// the last non-empty line.
 pub fn final_answer(resp: &str) -> String {
@@ -303,10 +334,7 @@ fn passes(l: &LlmOpts, case: &Case, response: &str) -> Result<bool> {
         "equals" => norm(&ans) == norm(&exp),
         "contains" => norm(response).contains(&norm(&exp)),
         "regex" => regex::Regex::new(check.get("pattern").and_then(|p| p.as_str()).unwrap_or("$^")).map(|r| r.is_match(response)).unwrap_or(false),
-        "answer" => {
-            let (a, e) = (norm(&ans), norm(&exp));
-            !e.is_empty() && (a == e || (e.chars().count() >= 3 && a.contains(&e)))
-        }
+        "answer" => answer_matches(&ans, &exp),
         _ => {
             let rubric = check.get("rubric").and_then(|r| r.as_str()).unwrap_or("Is the response a correct and complete result for the task?");
             let reference = if exp.is_empty() { String::new() } else { format!("\nReference result from a successful run:\n{}\n", clip(&exp, 2000)) };
@@ -1110,18 +1138,19 @@ impl<'s, S: Storage<'s>> Db<S> {
                      Reflect on what in the skill caused the failures (a missing rule, a wrong constant, an ambiguous step, a missing check), \
                      then propose at most {budget} edits as a JSON array. Each edit is one of:\n\
                      {{\"op\": \"replace\", \"line\": N, \"text\": \"...\"}}\n{{\"op\": \"insert\", \"after\": N, \"text\": \"...\"}} (N = 0 inserts at the top)\n{{\"op\": \"delete\", \"line\": N}}\n\
-                     Each text is under 300 characters. Output only the JSON array.",
+                     Line numbers refer to the numbered body above (1 to {lines}). Each text is under 300 characters. Output only the JSON array.",
                     numbered(&body),
                     st["history"],
                     if fail_txt.is_empty() { "(none on the training cases)\n".to_string() } else { fail_txt },
                     if win_txt.is_empty() { "(none)\n".to_string() } else { win_txt },
                     if rejected.is_empty() { "(none)".to_string() } else { rejected.iter().rev().take(REJECTED_BUFFER).cloned().collect::<Vec<_>>().join("\n") },
+                    lines = body.lines().count(),
                 );
                 let (text, _) = llm_chat(&l, "You are a careful optimizer of procedural instructions for AI agents.", &prompt, 0.7)?;
                 let edits = extract_json(&text).and_then(|v| if v.is_array() { v.as_array().cloned() } else { v.get("edits").and_then(|e| e.as_array()).cloned() }).unwrap_or_default();
                 let o = self.skill_learn_opts();
                 let result = match apply_edits(&body, &edits, budget) {
-                    Err(e) => json!({"round": i, "accepted": false, "why": format!("no usable edits: {e}")}),
+                    Err(e) => json!({"round": i, "accepted": false, "why": format!("no usable edits: {e}"), "response": clip(&text, 600)}),
                     Ok((new_body, applied)) => {
                         let rs = replay(&l, Some(&new_body), &hold, o.parallel);
                         let s = score(&rs);
@@ -1231,6 +1260,11 @@ mod tests {
     #[test]
     fn answers_and_json() {
         assert_eq!(final_answer("work\nANSWER: INV-42"), "INV-42");
+        assert!(answer_matches("8.55", "USD 8.55"));
+        assert!(answer_matches("The charge is USD 8.55.", "USD 8.55"));
+        assert!(!answer_matches("AcOfCh-R3-23-B012", "OFCH-R3-23-B012"));
+        assert!(!answer_matches("DELA-B4-24-B07", "DELA-B4-24-B007"));
+        assert!(!answer_matches("USD 18.30", "USD 18.00"));
         assert_eq!(extract_json("sure:\n```json\n[{\"op\":\"delete\",\"line\":1}]\n```").unwrap()[0]["op"], "delete");
         assert_eq!(slug("My Skill!! v2", "x"), "my-skill-v2");
         let md = extract_skill_md("```markdown\n---\nname: Bad Name\ndescription: does things\n---\nbody\n```", "fallback").unwrap();
