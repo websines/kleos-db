@@ -217,6 +217,7 @@ where
             }
             "promote" => self.pm_promote(&ss, a)?,
             "flow" | "doc" | "ontology" => self.pm_area(&ss, op, a)?,
+            "query" | "reembed" => self.pm_admin(&ss, op, a)?,
             "approve" | "reject" => self.pm_approve(&ss, op, a)?,
             "fork" | "merge" | "discard" | "diff" => self.pm_branch(&ss, op, a)?,
             "scopes" => {
@@ -226,7 +227,7 @@ where
             }
             other => bail!(
                 "unknown principal op '{other}': expected remember, recall, context, forget, set, link, reflect, consolidate, \
-                 promote, approve, reject, fork, merge, discard, diff, flow, doc, ontology or scopes"
+                 promote, approve, reject, fork, merge, discard, diff, flow, doc, ontology, query, reembed or scopes"
             ),
         };
         Ok(out)
@@ -498,6 +499,28 @@ where
         };
         let action = if reads.contains(&sub.as_str()) { "read" } else { "write" };
         let want = take_str(&mut a, "scope");
+        // documents are read from every readable scope unless one is named
+        #[cfg(feature = "docs")]
+        if op == "doc" && action == "read" && want.is_none() {
+            let (scopes, _) = self.scope_set(ss, "read")?;
+            let v = self.session_view(ss, ss.part.as_deref(), None, false)?;
+            let mut all = vec![];
+            for k in scopes.iter() {
+                let mut o = a.clone();
+                o.insert("ns".into(), json!(k.ns()));
+                match v.doc_call(&sub, JsonValue::Object(o)) {
+                    Ok(JsonValue::Array(x)) => all.extend(x),
+                    Ok(JsonValue::Null) | Err(_) => {}
+                    Ok(x) if sub == "get" => {
+                        self.audit_op(ss, "doc.get", json!({"scope": k.ns()}), None, json!({"effect": "allow"}))?;
+                        return Ok(x);
+                    }
+                    Ok(x) => all.push(x),
+                }
+            }
+            self.audit_op(ss, &format!("doc.{sub}"), json!({"scopes": scopes.len()}), None, json!({"effect": "allow"}))?;
+            return Ok(if sub == "get" { JsonValue::Null } else { JsonValue::Array(all) });
+        }
         let k = match want.as_deref() {
             None => ScopeKey::Workspace,
             Some(w) => self.scope_of(ss, Some(w), false)?,
@@ -523,6 +546,33 @@ where
             _ => v.ontology_call(&sub, args)?,
         };
         self.audit_op(ss, &format!("{op}.{sub}"), json!({"scope": k.ns()}), None, json!({"effect": "allow"}))?;
+        Ok(out)
+    }
+
+    /// Store-wide ops of the partition, for workspace admins: `query` (a
+    /// read-only CozoScript query on the partition; the audit keeps a hash
+    /// of the script, not its text) and `reembed`.
+    fn pm_admin(&self, ss: &Session, op: &str, mut a: Map<String, JsonValue>) -> Result<JsonValue> {
+        if !self.authz(ss)?.allows("admin", &ScopeKey::Workspace)? {
+            bail!("principal {op} needs the admin role on workspace '{}'", ss.ws);
+        }
+        self.ensure_part_store(ss.part.as_deref())?;
+        let out = if op == "query" {
+            let script = take_str(&mut a, "script").ok_or_else(|| miette::miette!("principal query needs 'script'"))?;
+            let params: BTreeMap<String, DataValue> = match a.remove("params") {
+                Some(JsonValue::Object(m)) => m.into_iter().map(|(k, v)| (k, DataValue::from(v))).collect(),
+                _ => BTreeMap::new(),
+            };
+            let pv = self.session_view(ss, ss.part.as_deref(), None, false)?;
+            let rows = pv.run_script(&script, params, ScriptMutability::Immutable)?;
+            self.audit_op(ss, "query", json!({"script_sha256": hex(&Sha256::digest(script.as_bytes())), "rows": rows.rows.len()}), None, json!({"effect": "allow"}))?;
+            rows.into_json()
+        } else {
+            let v = self.session_view(ss, ss.part.as_deref(), None, true)?;
+            let out = v.memory_call("reembed", JsonValue::Object(a))?;
+            self.audit_op(ss, "reembed", json!({}), None, json!({"effect": "allow"}))?;
+            out
+        };
         Ok(out)
     }
 

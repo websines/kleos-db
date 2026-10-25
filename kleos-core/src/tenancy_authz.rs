@@ -95,6 +95,11 @@ when {
 permit (principal, action == Kleos::Action::"promote", resource is Kleos::Scope)
 when { resource.kind == "org" && principal.kind == "human" && principal in resource.org_admin };
 
+// Workspace administration (store-wide ops of the partition: re-embedding,
+// read-only queries): the workspace's admins; org scope: the org's admins.
+permit (principal, action == Kleos::Action::"admin", resource is Kleos::Scope)
+when { (resource.kind == "ws" && principal in resource.ws_admin) || (resource.kind == "org" && principal in resource.org_admin) };
+
 // Approving a pending promotion: a human who could promote there.
 permit (principal, action == Kleos::Action::"approve", resource is Kleos::Scope)
 when {

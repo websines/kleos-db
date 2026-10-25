@@ -360,7 +360,23 @@ fn principal_mode_tools() {
     let hits = r["structuredContent"]["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1, "{r}");
     assert_eq!(hits[0]["scope"], "ws");
-    // tools that would bypass scopes are refused
-    let r = tool(&s, &mut bob, "entity_profile", json!({"name": "x"}));
-    assert_eq!(r["isError"], true);
+    // every other tool runs as the principal, inside its scopes
+    let r = tool(&s, &mut bob, "entity_profile", json!({"name": "standup"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    assert!(!r["content"][0]["text"].as_str().unwrap().contains("salary"), "{r}");
+    let r = tool(&s, &mut bob, "flow", json!({"action": "list"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    let r = tool(&s, &mut bob, "ontology", json!({"action": "list"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    // (documents need the `docs` feature; without it the error says so)
+    let r = tool(&s, &mut bob, "doc_status", json!({}));
+    assert!(r.get("isError").is_none() || r.to_string().contains("docs"), "{r}");
+    let r = tool(&s, &mut bob, "consolidate", json!({"scope": "workspace"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    let r = tool(&s, &mut bob, "branch", json!({"action": "fork", "branch": "try", "scope": "workspace"}));
+    assert!(r.get("isError").is_none(), "{r}");
+    // store-wide tools need the workspace admin role
+    let r = tool(&s, &mut bob, "reembed", json!({"embedder": "none"}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("admin"), "{r}");
 }

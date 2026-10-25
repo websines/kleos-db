@@ -494,6 +494,12 @@ fn cozoscript_ops() {
     run("::principal remember {as_workspace: 'eng', as_human: 'bob', text: 'Lunch is at noon.', scope: 'workspace'}");
     let r = run(r#"::principal recall {as: '{"workspace": "eng", "human": "carol"}', query: 'lunch noon'}"#);
     assert_eq!(r.rows.len(), 1);
+    // a read-only query of the partition: workspace admins only
+    w.t("grant", json!({"ws": "eng", "principal": "alice", "role": "admin"}));
+    let q = json!({"script": "?[count(id)] := *kleos_mem{id}"});
+    let r = w.call(&cx("eng", Some("alice"), None), "query", q.clone()).unwrap();
+    assert_eq!(r["rows"][0][0], 1);
+    assert!(w.call(&cx("eng", Some("bob"), None), "query", q).is_err());
     let r = run(r#"::tenant scopes {as: parse_json('{"workspace": "eng", "human": "carol"}')}"#);
     assert!(r.rows[0].iter().any(|v| format!("{v:?}").contains("ws")));
 }

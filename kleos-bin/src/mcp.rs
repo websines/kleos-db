@@ -550,6 +550,36 @@ impl McpServer {
         args.get("ns").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()).unwrap_or_else(|| self.default_ns.clone())
     }
 
+    /// One op, as the connection's principal in principal mode: memory ops
+    /// through `memory_call_as` (`ns` gives way to the principal's scopes;
+    /// a context recall is the `context` op), workflow, document and
+    /// ontology ops through the principal passthrough ops.
+    fn area(&self, conn: &Conn, area: Area, op: &str, mut args: Value) -> Result<Value, String> {
+        let Some(ctx) = &conn.as_principal else {
+            return self.backend.call(area, op, args);
+        };
+        if let Value::Object(m) = &mut args {
+            m.remove("ns");
+        }
+        match area {
+            Area::Memory => {
+                let op = if op == "recall" && args.get("format").and_then(|f| f.as_str()) == Some("context") { "context" } else { op };
+                self.call_as(ctx, op, args)
+            }
+            other => {
+                if let Value::Object(m) = &mut args {
+                    m.insert("op".into(), json!(op));
+                }
+                let fam = match other {
+                    Area::Flow => "flow",
+                    Area::Doc => "doc",
+                    _ => "ontology",
+                };
+                self.call_as(ctx, fam, args)
+            }
+        }
+    }
+
     /// A memory op as the connection's principal: `ns` gives way to the
     /// principal's scopes.
     fn call_as(&self, ctx: &kleos::tenancy::PrincipalContext, op: &str, mut args: Value) -> Result<Value, String> {
@@ -612,7 +642,82 @@ impl McpServer {
                     other => other.into_out(),
                 }
             }
-            other => tool_error(format!("'{other}' is not available to principals yet; use recall, remember, forget or reflect")),
+            "entity_profile" => {
+                let Some(ename) = args.get("name").and_then(|v| v.as_str()) else { return Ok(tool_error("entity_profile needs 'name'")) };
+                self.entity_profile("", ename, conn)
+            }
+            "doc_add" => self.doc_add("", args, era, conn),
+            "doc_status" => match args.get("doc").and_then(|v| v.as_str()) {
+                Some(doc) => match self.area(conn, Area::Doc, "get", json!({"doc": doc})) {
+                    Ok(Value::Null) => tool_error(format!("no document '{doc}' you may read")),
+                    Ok(v) => done(v),
+                    Err(e) => tool_error(e),
+                },
+                None => match self.area(conn, Area::Doc, "list", json!({})) {
+                    Ok(v) => done(json!({"documents": v})),
+                    Err(e) => tool_error(e),
+                },
+            },
+            "flow" => {
+                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or_default();
+                let (op, mut m) = match action {
+                    "start" => ("start", pick(&["workflow", "input", "id"])),
+                    "status" => ("status", pick(&["id"])),
+                    "signal" => ("signal", pick(&["id", "name", "payload"])),
+                    "cancel" => ("cancel", pick(&["id"])),
+                    "list" => ("list", pick(&["status", "workflow"])),
+                    other => return Ok(tool_error(format!("flow: unknown action '{other}' (start, status, signal, cancel, list)"))),
+                };
+                if op == "signal" && !m.contains_key("payload") {
+                    m.insert("payload".into(), Value::Null);
+                }
+                if op == "start" && !m.contains_key("input") {
+                    m.insert("input".into(), Value::Null);
+                }
+                match self.area(conn, Area::Flow, op, Value::Object(m)) {
+                    Ok(v) => done(v),
+                    Err(e) => tool_error(e),
+                }
+            }
+            "ontology" => self.ontology("", args, params, era, conn)?,
+            "reembed" => self.reembed("", args, era, conn),
+            "consolidate" => self.consolidate("", args, era, conn),
+            "query" => {
+                let Some(script) = args.get("script").and_then(|v| v.as_str()) else { return Ok(tool_error("query needs 'script'")) };
+                match self.call_as(ctx, "query", json!({"script": script, "params": args.get("params").cloned().unwrap_or(Value::Null)})) {
+                    Ok(v) => done(v),
+                    Err(e) => tool_error(e),
+                }
+            }
+            "branch" => {
+                // a branch of one of the principal's scopes: `scope` (default
+                // the narrowest), `branch` (or `to` / `from` / `ns`)
+                let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+                let action = s("action").unwrap_or_default();
+                let name = s("branch").or_else(|| s("to")).or_else(|| s("from")).or_else(|| s("ns"));
+                let mut a = json!({});
+                if let Some(sc) = s("scope") {
+                    a["scope"] = json!(sc);
+                }
+                let op = match action.as_str() {
+                    "fork" | "merge" | "discard" | "diff" => action.clone(),
+                    other => return Ok(tool_error(format!("branch: '{other}' is not available to principals (fork, diff, merge, discard)"))),
+                };
+                let Some(name) = name else { return Ok(tool_error("branch needs 'branch'")) };
+                a["branch"] = json!(name);
+                if matches!(op.as_str(), "merge" | "discard") {
+                    let msg = format!("{} branch '{name}'?", if op == "merge" { "Merge" } else { "Discard" });
+                    match self.confirm("branch", args, params, era, conn, &msg)? {
+                        Confirm::Yes => {}
+                        other => return Ok(other.into_out()),
+                    }
+                }
+                match self.call_as(ctx, &op, a) {
+                    Ok(v) => done(v),
+                    Err(e) => tool_error(e),
+                }
+            }
+            other => tool_error(format!("unknown tool '{other}'")),
         })
     }
 
@@ -685,9 +790,9 @@ impl McpServer {
             }
             "entity_profile" => {
                 let Some(ename) = args.get("name").and_then(|v| v.as_str()) else { return Ok(tool_error("entity_profile needs 'name'")) };
-                self.entity_profile(&ns, ename)
+                self.entity_profile(&ns, ename, conn)
             }
-            "doc_add" => self.doc_add(&ns, args, era),
+            "doc_add" => self.doc_add(&ns, args, era, conn),
             "doc_status" => match args.get("doc").and_then(|v| v.as_str()) {
                 Some(doc) => match b.call(Area::Doc, "get", json!({"ns": ns, "doc": doc})) {
                     Ok(Value::Null) => tool_error(format!("no document '{doc}' in namespace '{ns}'")),
@@ -723,8 +828,8 @@ impl McpServer {
             }
             "branch" => self.branch(&ns, args, params, era, conn)?,
             "ontology" => self.ontology(&ns, args, params, era, conn)?,
-            "reembed" => self.reembed(&ns, args, era),
-            "consolidate" => self.consolidate(&ns, args, era),
+            "reembed" => self.reembed(&ns, args, era, conn),
+            "consolidate" => self.consolidate(&ns, args, era, conn),
             "query" => {
                 let Some(script) = args.get("script").and_then(|v| v.as_str()) else { return Ok(tool_error("query needs 'script'")) };
                 match b.query(script, args.get("params").unwrap_or(&Value::Null)) {
@@ -736,14 +841,14 @@ impl McpServer {
         })
     }
 
-    fn entity_profile(&self, ns: &str, name: &str) -> ToolOut {
-        match entity_profile(&self.backend, ns, name) {
+    fn entity_profile(&self, ns: &str, name: &str, conn: &Conn) -> ToolOut {
+        match entity_profile_with(&|area, op, args| self.area(conn, area, op, args), ns, name) {
             Ok((text, structured)) => ToolOut::Done { text, structured, is_error: false },
             Err(e) => tool_error(e),
         }
     }
 
-    fn doc_add(&self, ns: &str, args: &Value, era: &Era) -> ToolOut {
+    fn doc_add(&self, ns: &str, args: &Value, era: &Era, conn: &Conn) -> ToolOut {
         let mut att = Map::new();
         for k in ["path", "data_b64", "mime", "name"] {
             if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
@@ -754,7 +859,11 @@ impl McpServer {
             return tool_error("doc_add needs 'path' or 'data_b64' (with 'mime' and 'name')");
         }
         let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let r = match self.backend.call(Area::Memory, "remember", json!({"ns": ns, "text": text, "attachments": [Value::Object(att)]})) {
+        let mut rem = json!({"ns": ns, "text": text, "attachments": [Value::Object(att)]});
+        if let Some(sc) = args.get("scope").filter(|v| !v.is_null()) {
+            rem["scope"] = sc.clone();
+        }
+        let r = match self.area(conn, Area::Memory, "remember", rem) {
             Ok(v) => v,
             Err(e) => return tool_error(e),
         };
@@ -781,7 +890,7 @@ impl McpServer {
 
     fn ontology(&self, ns: &str, args: &Value, params: &Value, era: &Era, conn: &Conn) -> Result<ToolOut, RpcError> {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
-        let call = |op: &str, a: Value| match self.backend.call(Area::Ontology, op, a) {
+        let call = |op: &str, a: Value| match self.area(conn, Area::Ontology, op, a) {
             Ok(v) => done(v),
             Err(e) => tool_error(e),
         };
@@ -801,7 +910,7 @@ impl McpServer {
                 if action == "infer" {
                     a["derived_only"] = json!(true);
                 }
-                match self.backend.call(Area::Ontology, &action, a) {
+                match self.area(conn, Area::Ontology, &action, a) {
                     Ok(v) if action == "infer" => done(json!({"inferred": v})),
                     Ok(v) => done(json!({"facts": v})),
                     Err(e) => tool_error(e),
@@ -847,7 +956,7 @@ impl McpServer {
     /// Entity profiles and session summaries: a task when the client takes
     /// tasks (the `memory.consolidate` workflow on the `consolidate` queue,
     /// as automatic consolidation uses), else run inside the call.
-    fn consolidate(&self, ns: &str, args: &Value, era: &Era) -> ToolOut {
+    fn consolidate(&self, ns: &str, args: &Value, era: &Era, conn: &Conn) -> ToolOut {
         let mut opts = json!({"ns": ns});
         for k in ["profiles", "summaries"] {
             if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
@@ -856,6 +965,9 @@ impl McpServer {
         }
         let simple = opts.as_object().map_or(true, |o| o.len() == 1);
         if era.has_tasks() && simple {
+            // a principal's consolidation runs in the call (its workflow would
+            // run without the principal's chain)
+            if conn.as_principal.is_none() {
             let b = &self.backend;
             let def = json!({"name": "memory.consolidate",
                 "graph": {"steps": [{"name": "consolidate", "consolidate": {"ns": "$input.ns"}, "retry": {"max_attempts": 3}}]}});
@@ -872,16 +984,21 @@ impl McpServer {
                 },
                 Err(e) => tool_error(e),
             };
+            }
         }
-        match self.backend.call(Area::Memory, "consolidate", opts) {
+        if let Some(sc) = args.get("scope").filter(|v| !v.is_null()) {
+            opts["scope"] = sc.clone();
+        }
+        match self.area(conn, Area::Memory, "consolidate", opts) {
             Ok(v) => done(v),
             Err(e) => tool_error(e),
         }
     }
 
-    fn reembed(&self, ns: &str, args: &Value, era: &Era) -> ToolOut {
+    fn reembed(&self, ns: &str, args: &Value, era: &Era, conn: &Conn) -> ToolOut {
         let Some(embedder) = args.get("embedder").and_then(|v| v.as_str()) else { return tool_error("reembed needs 'embedder'") };
-        let r = match self.backend.call(Area::Memory, "reembed", json!({"ns": ns, "embedder": embedder, "wait": !era.has_tasks()})) {
+        let wait = !era.has_tasks() || conn.as_principal.is_some();
+        let r = match self.area(conn, Area::Memory, "reembed", json!({"ns": ns, "embedder": embedder, "wait": wait})) {
             Ok(v) => v,
             Err(e) => return tool_error(e),
         };
@@ -1132,7 +1249,7 @@ impl McpServer {
                 Ok(Value::Null) | Err(_) => return Err(missing()),
                 Ok(v) => v,
             },
-            ["entity", ns, name] => match self.entity_profile(ns, name) {
+            ["entity", ns, name] => match self.entity_profile(ns, name, &Conn::default()) {
                 ToolOut::Done { structured, is_error: false, .. } => structured,
                 _ => return Err(missing()),
             },
@@ -1146,14 +1263,18 @@ impl McpServer {
 /// name, and the context block of memories mentioning it (by recorded entity
 /// links, else by search). Shared by the MCP tool and `kleos profile`.
 pub fn entity_profile(b: &Backend, ns: &str, name: &str) -> Result<(String, Value), String> {
-    let facts = b
-        .call(Area::Ontology, "facts", json!({"ns": ns, "s": name}))
+    entity_profile_with(&|area, op, args| b.call(area, op, args), ns, name)
+}
+
+/// [`entity_profile`] over any caller (a principal's calls in principal mode).
+pub fn entity_profile_with(call: &dyn Fn(Area, &str, Value) -> Result<Value, String>, ns: &str, name: &str) -> Result<(String, Value), String> {
+    let facts = call(Area::Ontology, "facts", json!({"ns": ns, "s": name}))
         .ok()
         .filter(|v| v.as_array().map_or(false, |a| !a.is_empty()))
         .unwrap_or_else(|| json!([]));
-    let mut ctx = b.call(Area::Memory, "recall", json!({"ns": ns, "query": name, "entity": name, "format": "context", "budget": 600}))?;
+    let mut ctx = call(Area::Memory, "recall", json!({"ns": ns, "query": name, "entity": name, "format": "context", "budget": 600}))?;
     if ctx.get("ids").and_then(|i| i.as_array()).map_or(true, |a| a.is_empty()) {
-        ctx = b.call(Area::Memory, "recall", json!({"ns": ns, "query": name, "format": "context", "budget": 600}))?;
+        ctx = call(Area::Memory, "recall", json!({"ns": ns, "query": name, "format": "context", "budget": 600}))?;
     }
     let mut text = String::new();
     if let Some(fs) = facts.as_array().filter(|a| !a.is_empty()) {
