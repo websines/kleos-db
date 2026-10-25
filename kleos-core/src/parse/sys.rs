@@ -125,6 +125,10 @@ pub enum SysOp {
     Doc(String, serde_json::Value),
     /// kleos fork: `::ontology <op> {opts}` (docs/specs/ontology.md).
     Ontology(String, serde_json::Value),
+    /// kleos fork: `::tenant <op> {opts}` (docs/specs/tenancy.md).
+    Tenant(String, serde_json::Value),
+    /// kleos fork: `::principal <op> {as: ctx, …}` (docs/specs/tenancy.md).
+    Principal(String, serde_json::Value),
 }
 
 /// `::flow <op> [{opts}]`.
@@ -663,6 +667,14 @@ pub(crate) fn parse_sys(
         },
         Rule::ontology_op => match parse_flow_op(inner, param_pool)? {
             SysOp::Flow(v, a) => SysOp::Ontology(v, a),
+            _ => unreachable!(),
+        },
+        Rule::tenant_op => match parse_flow_op(inner, param_pool)? {
+            SysOp::Flow(v, a) => SysOp::Tenant(v, a),
+            _ => unreachable!(),
+        },
+        Rule::principal_op => match parse_flow_op(inner, param_pool)? {
+            SysOp::Flow(v, a) => SysOp::Principal(v, a),
             _ => unreachable!(),
         },
         Rule::compact_op => SysOp::Compact,

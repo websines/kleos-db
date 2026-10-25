@@ -77,6 +77,11 @@ pub(crate) struct Scope {
     pub(crate) levels: Vec<Level>,
     /// The namespace is a discarded branch (writes are refused).
     pub(crate) discarded: bool,
+    /// A tenancy read union (docs/specs/tenancy.md): the levels are the
+    /// scope namespaces a principal may read, narrowest first, each read
+    /// whole at the read time. Ids are disjoint across them; nothing is
+    /// copied up (writes through a union are refused).
+    pub(crate) union: bool,
 }
 
 impl Scope {
@@ -87,6 +92,16 @@ impl Scope {
                 cut: None,
             }],
             discarded: false,
+            union: false,
+        }
+    }
+
+    /// The read union of scope namespaces `nss` (narrowest first).
+    pub(crate) fn union(nss: &[String]) -> Self {
+        Scope {
+            levels: nss.iter().map(|n| Level { ns: n.clone(), cut: None }).collect(),
+            discarded: false,
+            union: nss.len() > 1,
         }
     }
 
@@ -134,6 +149,19 @@ impl Scope {
     ) -> String {
         let cs = cols.iter().map(|c| format!(", {c}")).join("");
         let mut out = String::new();
+        if self.union {
+            // disjoint ids, no cuts: one rule over the scope namespaces
+            p.push(("ulin", DataValue::List(self.levels.iter().map(|l| s(&l.ns)).collect())));
+            let at = match t {
+                None => "'NOW'".to_string(),
+                Some(x) => {
+                    p.push(("ut", DataValue::from(x)));
+                    "$ut".to_string()
+                }
+            };
+            out.push_str(&format!("{name}[id, ons{cs}] := {seed}ons in $ulin, *{MEM}{{ns: ons, id{cs} @ {at}}}\n"));
+            return out;
+        }
         for i in 0..self.levels.len() {
             p.push((BL[i], s(&self.levels[i].ns)));
             let at = match self.level_at(i, t) {
@@ -403,6 +431,12 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// The lineage of `ns` (spec "Lineage"). A namespace with no branch row
     /// is plain.
     pub(crate) fn mem_scope(&'s self, ns: &str) -> Result<Scope> {
+        // a principal's read view: the union of its scopes
+        if let Some(u) = self.view.as_ref().and_then(|v| v.union.as_ref()) {
+            if u.len() > 1 && u.first().map(|x| x.as_str()) == Some(ns) {
+                return Ok(Scope::union(u));
+            }
+        }
         let mut sc = Scope::plain(ns);
         let mut cur = ns.to_string();
         let mut cut: Option<i64> = None;
@@ -520,6 +554,9 @@ impl<'s, S: Storage<'s>> Db<S> {
     ) -> Result<Vec<String>> {
         if sc.is_plain() || ids.is_empty() {
             return Ok(vec![]);
+        }
+        if sc.union {
+            bail!("a read union of scopes cannot be written through");
         }
         let mut copied = vec![];
         let now = now_micros();

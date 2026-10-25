@@ -228,6 +228,9 @@ crossbeam = "0.8.4"
 ndarray = { version = "0.15.6", features = ["serde"] }
 half = "2.4.1"
 sha2 = "0.10.8"
+# Tenancy (docs/specs/tenancy.md): scope-level authorization and audit pseudonyms.
+cedar-policy = { version = "4.14", default-features = false }
+hmac = "0.12"
 kleos-infer = { path = "../kleos-infer", version = "0.1.0", optional = true, default-features = false }
 kleos-engram = { path = "../kleos-engram", version = "0.1.0", optional = true }
 kleos-docs = { path = "../kleos-docs", version = "0.1.0", optional = true, default-features = false, features = ["ocr", "pdf"] }
