@@ -45,22 +45,20 @@ Work shipped in waves; each wave merged with targeted tests and before/after mea
 | 4 | Durable workflows `::flow` with retries, schedules, signals and child workflows (F4, F5); memory branches: fork, diff, merge, rewind (E9) |
 | 5 | Ontologies that build and maintain themselves (cardinality-driven supersession, learning, maintenance, history and undo); a memory budget and concurrency lanes; the documents pipeline (G2): a Rust port of Indra OCR, Chonkie-style chunking, durable ingestion with page citations; EmbeddingGemma 2 as the default embedder, with `::memory reembed` |
 | 6 | Graph recall: personalized PageRank (C4) and inferred ontology links, on by default; units of typed literals; consolidation into entity profiles and session summaries, automatic by default (E7); the stateless MCP server (protocol 2026-07-28), the `kleos` CLI and agent skills (J3); the TypeScript SDK (J2); native OCR kernels and streaming ingestion (500-page scanned book 590 → 217 s); hybrid fusion retuned on memory data; ontology quality fixes |
-| 7 | Tenancy and access (E5, K2): orgs, workspaces and nested teams; humans and agents as principals with actor chains recorded on every write and read; Cedar scope filtering inside vector, full-text and graph search; per-workspace partitions and workers; per-scope derived data and BM25 statistics; session scopes; audited promotion and approvals; an in-transaction hash-chained audit log; erasure with crypto-shredding; JWT/OIDC with JWKS, DPoP, SPIFFE, Transaction Tokens and RFC 8693 token exchange; every MCP tool as the principal; OpenTelemetry spans |
+| 7 | Tenancy and access (E5, K2): orgs, workspaces and nested teams; humans and agents as principals with actor chains recorded on every write and read; Cedar scope filtering inside vector, full-text and graph search; per-workspace partitions and workers; per-scope derived data and BM25 statistics; session scopes; audited promotion and approvals; an in-transaction hash-chained audit log; erasure with crypto-shredding; JWT/OIDC with JWKS, DPoP, SPIFFE, Transaction Tokens and RFC 8693 token exchange; every MCP tool as the principal; OpenTelemetry spans. The **skill library** (E8, [spec](docs/specs/skills.md)): versioned Agent Skills with digests, task-to-skill routing within a token budget (at 1,000 skills an LLM choosing from kleos's top 5 picks the right skill 85% of the time, against 7% from a flat list), skills over MCP (SEP-2640), outcome tracking with automatic rollback and retirement, a scanner and ed25519 signing, learning and optimizer workflows, promotion and a registry. The **Postgres coexistence connector** ([spec](docs/specs/pg-connector.md), [guide](docs/guides/postgres.md)): logical replication into memory and ontology with exactly-once resume, catalog-inferred mapping, ledger-based write-back from workflows, a Debezium adapter, and DataFusion live queries. Close-out: v2 over-typing gate, summaries that skip replaced values, denser profiles, phrase-aware ontology labels and team subjects, OCR of image regions on mixed pages, DNS pinning for documents by URL, TypeScript live subscriptions, MCP `subscriptions/listen` |
 
-## In progress (wave 7)
+## In progress
 
-Tenancy and access (E5, K2) shipped on 2026-10-25 ([spec](docs/specs/tenancy.md)): see the wave 7 row above.
-
-
-| Work | What it adds | Spec (lands with the branch) |
-|---|---|---|
-| **Skill library** (E8) | Procedural memory: Agent Skills with immutable versions and digests, task-to-skill routing within a token budget, skills over MCP (SEP-2640), success tracking, automatic rollback and retirement, a security scanner and signing, a learning loop from successful runs, a SkillOpt-style optimizer, promotion and a registry | `docs/specs/skills.md` |
-| **Postgres coexistence connector** | Postgres logical replication into memory and ontology (rows become entities, foreign keys become edges, updates supersede, commit time is valid time), exactly-once resume, ledger-based write-back from workflows, a Debezium event adapter for other databases, and live joins through DataFusion | `docs/specs/pg-connector.md` |
+Nothing is running; work pauses after wave 7.
 
 ## Next
 
-- **Quality close-out:** re-measure LongMemEval QA with the lift-only graph re-rank; v2
-  over-typing; summaries that drop superseded claims; a benchmark for inferred-link recall.
+- **Recall at scale:** default recall scans every fact of a namespace (about 1.4 s at 385k
+  facts, found with Postgres data); index the fact lookups so large stores stay fast.
+- **Re-measure:** LongMemEval and LoCoMo QA, knowledge-update and life-stream checks on the
+  current defaults (wave 7 changes were tested, not re-benchmarked).
+- **Skill optimizer with real models:** robust edit proposals (structured output or diffs with
+  retries); today the full improve-and-supersede loop is verified only against a mock endpoint.
 - **SQL front door:** DataFusion read-only SQL over kleos snapshots and the Postgres wire protocol
   (`pgwire`), so psql, drivers, ORMs and BI tools connect; it builds on tenancy so SQL respects
   the same access rules (H4, I5).

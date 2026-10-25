@@ -41,12 +41,22 @@ server. Agents use it through a memory API that needs no query language:
   subscriptions that push changes.
   ([workflows](docs/specs/durable-workflows.md), [branches](docs/specs/memory-branches.md),
   [subscriptions](docs/specs/live-subscriptions.md))
+- **Tenancy and identity:** orgs, workspaces and teams; humans and agents are
+  both principals, every write and read records who acted for whom, and access
+  rules apply inside vector, full-text and graph search, with a hash-chained
+  audit log. ([spec](docs/specs/tenancy.md))
+- **Skill library:** procedural memory for agents: versioned Agent Skills,
+  routing to the right skill per task, outcome tracking with automatic rollback,
+  scanning and signing, learning from successful runs, served over MCP.
+  ([spec](docs/specs/skills.md))
+- **Alongside Postgres:** logical replication turns Postgres rows into memory
+  and ontology facts with history; workflows write back exactly once.
+  ([spec](docs/specs/pg-connector.md), [guide](docs/guides/postgres.md))
 - **Agent surfaces:** a stateless MCP server, a CLI, Agent Skills, and the
   [TypeScript SDK](docs/sdk/typescript/). See "Agents" below.
 
-Measurements are in [`docs/benchmarks/memory.md`](docs/benchmarks/memory.md).
-In progress: tenancy with human and agent identity at every level, a skill library,
-and a Postgres coexistence connector; see [`ROADMAP.md`](ROADMAP.md).
+Measurements are in [`docs/benchmarks/`](docs/benchmarks/); what comes next is in
+[`ROADMAP.md`](ROADMAP.md).
 
 ## What kleos adds over CozoDB
 
@@ -263,7 +273,12 @@ kleos server --mcp            # POST /mcp behind the server's auth
 
 - **MCP tools:** `recall`, `remember`, `forget`, `reflect`, `entity_profile`,
   `doc_add`, `doc_status`, `flow`, `branch`, `ontology`, `reembed`,
-  `consolidate` (and a read-only `query` with `--allow-query`). Destructive calls confirm through MCP's multi round-trip
+  `consolidate`, the skill tools `find_skills`, `get_skill`,
+  `record_skill_outcome`, `propose_skill` and `skill_admin` (plus SEP-2640
+  `skills/list` and `skills/get`), `pg_status` and `pg_query` with the Postgres
+  connector, `subscriptions/listen` for change notifications, and a read-only
+  `query` with `--allow-query`. With `kleos server --tenancy` every tool runs
+  as the authenticated principal. Destructive calls confirm through MCP's multi round-trip
   requests; large documents return a task (`io.modelcontextprotocol/tasks`).
   Clients of earlier MCP revisions (`initialize`) are served too.
 - **Skills:** [`skills/`](skills) holds SKILL.md files that teach an agent when
