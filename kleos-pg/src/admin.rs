@@ -186,6 +186,9 @@ pub struct SlotInfo {
     pub failover: Option<bool>,
     pub inactive_since: Option<String>,
     pub current_lsn: Option<String>,
+    /// The database the slot decodes (slot names are cluster-wide).
+    pub database: Option<String>,
+    pub plugin: Option<String>,
 }
 
 impl SlotInfo {
@@ -210,7 +213,7 @@ pub async fn slot_info(pg: &Client, slot: &str, version: i32) -> Result<Option<S
         &format!(
             "SELECT active, wal_status, restart_lsn::text, confirmed_flush_lsn::text, \
                     pg_wal_lsn_diff({cur}, confirmed_flush_lsn)::int8, pg_wal_lsn_diff({cur}, restart_lsn)::int8, \
-                    safe_wal_size, {extra}, ({cur})::text \
+                    safe_wal_size, {extra}, ({cur})::text, database, plugin \
              FROM pg_replication_slots WHERE slot_name = {}",
             lit(slot)
         ),
@@ -230,6 +233,8 @@ pub async fn slot_info(pg: &Client, slot: &str, version: i32) -> Result<Option<S
             failover: g(8).map(|v| v == "true"),
             inactive_since: g(9),
             current_lsn: g(10),
+            database: g(11),
+            plugin: g(12),
         }
     }))
 }

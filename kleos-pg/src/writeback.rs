@@ -266,7 +266,14 @@ async fn run(pool: Pool<Mgr>, cfg: Arc<PgConfig>, idem: String, wf: Option<Strin
     if let Some(row) = tx
         .query_opt(&format!("SELECT result FROM {ledger} WHERE idem_key = $1"), &[&TextParam(Some(idem.clone()))])
         .await
-        .map_err(conn::pg_err)?
+        .map_err(|e| match e.code() {
+            Some(c) if c.code() == "42P01" => miette!(
+                "the write-back ledger {} does not exist: run `kleos pg init` (or create it: {})",
+                cfg.writeback.ledger,
+                crate::admin::ledger_ddl(&cfg)
+            ),
+            _ => conn::pg_err(e),
+        })?
     {
         let stored: Option<Value> = row.get(0);
         tx.commit().await.map_err(conn::pg_err)?;

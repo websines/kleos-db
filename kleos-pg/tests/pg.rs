@@ -69,7 +69,9 @@ fn sql_rows(rt: &tokio::runtime::Runtime, url: &str, q: &str) -> Vec<Vec<Option<
 
 fn cfg(url: &str, extra: &str) -> PgConfig {
     let batch = if extra.contains("batch:") { "" } else { "batch: {max_ms: 20}\n" };
-    PgConfig::parse(&format!("source: crm\nconnection: {url}\n{batch}status_secs: 1\n{extra}")).unwrap()
+    // slot names are cluster-wide: one per test database
+    let dbname = url.rsplit('/').next().unwrap_or("x").split('?').next().unwrap_or("x");
+    PgConfig::parse(&format!("source: crm\nconnection: {url}\nslot: s_{dbname}\n{batch}status_secs: 1\n{extra}")).unwrap()
 }
 
 fn q(db: &DbInstance, script: &str) -> Vec<Vec<DataValue>> {
@@ -329,6 +331,9 @@ fn ddl_change_remaps() {
     wait("the drop", 30, || fact(&db, "pg:crm/public.customers/1", "customers.city").as_deref() == Some("Faro"));
     assert_eq!(fact(&db, "pg:crm/public.customers/1", "customers.plan"), None);
     assert_eq!(fact(&db, "pg:crm/public.customers/2", "customers.plan"), None);
+    // a column added with a default reaches existing rows without WAL: the table is resynced
+    sql(&rt, &url, "ALTER TABLE customers ADD COLUMN tier text DEFAULT 'std'; UPDATE customers SET city = 'Braga' WHERE id = 1");
+    wait("the default on untouched rows", 60, || fact(&db, "pg:crm/public.customers/2", "customers.tier").as_deref() == Some("std"));
     // a new table is picked up (copied through a resync), then streams
     sql(&rt, &url, "CREATE TABLE invoices (id int PRIMARY KEY, customer_id int REFERENCES customers(id), total int); INSERT INTO invoices VALUES (1, 1, 100)");
     kleos_pg::pg_call(&db, "resync", json!({"source": "crm", "tables": ["public.invoices"]})).unwrap();
@@ -355,7 +360,7 @@ fn lost_slot_resyncs_and_reconciles() {
     h.stop();
     wait("the stop", 30, || h.live.lock().unwrap().state == "stopped");
     // while stopped: the slot is lost and rows change
-    sql(&rt, &url, "SELECT pg_drop_replication_slot('kleos_crm'); DELETE FROM customer_tags WHERE customer_id = 2; DELETE FROM orders WHERE customer_id = 2; DELETE FROM customers WHERE id = 2; UPDATE customers SET plan = 'gold' WHERE id = 1");
+    sql(&rt, &url, "SELECT pg_drop_replication_slot('s_kt_lost'); DELETE FROM customer_tags WHERE customer_id = 2; DELETE FROM orders WHERE customer_id = 2; DELETE FROM customers WHERE id = 2; UPDATE customers SET plan = 'gold' WHERE id = 1");
     let h = start(&rt, cfg(&url, ""), &db);
     wait("the resync", 60, || fact(&db, "pg:crm/public.customers/1", "customers.plan").as_deref() == Some("gold"));
     wait("the reconcile", 30, || facts(&db, "pg:crm/public.customers/2").is_empty());
@@ -528,4 +533,35 @@ fn debezium_adapter() {
     kleos_pg::debezium::ingest(&db, "shop", mongo).unwrap();
     let r = q(&db, "?[o] := *kleos_onto_fact{ns: 'default', s: 'pg:shop/crm.accounts/65a1', p: 'crm.accounts.seats', o @ 'NOW'}");
     assert_eq!(r[0][0].get_str(), Some("12"));
+}
+
+#[cfg(feature = "query")]
+#[test]
+fn live_query_joins_postgres_and_kleos() {
+    if base_url().is_none() {
+        return;
+    }
+    let rt = rt();
+    let url = fresh_db(&rt, "query");
+    sql(&rt, &url, SCHEMA);
+    let db = DbInstance::new("mem", "", "").unwrap();
+    let h = start(&rt, cfg(&url, ""), &db);
+    wait("the snapshot", 60, || ready(&db));
+    // filter and limit pushed to Postgres
+    let r = kleos_pg::pg_call(&db, "query", json!({"source": "crm", "sql": "SELECT name FROM pg.public.customers WHERE plan = 'pro' LIMIT 1", "explain": true})).unwrap();
+    assert_eq!(r["rows"], json!([["Acme Corp"]]), "{r}");
+    let plan = r["plan"].as_str().unwrap();
+    assert!(plan.contains("plan = 'pro'") || plan.contains("plan") && plan.contains("LIMIT"), "the filter runs in Postgres: {plan}");
+    // a live Postgres table joined with kleos facts (equality on p pushed into the kleos scan)
+    let r = kleos_pg::pg_call(
+        &db,
+        "query",
+        json!({"source": "crm", "sql": "SELECT c.name, f.o AS city FROM pg.public.customers c JOIN kleos.facts f \
+               ON f.s = concat('pg:crm/public.customers/', CAST(c.id AS VARCHAR)) WHERE f.p = 'customers.city' ORDER BY c.name"}),
+    )
+    .unwrap();
+    assert_eq!(r["rows"], json!([["Acme Corp", "Lisbon"], ["Globex", "Porto"]]), "{r}");
+    // read-only
+    assert!(kleos_pg::pg_call(&db, "query", json!({"source": "crm", "sql": "DELETE FROM pg.public.customers"})).is_err());
+    h.stop();
 }

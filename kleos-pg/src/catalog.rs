@@ -96,6 +96,10 @@ pub struct ColumnInfo {
     /// The column's own type OID (what pgoutput's Relation message carries).
     #[serde(default)]
     pub atttypid: u32,
+    /// Added with a default that existing rows read without a rewrite
+    /// (`atthasmissing`): their values never went through the WAL.
+    #[serde(default)]
+    pub has_missing: bool,
     pub kind: TypeKind,
     pub not_null: bool,
     #[serde(default)]
@@ -228,7 +232,7 @@ pub async fn read_catalog(client: &Client, version: i32, wanted: &(dyn Fn(&str) 
                     CASE WHEN t.typtype = 'd' THEN t.typbasetype ELSE a.atttypid END, \
                     coalesce(bt.typcategory, t.typcategory), a.attnotnull, col_description(a.attrelid, a.attnum), \
                     (SELECT string_agg(e.enumlabel, '\u{1f}' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = a.atttypid), \
-                    a.atttypid \
+                    a.atttypid, a.atthasmissing \
              FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
              LEFT JOIN pg_type bt ON bt.oid = t.typbasetype AND t.typtype = 'd' \
              WHERE a.attrelid IN ({oids}) AND a.attnum > 0 AND NOT a.attisdropped \
@@ -248,6 +252,7 @@ pub async fn read_catalog(client: &Client, version: i32, wanted: &(dyn Fn(&str) 
             type_name: g(3),
             type_oid: base,
             atttypid: g(9).parse().unwrap_or(0),
+            has_missing: g(10) == "t",
             kind: TypeKind::of(base, &g(5)),
             not_null: g(6) == "t",
             comment: r[7].clone(),

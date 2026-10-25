@@ -416,6 +416,7 @@ pub fn ingest(db: &DbInstance, src: &str, body: Value) -> Result<Value> {
                     type_name: types.get(c).and_then(|f| f.get("type")).and_then(|x| x.as_str()).unwrap_or("json").to_string(),
                     type_oid: 0,
                     atttypid: 0,
+                    has_missing: false,
                     kind,
                     not_null: false,
                     comment: None,

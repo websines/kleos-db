@@ -490,6 +490,7 @@ impl McpServer {
                 "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}
             }),
         ];
+        tools.extend(crate::pg::mcp_tools(self.allow_query));
         if self.allow_query {
             tools.push(json!({
                 "name": "query",
@@ -513,10 +514,10 @@ impl McpServer {
             Some(_) => return Err(RpcError::new(INVALID_PARAMS, "'arguments' must be an object")),
         };
         let known = ["recall", "remember", "forget", "reflect", "entity_profile", "doc_add", "doc_status", "flow", "branch", "ontology", "reembed", "consolidate"];
-        if !known.contains(&name) && !(name == "query" && self.allow_query) {
+        if !known.contains(&name) && !(name == "query" && self.allow_query) && !crate::pg::is_mcp_tool(name, self.allow_query) {
             return Err(RpcError::new(INVALID_PARAMS, format!("Unknown tool: {name}")));
         }
-        let read_tool = matches!(name, "recall" | "reflect" | "entity_profile" | "doc_status" | "query")
+        let read_tool = matches!(name, "recall" | "reflect" | "entity_profile" | "doc_status" | "query" | "pg_status" | "pg_query")
             || (name == "branch" && matches!(args.get("action").and_then(|a| a.as_str()), Some("diff" | "list")))
             || (name == "flow" && matches!(args.get("action").and_then(|a| a.as_str()), Some("status" | "list")))
             || (name == "ontology" && matches!(args.get("action").and_then(|a| a.as_str()), Some("list" | "facts" | "infer" | "history")));
@@ -611,6 +612,10 @@ impl McpServer {
                 self.entity_profile(&ns, ename)
             }
             "doc_add" => self.doc_add(&ns, args, era),
+            "pg_status" | "pg_query" => match crate::pg::mcp_call(b, name, args) {
+                Ok(v) => done(v),
+                Err(e) => tool_error(e),
+            },
             "doc_status" => match args.get("doc").and_then(|v| v.as_str()) {
                 Some(doc) => match b.call(Area::Doc, "get", json!({"ns": ns, "doc": doc})) {
                     Ok(Value::Null) => tool_error(format!("no document '{doc}' in namespace '{ns}'")),

@@ -216,6 +216,14 @@ impl Connector {
         let inf2 = inferred.clone();
         let (_version, mapping) = blocking(move || crate::ops::sync_mapping(&db, &c4, inf2, "catalog at start")).await?;
         let mapping = Arc::new(RwLock::new(mapping));
+        // the write-back ledger, when flows may write
+        if !cfg.writeback.allow.is_empty() {
+            match admin::ensure_ledger(&pg, &cfg).await {
+                Ok(true) => self.log("info", &format!("created the write-back ledger {}", cfg.writeback.ledger)).await,
+                Ok(false) => {}
+                Err(e) => self.log("warn", &format!("{e}")).await,
+            }
+        }
         // publication (tables + the ledger, so write-back echoes are seen)
         let mut pub_tables: Vec<String> = mapping.read().unwrap().tables.values().filter(|t| !t.is_skip()).map(|t| t.table.clone()).collect();
         if catalog::table_exists(&pg, &cfg.writeback.ledger).await? {
@@ -240,6 +248,16 @@ impl Connector {
         let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Done>();
         let slot = cfg.slot();
         let slot_now = admin::slot_info(&pg, &slot, version).await?;
+        if let Some(si) = &slot_now {
+            let here = simple_rows(&pg, "SELECT current_database()").await?.first().and_then(|r| r[0].clone());
+            if si.database != here || si.plugin.as_deref() != Some("pgoutput") {
+                return Err(miette!(
+                    "replication slot {slot} belongs to database {:?} ({:?}), not this one; slot names are cluster-wide: set `slot:` in the config",
+                    si.database,
+                    si.plugin
+                ));
+            }
+        }
         let states = {
             let db = self.db.clone();
             let src = cfg.source.clone();
@@ -314,6 +332,7 @@ impl Connector {
         if let Some((snap, c, resync, ts)) = copy_plan {
             self.shared.set(|l| l.state = "snapshot".into());
             self.copy_tables(&pgcfg, &snap, &ts, resync, c, &ctx, &work_tx).await?;
+            drain(&mut done_rx)?;
             for t in &ts {
                 ctx.skip_before.insert(t.clone(), c);
             }
@@ -331,6 +350,7 @@ impl Connector {
             if !need_resync.is_empty() {
                 drop(repl);
                 self.resync(&pgcfg, &need_resync, &mut ctx, &work_tx).await?;
+                drain(&mut done_rx)?;
                 need_resync.clear();
                 repl = conn::connect_replication(&pgcfg).await?;
             }
@@ -797,8 +817,13 @@ impl Connector {
                     Some(_) => format!("schema of {table} changed (dropped {:?})", sc.dropped),
                 };
                 self.log("info", &msg).await;
-                if known.is_none() {
-                    // its existing rows come from a resync; changes until then are skipped
+                let added_default = known.as_ref().map_or(false, |k| {
+                    info.columns.iter().any(|c| c.has_missing && !k.columns.iter().any(|o| o.name == c.name))
+                });
+                if known.is_none() || added_default {
+                    // existing rows come from a resync (a new table, or a column
+                    // added with a default, which rewrote no row); changes until
+                    // then are skipped
                     ctx.skip_before.insert(table.to_string(), u64::MAX);
                     ctx.resync.insert(table.to_string());
                 }
@@ -895,6 +920,18 @@ async fn send_status(stream: std::pin::Pin<&mut LogicalReplicationStream>, write
         .standby_status_update(PgLsn::from(write), PgLsn::from(flush), PgLsn::from(flush), now, 0)
         .await
         .map_err(conn::pg_err)
+}
+
+/// Consume the writer's reports of snapshot batches (all in before the
+/// copy's last barrier), so the stream's in-flight count starts at zero: an
+/// idle acknowledgement must never pass a batch still being written.
+fn drain(done: &mut mpsc::UnboundedReceiver<Done>) -> Result<()> {
+    while let Ok(d) = done.try_recv() {
+        if let Done::Error(e) = d {
+            return Err(miette!("{e}"));
+        }
+    }
+    Ok(())
 }
 
 async fn send(work: &mpsc::Sender<Work>, w: Work) -> Result<()> {

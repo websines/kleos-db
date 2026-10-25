@@ -611,6 +611,7 @@ mod tests {
             type_name: if kind == TypeKind::Text { "text".into() } else { "integer".into() },
             type_oid: 0,
             atttypid: 0,
+            has_missing: false,
             kind,
             not_null: false,
             comment: None,

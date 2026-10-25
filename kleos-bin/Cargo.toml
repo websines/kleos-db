@@ -56,6 +56,16 @@ infer = ["kleos/infer"]
 docs = ["kleos/docs"]
 ## `infer` plus Apple-GPU (Metal) kernels; macOS only
 infer-metal = ["infer", "kleos/infer-metal"]
+## The Postgres coexistence connector (kleos-pg; docs/specs/pg-connector.md):
+## `kleos server --pg-cdc <config.yaml>`, `kleos pg …`, `POST /pg/:op`, the
+## Debezium endpoint `POST /pg/debezium/:source` and the `pg_status` MCP tool.
+pg-cdc = ["dep:kleos-pg"]
+## The `::flow` action `pg`: agent writes to Postgres, exactly once in effect
+## (an idempotency ledger in the same Postgres transaction).
+flow-pg = ["pg-cdc"]
+## Live queries joining Postgres tables with kleos relations (DataFusion;
+## `kleos pg query`, `POST /pg/query`, the `pg_query` MCP tool).
+pg-query = ["pg-cdc", "kleos-pg/query"]
 ## Enables the [Sled](https://github.com/spacejam/sled) backend
 storage-sled = ["kleos/storage-sled"]
 ## Enables the [TiKV](https://tikv.org/) client backend
@@ -65,6 +75,7 @@ storage-tikv = ["kleos/storage-tikv"]
 
 [dependencies]
 kleos = { version = "0.18.0", path = "../kleos-core", default-features = false }
+kleos-pg = { path = "../kleos-pg", optional = true }
 clap = { version = "4.5.4", features = ["derive"] }
 env_logger = "0.11.3"
 log = "0.4.21"

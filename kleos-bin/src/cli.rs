@@ -134,6 +134,11 @@ pub enum CliCmd {
         #[command(flatten)]
         conn: ConnArgs,
     },
+    /// Postgres coexistence: CDC status, resync, mapping, live queries (feature pg-cdc)
+    Pg {
+        #[command(subcommand)]
+        cmd: crate::pg::PgCmd,
+    },
     /// Serve MCP (protocol 2026-07-28) over stdio
     Mcp {
         /// Offer the read-only `query` tool
@@ -553,6 +558,11 @@ pub fn run(cmd: CliCmd) -> Result<(), String> {
             let v = ctx.backend.query(&script, &params)?;
             print(&ctx, &v, |_| None);
         }
+        CliCmd::Pg { cmd } => {
+            let (ctx, _) = connect(cmd.conn())?;
+            let v = crate::pg::run(cmd, &ctx.backend)?;
+            print(&ctx, &v, |_| None);
+        }
         CliCmd::Mcp { allow_query, conn } => {
             let (ctx, _) = connect(&conn)?;
             let server = crate::mcp::McpServer::new(ctx.backend, ctx.ns, allow_query);
@@ -593,6 +603,7 @@ impl CliCmd {
             | CliCmd::Profile { conn, .. }
             | CliCmd::Query { conn, .. }
             | CliCmd::Mcp { conn, .. } => j(conn),
+            CliCmd::Pg { cmd } => j(cmd.conn()),
             CliCmd::Doc { cmd } => match cmd {
                 DocCmd::Add { conn, .. } | DocCmd::Status { conn, .. } | DocCmd::List { conn } => j(conn),
             },
