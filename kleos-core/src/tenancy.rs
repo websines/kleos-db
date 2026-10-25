@@ -32,7 +32,10 @@ use smartstring::{LazyCompact, SmartString};
 
 use crate::bail;
 use crate::data::value::DataValue;
+use crate::data::tuple::TupleT;
 use crate::runtime::db::{Db, NamedRows, ScriptMutability};
+use crate::runtime::relation::try_decode_tuple_from_kv;
+use crate::runtime::transact::{CommitAudit, SessionTx};
 use crate::storage::Storage;
 use crate::JsonData;
 
@@ -40,6 +43,8 @@ use crate::JsonData;
 pub(crate) mod authz;
 #[path = "tenancy_mem.rs"]
 pub(crate) mod mem;
+#[path = "tenancy_otel.rs"]
+pub mod otel;
 
 pub use authz::DEFAULT_POLICIES;
 
@@ -55,6 +60,9 @@ pub const TN_KEY: &str = "kleos_tn_key";
 pub const TN_PROMOTION: &str = "kleos_tn_promotion";
 pub const TN_AUDIT: &str = "kleos_tn_audit";
 pub const TN_META: &str = "kleos_tn_meta";
+/// The head of each workspace's audit chain, read and written in the
+/// transaction that appends an event.
+pub const TN_AUDIT_HEAD: &str = "kleos_tn_audit_head";
 
 /// The implicit org and workspace of a store (the unpartitioned store).
 pub const DEFAULT: &str = "default";
@@ -90,6 +98,7 @@ const DDL: &[(&str, &str)] = &[
          relations: [String], scope_set: String?, decision: Json, otel: Json, prev: String, hash: String}",
     ),
     (TN_META, "{key: String => value: Json}"),
+    (TN_AUDIT_HEAD, "{ws: String => seq: Int, hash: String}"),
 ];
 
 pub(crate) fn now_micros() -> i64 {
@@ -373,25 +382,13 @@ pub(crate) fn kind_alias(k: &str) -> Option<&'static str> {
 
 // ------------------------------------------------------------------ state
 
-/// A write committed in a principal view, waiting for its audit event.
-pub(crate) struct PendingWrite {
-    ws: String,
-    ts: i64,
-    chain: JsonValue,
-    accountable: Option<String>,
-    relations: Vec<String>,
-    otel: JsonValue,
-}
-
 /// Process-side tenancy state shared by every view of one `Db`.
 #[derive(Default)]
 pub struct TenancyState {
     /// Serialises audit appends in this process.
-    audit_lock: Mutex<()>,
-    /// Audit chain heads `(seq, hash)` by workspace.
-    heads: Mutex<HashMap<String, (i64, String)>>,
-    /// Writes committed in principal views, not yet in the audit log.
-    pending: Mutex<Vec<PendingWrite>>,
+    pub(crate) audit_lock: Mutex<()>,
+    /// Whether this process checked the control plane's version.
+    upgraded: std::sync::atomic::AtomicBool,
     /// ScopeSet cache: key → (epochs, scopes).
     pub(crate) scope_cache: Mutex<HashMap<String, ((i64, i64), Arc<Vec<ScopeKey>>)>>,
     /// Parsed policy sets by org: (text, policies).
@@ -480,7 +477,7 @@ where
     /// unpartitioned store). Idempotent.
     pub fn tenancy_ensure(&self) -> Result<()> {
         if self.tenancy_enabled() {
-            return Ok(());
+            return self.tenancy_upgrade();
         }
         let root = self.root_view();
         let have: BTreeSet<String> = root
@@ -506,6 +503,28 @@ where
         )?;
         self.new_key(&format!("org:{DEFAULT}"))?;
         self.tenancy.enabled.store(2, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Bring an older control plane up to date, once per process: the audit
+    /// head relation (filled from each chain's last event).
+    fn tenancy_upgrade(&self) -> Result<()> {
+        if self.tenancy.upgraded.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let root = self.root_view();
+        let have = root.run_script(&format!("?[ws] := *{TN_AUDIT_HEAD}{{ws}}"), Default::default(), ScriptMutability::Immutable).is_ok();
+        if !have {
+            let cols = DDL.iter().find(|x| x.0 == TN_AUDIT_HEAD).map(|x| x.1).unwrap_or_default();
+            root.run_script(&format!(":create {TN_AUDIT_HEAD} {cols}"), Default::default(), ScriptMutability::Mutable)?;
+            self.tn_q(
+                &format!(
+                    "last[ws, max(seq)] := *{TN_AUDIT}{{ws, seq}}\n\
+                     ?[ws, seq, hash] := last[ws, seq], *{TN_AUDIT}{{ws, seq, hash}} :put {TN_AUDIT_HEAD} {{ws => seq, hash}}"
+                ),
+                vec![],
+            )?;
+        }
         Ok(())
     }
 
@@ -781,30 +800,19 @@ where
         }))
     }
 
-    /// A write sink for a principal view: each committed write becomes a
-    /// pending audit event (drained by the next append).
-    pub(crate) fn write_sink(&self, ss: &Session) -> Result<Arc<dyn Fn(&[SmartString<LazyCompact>]) + Send + Sync>> {
-        let state = self.tenancy.clone();
-        let ws = ss.ws.clone();
-        let chain = self.audit_chain(ss)?;
+    /// The write audit of a principal view: every transaction that writes
+    /// appends its event inside itself, before it commits (no crash gap).
+    pub(crate) fn write_sink(&self, ss: &Session) -> Result<Arc<dyn CommitAudit>> {
         let accountable = match &ss.accountable {
             Some(a) => Some(self.pseudo_of(&ss.org, Some(a), a)?),
             None => None,
         };
-        let otel = self.otel_of(ss, "write", None)?;
-        Ok(Arc::new(move |names: &[SmartString<LazyCompact>]| {
-            let relations: Vec<String> = names
-                .iter()
-                .map(|n| n.split_once('@').map_or(n.as_str(), |x| x.1).to_string())
-                .collect();
-            state.pending.lock().unwrap_or_else(|e| e.into_inner()).push(PendingWrite {
-                ws: ws.clone(),
-                ts: now_micros(),
-                chain: chain.clone(),
-                accountable: accountable.clone(),
-                relations,
-                otel: otel.clone(),
-            });
+        Ok(Arc::new(WriteAudit {
+            state: self.tenancy.clone(),
+            ws: ss.ws.clone(),
+            chain: self.audit_chain(ss)?,
+            accountable,
+            otel: self.otel_of(ss, "write", None)?,
         }))
     }
 
@@ -823,11 +831,12 @@ where
         };
         let chain = self.audit_chain(ss)?;
         let otel = self.otel_of(ss, op, scope_set)?;
+        crate::tenancy::otel::span(op, &otel, &targets, &decision);
         self.audit_append(&ss.ws, op, chain, accountable, targets, vec![], scope_set, decision, otel, now_micros())
     }
 
-    /// Append the queued write events, then this one, to the workspace's
-    /// chain. `hash = SHA-256(prev ‖ canonical event)`.
+    /// Append one event to the workspace's chain, in a transaction of its
+    /// own. `hash = SHA-256(prev ‖ canonical event)`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn audit_append(
         &self,
@@ -842,100 +851,18 @@ where
         otel: JsonValue,
         ts: i64,
     ) -> Result<()> {
+        let ev = AuditEvent { op: op.to_string(), chain, accountable, targets, relations, scope_set: scope_set.map(|x| x.to_string()), decision, otel, ts };
+        let root = self.root_view();
         let _g = self.tenancy.audit_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let pending: Vec<PendingWrite> = std::mem::take(&mut *self.tenancy.pending.lock().unwrap_or_else(|e| e.into_inner()));
-        for w in pending {
-            self.audit_put(&w.ws, "write", w.chain, w.accountable, json!([]), w.relations, None, json!({}), w.otel, w.ts)?;
-        }
-        if op.is_empty() {
-            return Ok(());
-        }
-        self.audit_put(ws, op, chain, accountable, targets, relations, scope_set, decision, otel, ts)
+        let mut tx = root.transact_write()?;
+        append_in_tx(&mut tx, ws, &ev)?;
+        tx.commit_tx()
     }
 
-    /// Append the queued write events (e.g. before reading the log).
+    /// Kept for callers of the earlier queued design: events are now
+    /// written with their transactions, so there is nothing to flush.
     pub fn audit_flush(&self) -> Result<()> {
-        if !self.tenancy_enabled() {
-            return Ok(());
-        }
-        self.audit_append("", "", JsonValue::Null, None, JsonValue::Null, vec![], None, JsonValue::Null, JsonValue::Null, 0)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn audit_put(
-        &self,
-        ws: &str,
-        op: &str,
-        chain: JsonValue,
-        accountable: Option<String>,
-        targets: JsonValue,
-        relations: Vec<String>,
-        scope_set: Option<&str>,
-        decision: JsonValue,
-        otel: JsonValue,
-        ts: i64,
-    ) -> Result<()> {
-        for attempt in 0..8 {
-            let head = self.tenancy.heads.lock().unwrap_or_else(|e| e.into_inner()).get(ws).cloned();
-            let (seq, prev) = match head {
-                Some(h) if attempt == 0 => h,
-                _ => self.audit_head(ws)?,
-            };
-            let seq = seq + 1;
-            let ev = json!({
-                "ws": ws, "seq": seq, "ts": ts, "op": op, "chain": chain, "accountable": accountable,
-                "targets": targets, "relations": relations, "scope_set": scope_set, "decision": decision,
-                "otel": otel, "prev": prev,
-            });
-            let hash = event_hash(&prev, &ev);
-            // `:insert` fails on an existing key: another process appended
-            // first; re-read the head and retry
-            let r = self.tn_q(
-                &format!(
-                    "?[ws, seq, ts, op, chain, accountable, targets, relations, scope_set, decision, otel, prev, hash] <- \
-                       [[$ws, $seq, $ts, $op, $chain, $acc, $targets, $rels, $ss, $dec, $otel, $prev, $hash]] \
-                     :insert {TN_AUDIT} {{ws, seq => ts, op, chain, accountable, targets, relations, scope_set, decision, otel, prev, hash}}"
-                ),
-                vec![
-                    ("ws", s(ws)),
-                    ("seq", DataValue::from(seq)),
-                    ("ts", DataValue::from(ts)),
-                    ("op", s(op)),
-                    ("chain", json_dv(chain.clone())),
-                    ("acc", opt_s(&accountable)),
-                    ("targets", json_dv(targets.clone())),
-                    ("rels", str_list(&relations)),
-                    ("ss", scope_set.map(s).unwrap_or(DataValue::Null)),
-                    ("dec", json_dv(decision.clone())),
-                    ("otel", json_dv(otel.clone())),
-                    ("prev", s(&prev)),
-                    ("hash", s(&hash)),
-                ],
-            );
-            match r {
-                Ok(_) => {
-                    self.tenancy.heads.lock().unwrap_or_else(|e| e.into_inner()).insert(ws.to_string(), (seq, hash));
-                    return Ok(());
-                }
-                Err(e) if attempt < 7 => {
-                    let _ = e;
-                    self.tenancy.heads.lock().unwrap_or_else(|e| e.into_inner()).remove(ws);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
-    }
-
-    fn audit_head(&self, ws: &str) -> Result<(i64, String)> {
-        Ok(self
-            .tn_rows(
-                &format!("?[seq, hash] := *{TN_AUDIT}{{ws: $ws, seq, hash}} :order -seq :limit 1"),
-                vec![("ws", s(ws))],
-            )?
-            .first()
-            .map(|r| (r[0].get_int().unwrap_or(0), cell_str(&r[1]).unwrap_or_default()))
-            .unwrap_or((0, String::new())))
+        Ok(())
     }
 
     fn audit_events(&self, ws: &str, from: i64, limit: usize) -> Result<Vec<JsonValue>> {
@@ -1569,6 +1496,90 @@ where
             self.audit_append(ws, "erase", json!([]), None, json!({"memories": erased}), vec![], None, json!({"effect": "erased"}), json!({"gen_ai.operation.name": "erase"}), now_micros())?;
         }
         Ok(json!({"principal": id, "erased": erased, "scopes": scopes, "reassigned": sponsored}))
+    }
+}
+
+/// One audit event, before it is chained.
+pub(crate) struct AuditEvent {
+    pub op: String,
+    pub chain: JsonValue,
+    pub accountable: Option<String>,
+    pub targets: JsonValue,
+    pub relations: Vec<String>,
+    pub scope_set: Option<String>,
+    pub decision: JsonValue,
+    pub otel: JsonValue,
+    pub ts: i64,
+}
+
+/// Chain `ev` onto workspace `ws` inside `tx`: read the head (for update),
+/// write the event and the new head. The caller holds the audit lock.
+pub(crate) fn append_in_tx(tx: &mut SessionTx<'_>, ws: &str, ev: &AuditEvent) -> Result<()> {
+    let head = tx.get_relation(TN_AUDIT_HEAD, false)?;
+    let audit = tx.get_relation(TN_AUDIT, false)?;
+    let hk = vec![DataValue::from(ws)].encode_as_key(head.id);
+    let (seq, prev) = match tx.store_tx.get(&hk, true)? {
+        Some(v) => {
+            let t = try_decode_tuple_from_kv(&hk, &v, Some(3))?;
+            (t.get(1).and_then(|x| x.get_int()).unwrap_or(0), t.get(2).and_then(|x| x.get_str()).unwrap_or_default().to_string())
+        }
+        None => (0, String::new()),
+    };
+    let seq = seq + 1;
+    let j = json!({
+        "ws": ws, "seq": seq, "ts": ev.ts, "op": ev.op, "chain": ev.chain, "accountable": ev.accountable,
+        "targets": ev.targets, "relations": ev.relations, "scope_set": ev.scope_set, "decision": ev.decision,
+        "otel": ev.otel, "prev": prev,
+    });
+    let hash = event_hash(&prev, &j);
+    let row = vec![
+        DataValue::from(ws),
+        DataValue::from(seq),
+        DataValue::from(ev.ts),
+        DataValue::from(ev.op.as_str()),
+        json_dv(ev.chain.clone()),
+        opt_s(&ev.accountable),
+        json_dv(ev.targets.clone()),
+        str_list(&ev.relations),
+        opt_s(&ev.scope_set),
+        json_dv(ev.decision.clone()),
+        json_dv(ev.otel.clone()),
+        DataValue::from(prev.as_str()),
+        DataValue::from(hash.as_str()),
+    ];
+    let sp = Default::default();
+    tx.store_tx.put(&audit.encode_key_for_store(&row, sp)?, &audit.encode_val_for_store(&row, sp)?)?;
+    let hrow = vec![DataValue::from(ws), DataValue::from(seq), DataValue::from(hash.as_str())];
+    tx.store_tx.put(&head.encode_key_for_store(&hrow, sp)?, &head.encode_val_for_store(&hrow, sp)?)?;
+    Ok(())
+}
+
+/// The write audit of one principal view.
+struct WriteAudit {
+    state: Arc<TenancyState>,
+    ws: String,
+    chain: JsonValue,
+    accountable: Option<String>,
+    otel: JsonValue,
+}
+
+impl CommitAudit for WriteAudit {
+    fn stamp<'t>(&'t self, tx: &mut SessionTx<'_>, relations: &[SmartString<LazyCompact>]) -> Result<std::sync::MutexGuard<'t, ()>> {
+        let g = self.state.audit_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let relations: Vec<String> = relations.iter().map(|n| n.split_once('@').map_or(n.as_str(), |x| x.1).to_string()).collect();
+        let ev = AuditEvent {
+            op: "write".into(),
+            chain: self.chain.clone(),
+            accountable: self.accountable.clone(),
+            targets: json!([]),
+            relations,
+            scope_set: None,
+            decision: json!({}),
+            otel: self.otel.clone(),
+            ts: now_micros(),
+        };
+        append_in_tx(tx, &self.ws, &ev)?;
+        Ok(g)
     }
 }
 

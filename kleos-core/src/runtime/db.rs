@@ -275,8 +275,9 @@ pub(crate) struct ViewCtx {
     /// Written with every new memory (`kleos_mem_actor`): `[human, agent,
     /// run, chain]`.
     pub(crate) actor: Option<[DataValue; 4]>,
-    /// Told the relations each successful commit wrote (the write audit).
-    pub(crate) sink: Option<Arc<dyn Fn(&[SmartString<LazyCompact>]) + Send + Sync>>,
+    /// Writes the audit event of each committing transaction's writes
+    /// into that transaction.
+    pub(crate) sink: Option<Arc<dyn crate::runtime::transact::CommitAudit>>,
 }
 
 impl<S> Debug for Db<S> {

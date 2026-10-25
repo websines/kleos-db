@@ -110,11 +110,20 @@ pub struct SessionTx<'a> {
     /// (docs/specs/tenancy.md, "Partitions"): every stored relation name is
     /// routed to `<partition>@<name>`. `None`: the plain store.
     pub(crate) partition: Option<SmartString<LazyCompact>>,
-    /// Told the names of the relations a successful commit wrote (the
-    /// tenancy write audit). `None` outside principal views.
-    pub(crate) write_sink: Option<Arc<dyn Fn(&[SmartString<LazyCompact>]) + Send + Sync>>,
+    /// Writes the tenancy audit event of this transaction's writes into
+    /// the transaction itself, just before it commits. `None` outside
+    /// principal views.
+    pub(crate) write_sink: Option<Arc<dyn CommitAudit>>,
     /// Relations written so far, kept only when `write_sink` is set.
     pub(crate) written: BTreeSet<SmartString<LazyCompact>>,
+}
+
+/// The tenancy write audit (docs/specs/tenancy.md, "Audit"): called inside
+/// a transaction that wrote `relations`, right before it commits, so the
+/// event commits (or not) with the writes. The returned guard is held until
+/// the commit has finished (it serialises the audit chain in-process).
+pub(crate) trait CommitAudit: Send + Sync {
+    fn stamp<'t>(&'t self, tx: &mut SessionTx<'_>, relations: &[SmartString<LazyCompact>]) -> Result<std::sync::MutexGuard<'t, ()>>;
 }
 
 /// Relations that stay global in a partition view: the tenancy control
@@ -326,6 +335,15 @@ impl<'a> SessionTx<'a> {
     /// can escape the protocol. Taking the dirty set here also disarms
     /// [`Drop`], whose bump exists for transactions that never reach a commit.
     pub fn commit_tx(&mut self) -> Result<()> {
+        // the write audit goes into this very transaction (no crash gap)
+        let sink = self.write_sink.clone();
+        let _audit_guard = match &sink {
+            Some(a) if !self.written.is_empty() => {
+                let names: Vec<_> = std::mem::take(&mut self.written).into_iter().collect();
+                Some(a.stamp(self, &names)?)
+            }
+            _ => None,
+        };
         if self.dirty_relations.is_empty() {
             // Read-only transaction: nothing to invalidate, no lock to take.
             return self.commit_tx_inner();
@@ -340,12 +358,6 @@ impl<'a> SessionTx<'a> {
         // Live subscriptions (F1): only a commit that succeeded is announced.
         if res.is_ok() {
             self.live.notify_commit(&self.dirty_relations);
-            if let Some(sink) = &self.write_sink {
-                if !self.written.is_empty() {
-                    let names: Vec<_> = std::mem::take(&mut self.written).into_iter().collect();
-                    sink(&names);
-                }
-            }
         }
         self.dirty_relations.clear();
         res
