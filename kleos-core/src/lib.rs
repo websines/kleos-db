@@ -180,6 +180,12 @@ pub mod docs;
 #[cfg(feature = "docs-url")]
 pub(crate) mod docs_url;
 pub mod ontology;
+pub mod skill;
+pub mod skill_find;
+pub mod skill_learn;
+pub mod skill_scan;
+pub(crate) mod skill_share;
+pub mod skill_sign;
 pub mod ontology_units;
 pub mod ontology_type;
 pub(crate) mod ontology_ttl;
@@ -1575,6 +1581,56 @@ impl DbInstance {
         }
         Ok(r)
     }
+    /// The skill library (docs/specs/skills.md). See [crate::Db::skill_call].
+    /// A `learn` or `optimize` run that starts a workflow wakes the
+    /// in-process skill runner ([DbInstance::skill_kick]).
+    pub fn skill_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
+        let r = dispatch_db!(self, db => db.skill_call(op, args))?;
+        if matches!(op, "learn" | "optimize") {
+            self.skill_kick();
+        }
+        Ok(r)
+    }
+    /// Run started skill workflows (`skill.learn`, `skill.optimize`) on a
+    /// background thread of this process: it ticks the `skills` flow queue
+    /// with a long lease (their steps replay tasks through an LLM for minutes)
+    /// until nothing is due, then exits.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn skill_kick(&self) {
+        use std::sync::atomic::Ordering;
+        let st = dispatch_db!(self, db => db.skill_state.clone());
+        if !st.pending.load(Ordering::SeqCst) || st.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let db = self.clone();
+        let _ = std::thread::Builder::new().name("kleos-skills".to_string()).spawn(move || {
+            struct Clear(Arc<skill_learn::SkillState>);
+            impl Drop for Clear {
+                fn drop(&mut self) {
+                    self.0.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _clear = Clear(st.clone());
+            let args = serde_json::json!({"queues": [skill::SKILL_QUEUE], "schedules": false, "lease_ms": 3_600_000,
+                "worker": format!("skills-{}", std::process::id())});
+            loop {
+                st.pending.store(false, Ordering::SeqCst);
+                let ran = match db.flow_call("tick", args.clone()) {
+                    Ok(v) => v.get("ran").and_then(|r| r.as_array()).map(|r| r.len()).unwrap_or(0),
+                    Err(e) => {
+                        eprintln!("kleos skills: {e}");
+                        0
+                    }
+                };
+                if ran == 0 && !st.pending.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    #[inline]
+    pub fn skill_kick(&self) {}
     /// Ontologies (docs/specs/ontology.md). See [crate::Db::ontology_call].
     pub fn ontology_call(&self, op: &str, args: JsonValue) -> Result<JsonValue> {
         dispatch_db!(self, db => db.ontology_call(op, args))

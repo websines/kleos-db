@@ -228,6 +228,11 @@ crossbeam = "0.8.4"
 ndarray = { version = "0.15.6", features = ["serde"] }
 half = "2.4.1"
 sha2 = "0.10.8"
+# Skill library (docs/specs/skills.md): SKILL.md frontmatter is YAML, and
+# skill packages carry detached Ed25519 signatures in minisign format.
+serde_yaml = "0.9.34"
+ed25519-dalek = "2.1"
+blake2 = "0.10"
 kleos-infer = { path = "../kleos-infer", version = "0.1.0", optional = true, default-features = false }
 kleos-engram = { path = "../kleos-engram", version = "0.1.0", optional = true }
 kleos-docs = { path = "../kleos-docs", version = "0.1.0", optional = true, default-features = false, features = ["ocr", "pdf"] }

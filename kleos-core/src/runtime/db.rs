@@ -182,6 +182,8 @@ pub struct Db<S> {
     pub(crate) docs_state: Arc<crate::docs::DocsState>,
     /// The in-process automatic consolidation runner (memory_consolidate.rs).
     pub(crate) consol_state: Arc<crate::memory::consolidate::ConsolState>,
+    /// kleos fork: the in-process runner of the skill workflows (skill_learn.rs)
+    pub(crate) skill_state: Arc<crate::skill_learn::SkillState>,
     pub(crate) tokenizers: Arc<TokenizerCache>,
     #[cfg(not(target_arch = "wasm32"))]
     callback_count: Arc<AtomicU32>,
@@ -451,6 +453,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             #[cfg(feature = "docs")]
             docs_state: Default::default(),
             consol_state: Default::default(),
+            skill_state: Default::default(),
             tokenizers: Arc::new(Default::default()),
             #[cfg(not(target_arch = "wasm32"))]
             callback_count: Default::default(),
@@ -2791,6 +2794,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             SysOp::Flow(op, _) => bail!("`::flow {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::Doc(op, _) => bail!("`::doc {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::Ontology(op, _) => bail!("`::ontology {op}` must run as a script of its own, not inside an imperative block"),
+            SysOp::Skill(op, _) => bail!("`::skill {op}` must run as a script of its own, not inside an imperative block"),
             SysOp::ShowStoredQuery(name) => stored_queries::show(tx, name),
             SysOp::RunStoredQuery {
                 name,
@@ -3615,6 +3619,22 @@ impl<'s, S: Storage<'s>> Db<S> {
                     bail!("`::flow {op}` cannot run in read-only mode");
                 }
                 let out = self.flow_call(op, args.clone())?;
+                return Ok(crate::flow::flow_rows(out));
+            }
+            // kleos fork: the skill library runs its own scripts (docs/specs/skills.md)
+            SysOp::Skill(op, args) => {
+                let reads = ["get", "list", "history", "as_of", "find", "entry", "entries", "read", "dir", "stats", "traces", "evals", "scan",
+                             "proposals", "promotions", "keys", "verify", "package", "registry"];
+                if read_only && !reads.contains(&op.as_str()) {
+                    bail!("`::skill {op}` cannot run in read-only mode");
+                }
+                let mut args = args.clone();
+                if read_only && op == "find" {
+                    if let serde_json::Value::Object(m) = &mut args {
+                        m.insert("log".to_string(), serde_json::Value::Bool(false));
+                    }
+                }
+                let out = self.skill_call(op, args)?;
                 return Ok(crate::flow::flow_rows(out));
             }
             // kleos fork: ontologies run their own scripts (docs/specs/ontology.md)

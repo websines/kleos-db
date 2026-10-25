@@ -125,6 +125,8 @@ pub enum SysOp {
     Doc(String, serde_json::Value),
     /// kleos fork: `::ontology <op> {opts}` (docs/specs/ontology.md).
     Ontology(String, serde_json::Value),
+    /// kleos fork: `::skill <op> {opts}` (docs/specs/skills.md).
+    Skill(String, serde_json::Value),
 }
 
 /// `::flow <op> [{opts}]`.
@@ -663,6 +665,10 @@ pub(crate) fn parse_sys(
         },
         Rule::ontology_op => match parse_flow_op(inner, param_pool)? {
             SysOp::Flow(v, a) => SysOp::Ontology(v, a),
+            _ => unreachable!(),
+        },
+        Rule::skill_op => match parse_flow_op(inner, param_pool)? {
+            SysOp::Flow(v, a) => SysOp::Skill(v, a),
             _ => unreachable!(),
         },
         Rule::compact_op => SysOp::Compact,

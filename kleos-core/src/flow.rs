@@ -1172,6 +1172,17 @@ impl<'s, S: Storage<'s>> Db<S> {
             "remember" => self.flow_action_remember(id, token, key, name, args),
             "recall" => record(self.memory_call("recall", args.clone())?),
             "consolidate" => record(self.memory_call("consolidate", args.clone())?),
+            // the skill library (docs/specs/skills.md): `{"skill": {"op": ..., ...}}`;
+            // `op: "use"` without `run` links this workflow to the skill, so its
+            // outcome is recorded when the workflow finishes
+            "skill" => {
+                let mut a = args.clone();
+                let op = a.as_object_mut().and_then(|m| m.remove("op")).and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "get".into());
+                if op == "use" && a.get("run").is_none() {
+                    a["run"] = json!(id);
+                }
+                record(self.skill_call(&op, a)?)
+            }
             "embed" => {
                 let texts = flatten_texts(args.get("texts").unwrap_or(&JsonValue::Null))?;
                 let model = match args.get("embedder").and_then(|x| x.as_str()) {
@@ -1558,6 +1569,12 @@ impl<'s, S: Storage<'s>> Db<S> {
             ("fl_error", error.map(sv).unwrap_or(DataValue::Null)),
         ]);
         self.fl_w(&script, p).map_err(|e| self.fl_diagnose(id, token, e))?;
+        // skills the workflow used get its outcome (docs/specs/skills.md)
+        if status != "canceled" {
+            if let Ok(Some(w)) = self.flow_wf(id) {
+                self.skill_flow_finished(id, status, w.get("created").and_then(|c| c.as_i64()), w.get("meta").unwrap_or(&JsonValue::Null));
+            }
+        }
         Ok(json!({"id": id, "status": status}))
     }
 

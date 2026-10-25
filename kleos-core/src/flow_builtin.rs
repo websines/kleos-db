@@ -27,9 +27,10 @@ use crate::flow::{ev, now_us, Claimed, Event, SuspendOpts, TimerSpec, FINISHED};
 use crate::runtime::db::{Db, ScriptMutability};
 use crate::storage::Storage;
 
-const ACTIONS: [&str; 7] = ["query", "remember", "recall", "embed", "decide", "http", "consolidate"];
-const KINDS: [&str; 17] = [
+const ACTIONS: [&str; 8] = ["query", "remember", "recall", "embed", "decide", "http", "consolidate", "skill"];
+const KINDS: [&str; 18] = [
     "query",
+    "skill",
     "remember",
     "recall",
     "consolidate",
