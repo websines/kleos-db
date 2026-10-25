@@ -62,10 +62,21 @@ session) with at least `min_claims` (default 8) declarative claims:
   `replaced_dropped`.
 
 **Optional abstractive summaries:** `llm: {url, model, api_key_env,
-max_tokens}` (an OpenAI-compatible endpoint; the key is read from the named
-environment variable, never stored) rewrites each summary from its extracted
-claims. Off by default; needs the `requests` feature; a failed call keeps the
-extractive text (`llm_errors`).
+max_tokens, params}` (an OpenAI-compatible endpoint; the key is read from the
+named environment variable, never stored) rewrites each summary from its
+extracted claims. Off by default; needs the `requests` feature. `params` is
+merged into the request body (e.g. `{"reasoning_effort": "none"}` for a
+reasoning model). HTTP 429/5xx and transport errors are retried three times
+with backoff; a `<think>…</think>` block in the answer is dropped. A failed
+call keeps the extractive text (`llm_errors`) and is stored as extractive, so
+the next run asks again.
+
+Tested live once (wave7/closeout, `kleos-core/tests/memory_consolidate.rs`
+`llm_summaries_live`, ignored by default) against Synthetic's OpenAI-compatible
+API with `syn:small:text` (GLM-4.7-Flash): one call, no errors, a faithful
+one-sentence summary; with `reasoning_effort: "none"` the run took about 5 s
+instead of 22 s. Nothing was broken; the retries, `params`, think-stripping and
+the retry-on-next-run signature were added from that run.
 
 ## Guarantees
 

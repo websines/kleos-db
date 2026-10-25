@@ -243,3 +243,36 @@ fn summaries_leave_out_replaced_values() {
         assert!(!s.contains("nurse"), "a replaced value in a summary: {s}");
     }
 }
+
+/// The abstractive (LLM) summary path against a live OpenAI-compatible
+/// endpoint. Ignored by default; run with KLEOS_TEST_LLM_URL,
+/// KLEOS_TEST_LLM_MODEL and the key in the variable KLEOS_TEST_LLM_KEY_ENV
+/// names (the key itself is never printed or stored).
+#[test]
+#[ignore]
+fn llm_summaries_live() {
+    let (Ok(url), Ok(model), Ok(key_env)) =
+        (std::env::var("KLEOS_TEST_LLM_URL"), std::env::var("KLEOS_TEST_LLM_MODEL"), std::env::var("KLEOS_TEST_LLM_KEY_ENV"))
+    else {
+        eprintln!("skipped: KLEOS_TEST_LLM_URL / _MODEL / _KEY_ENV not set");
+        return;
+    };
+    let db = db();
+    for (i, t) in CHAT.iter().enumerate() {
+        rem(&db, t, i as i64, &format!("chat-1#{i}"));
+    }
+    let r = db
+        .memory_call("consolidate", json!({"ns": "u", "min_claims": 8, "profiles": false, "llm": {"url": url, "model": model, "api_key_env": key_env, "params": {"reasoning_effort": "none"}}}))
+        .unwrap();
+    let s = &r["summaries"];
+    assert_eq!(s["llm_calls"], json!(1), "{r}");
+    assert_eq!(s["llm_errors"], json!(0), "{r}");
+    assert!(s["method"].as_str().unwrap().starts_with("llm:"), "{r}");
+    let t = db
+        .run_script("?[text] := *kleos_mem{ns: 'u', kind: 'summary', text @ 'NOW'}", Default::default(), ScriptMutability::Immutable)
+        .unwrap();
+    let text = t.rows[0][0].get_str().unwrap().to_string();
+    eprintln!("summary: {text}");
+    assert!(text.starts_with("Summary of chat-1"), "{text}");
+    assert!(!text.contains("<think>") && text.contains("Caroline"), "{text}");
+}

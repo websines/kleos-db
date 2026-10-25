@@ -103,6 +103,9 @@ pub struct LlmOpts {
     /// Environment variable holding the API key (never stored).
     pub api_key_env: Option<String>,
     pub max_tokens: Option<u64>,
+    /// Extra request fields merged into the body, e.g. `{"reasoning_effort":
+    /// "none"}` for a reasoning model.
+    pub params: Option<JsonValue>,
 }
 
 /// One entry of a profile.
@@ -675,11 +678,16 @@ impl<'s, S: Storage<'s>> Db<S> {
             let to = ids.iter().filter_map(|i| iv.get(i).map(|x| x.0)).max().unwrap_or(now);
             let chosen: Vec<String> = pick.iter().map(|&i| texts[i].trim().trim_end_matches('.').to_string() + ".").collect();
             let mut body = chosen.join(" ");
+            let mut sig = sig;
             if let Some(l) = llm {
                 llm_calls += 1;
                 match llm_summary(l, &chosen) {
                     Ok(t) if !t.trim().is_empty() => body = t.trim().to_string(),
-                    _ => llm_errors += 1,
+                    _ => {
+                        llm_errors += 1;
+                        // stored as extractive: the next run asks the LLM again
+                        sig = hash_of(&(&ids, "extractive-fallback", max_summary));
+                    }
                 }
             }
             let range = if memory_recall::fmt_date(from) == memory_recall::fmt_date(to) {
@@ -989,23 +997,63 @@ fn llm_summary(l: &LlmOpts, claims: &[String]) -> Result<String> {
         "Summarize these statements from one conversation in at most three sentences. Keep names, numbers and dates; add nothing.\n{}",
         claims.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n")
     );
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": l.model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": l.max_tokens.unwrap_or(2000),
         "temperature": 0,
     });
-    let mut req = minreq::post(url).with_header("Content-Type", "application/json").with_timeout(120);
-    if let Some(env) = &l.api_key_env {
-        let key = std::env::var(env).map_err(|_| miette::miette!("memory consolidate: environment variable '{env}' is not set"))?;
-        req = req.with_header("Authorization", format!("Bearer {key}"));
+    if let (Some(JsonValue::Object(extra)), JsonValue::Object(b)) = (&l.params, &mut body) {
+        for (k, v) in extra {
+            b.insert(k.clone(), v.clone());
+        }
     }
-    let resp = req.with_body(body.to_string()).send().map_err(|e| miette::miette!("memory consolidate: llm request failed: {e}"))?;
-    if resp.status_code / 100 != 2 {
-        bail!("memory consolidate: llm returned HTTP {}", resp.status_code);
+    let key = match &l.api_key_env {
+        Some(env) => Some(std::env::var(env).map_err(|_| miette::miette!("memory consolidate: environment variable '{env}' is not set"))?),
+        None => None,
+    };
+    // rate limits and transient failures: a few tries with backoff
+    let mut last = String::new();
+    for attempt in 0..4u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1000 << (attempt - 1)));
+        }
+        let mut req = minreq::post(url.as_str()).with_header("Content-Type", "application/json").with_timeout(120);
+        if let Some(k) = &key {
+            req = req.with_header("Authorization", format!("Bearer {k}"));
+        }
+        let resp = match req.with_body(body.to_string()).send() {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("llm request failed: {e}");
+                continue;
+            }
+        };
+        if resp.status_code == 429 || resp.status_code >= 500 {
+            last = format!("llm returned HTTP {}", resp.status_code);
+            continue;
+        }
+        if resp.status_code / 100 != 2 {
+            bail!("memory consolidate: llm returned HTTP {}", resp.status_code);
+        }
+        let v: JsonValue = serde_json::from_str(resp.as_str().map_err(|e| miette::miette!("{e}"))?).into_diagnostic()?;
+        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+        return Ok(strip_thinking(text));
     }
-    let v: JsonValue = serde_json::from_str(resp.as_str().map_err(|e| miette::miette!("{e}"))?).into_diagnostic()?;
-    Ok(v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string())
+    bail!("memory consolidate: {last}")
+}
+
+/// A reasoning model's answer without its `<think>…</think>` block.
+#[cfg(feature = "requests")]
+fn strip_thinking(t: &str) -> String {
+    let mut s = t.to_string();
+    while let Some(a) = s.find("<think>") {
+        match s[a..].find("</think>") {
+            Some(b) => s.replace_range(a..a + b + "</think>".len(), ""),
+            None => s.truncate(a),
+        }
+    }
+    s.trim().to_string()
 }
 
 #[cfg(not(feature = "requests"))]
@@ -1035,6 +1083,14 @@ mod tests {
         // not both near-duplicate adoption claims
         assert!(!(p.contains(&0) && p.contains(&1)), "{p:?}");
         assert!(!p.contains(&3), "{p:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "requests")]
+    fn thinking_is_stripped() {
+        assert_eq!(strip_thinking("<think>hmm</think> Anna lives in Lisbon."), "Anna lives in Lisbon.");
+        assert_eq!(strip_thinking("Anna lives in Lisbon. <think>unfinished"), "Anna lives in Lisbon.");
+        assert_eq!(strip_thinking("plain"), "plain");
     }
 
     #[test]
