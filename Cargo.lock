@@ -3504,6 +3504,7 @@ dependencies = [
  "minreq",
  "ndarray 0.15.6",
  "num-traits",
+ "opentelemetry",
  "ordered-float",
  "oxiri 0.3.1",
  "oxrdf",
@@ -4592,6 +4593,19 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "opentelemetry"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c1f1a6ac9c875a4941e4c7c085b61e8f4daa326de03b4701768c3491a6ad9ee"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
