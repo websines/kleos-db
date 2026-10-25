@@ -414,3 +414,114 @@ fn suggest_points_finance_notes_at_fibo() {
     let props = onto(&db, "proposals", json!({"ns": "f", "status": "proposed"}));
     assert!(props.as_array().unwrap().iter().any(|p| p["kind"] == "pack"), "{props:#}");
 }
+
+/// Topic directions for a company corpus (headcounts, cloud vendors,
+/// incidents), as `Topics` does for hobbies.
+struct Company;
+
+const COMPANY_TOPICS: &[&[&str]] = &[&["engineers"], &["cloud vendor", "workloads"], &["outage", "incident", "was down"]];
+
+impl Embedder for Company {
+    fn embed(&self, texts: &[&str]) -> miette::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let low = t.to_lowercase();
+                let mut v = vec![0f32; 512];
+                for (i, ws) in COMPANY_TOPICS.iter().enumerate() {
+                    if ws.iter().any(|w| low.contains(w)) {
+                        v[i] += 5.0;
+                    }
+                }
+                for w in low.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 2) {
+                    let h = w.bytes().fold(1469598103934665603u64, |h, b| (h ^ b as u64).wrapping_mul(1099511628211));
+                    v[3 + (h % 509) as usize] += 0.3;
+                }
+                let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+                v.iter().map(|x| x / n).collect()
+            })
+            .collect())
+    }
+    fn dim(&self) -> usize {
+        512
+    }
+}
+
+#[test]
+fn company_corpus_learns_role_aware_labels_and_team_subjects() {
+    let m = Models::new("company");
+    embed::register_embedder("oa_emb_company2", Arc::new(Company)).unwrap();
+    let asked = Arc::new(Mutex::new(vec![]));
+    let vendors = ["AWS", "GCP", "Azure", "Hetzner", "Cloudflare"];
+    extract::register_extractor(
+        "oa_ext_org",
+        Arc::new(Table(vendors.iter().map(|v| ("organization", *v, 0.95)).collect(), asked)),
+    )
+    .unwrap();
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.memory_init(InitOpts {
+        embedder: Some("oa_emb_company2".into()),
+        decider: Some(m.decider.clone()),
+        extractor: Some("oa_ext_org".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let teams = ["data", "platform", "mobile", "payments", "search"];
+    let mut notes: Vec<String> = vec![];
+    for (i, t) in teams.iter().enumerate() {
+        for k in 0..3 {
+            let n = 6 + i + 2 * k;
+            notes.push(match k {
+                0 => format!("The {t} team now has {n} engineers."),
+                1 => format!("Headcount update: the {t} team is at {n} engineers now."),
+                _ => format!("The {t} team grew to {n} engineers this quarter."),
+            });
+        }
+    }
+    for (i, t) in teams.iter().take(4).enumerate() {
+        for k in 0..3 {
+            let v = vendors[(i + k) % vendors.len()];
+            notes.push(match k {
+                0 => format!("The {t} team switched its cloud vendor to {v}."),
+                1 => format!("Our {t} workloads now run on {v} as the cloud vendor."),
+                _ => format!("Cloud vendor for {t} is now {v}."),
+            });
+        }
+    }
+    for (s, day) in [("checkout", "Monday"), ("login", "Tuesday"), ("billing", "Thursday"), ("search API", "Friday"), ("notifications", "Monday"), ("checkout", "Friday")] {
+        notes.push(format!("The {s} service had an outage on {day}."));
+        notes.push(format!("Incident: {s} was down for an hour on {day}."));
+    }
+    for (i, t) in notes.iter().enumerate() {
+        db.remember(t, at("acme", d(i as i64))).unwrap();
+    }
+    // team subjects
+    let t = onto(&db, "type", json!({"text": "The data team now has 9 engineers."}));
+    assert_eq!(t["subject"], "team:data", "{t}");
+    let g = onto(&db, "gate", json!({"old": "The platform team now has 8 engineers.", "new": "The data team now has 30 engineers."}));
+    assert_eq!(g["gate"], "block", "{g}");
+    let out = onto(&db, "learn", json!({"ns": "acme"}));
+    let props: Vec<Value> = out["proposals"].as_array().unwrap().iter().filter(|p| p["kind"] == "property").map(|p| p["body"]["prop"].clone()).collect();
+    let by_label = |f: &dyn Fn(&str) -> bool| props.iter().find(|p| f(p["label"].as_str().unwrap_or(""))).cloned();
+    // a count names what it counts; team names are never cues
+    let hc = by_label(&|l| l.contains("engineer")).unwrap_or_else(|| panic!("{out:#}"));
+    assert_eq!(hc["name"], "engineer_count", "{hc:#}");
+    assert_eq!(hc["datatype"], "number", "{hc:#}");
+    for c in hc["cues"].as_array().unwrap() {
+        let c = c.as_str().unwrap();
+        assert!(!teams.iter().any(|t| c.split(' ').any(|w| w == *t)) && !c.contains("team"), "subject word as a cue: {c} in {hc:#}");
+    }
+    // a phrase label, and the extractor's type of the values as its range
+    let cv = by_label(&|l| l.contains("vendor")).unwrap_or_else(|| panic!("{out:#}"));
+    assert_eq!(cv["label"], "cloud vendor", "{cv:#}");
+    assert_eq!(cv["kind"], "object", "{cv:#}");
+    assert_eq!(cv["range"], json!(["Organization"]), "{cv:#}");
+    // weekdays are values, not the property
+    let og = by_label(&|l| l.contains("outage") || l.contains("incident") || l.contains("service")).unwrap_or_else(|| panic!("{out:#}"));
+    for c in og["cues"].as_array().unwrap().iter().chain([&og["label"]]) {
+        let c = c.as_str().unwrap();
+        assert!(!["monday", "tuesday", "thursday", "friday", "hour"].iter().any(|w| c.split(' ').any(|x| x == *w)), "{og:#}");
+    }
+    extract::disable_extractor("oa_ext_org").unwrap();
+    embed::unregister_embedder("oa_emb_company2");
+}

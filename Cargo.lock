@@ -4866,6 +4866,7 @@ dependencies = [
  "tokio",
  "twox-hash 1.6.3",
  "unicode-normalization",
+ "ureq",
  "uuid",
 ]
 

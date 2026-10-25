@@ -170,3 +170,109 @@ fn auto_consolidation_runs_in_process() {
     let ctx = db.recall_context("Where do I live?", RecallOpts { ns: Some("u".into()), ..Default::default() }).unwrap();
     assert!(ctx.text.starts_with("Profiles (current facts"), "{}", ctx.text);
 }
+
+#[test]
+fn entity_profiles_from_extractor_entities() {
+    let db = db();
+    let ent = |text: &str, day: i64, src: &str, ents: &[&str]| {
+        db.remember(
+            text,
+            RememberOpts {
+                ns: Some("u".into()),
+                at: Some(T0 + day * DAY),
+                source: Some(src.into()),
+                entities: ents.iter().map(|e| e.to_string()).collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    ent("Max the dog loves swimming in the lake.", 1, "c#1", &["Max"]);
+    ent("We took Max to the vet on Tuesday.", 2, "c#2", &["Max"]);
+    ent("Max learned to fetch a frisbee.", 3, "c#3", &["Max"]);
+    ent("Bella came over once.", 4, "c#4", &["Bella"]);
+    let r = db.memory_call("consolidate", json!({"ns": "u", "summaries": false})).unwrap();
+    assert!(r["profiles"]["nodes"].as_u64().unwrap() >= 1, "{r}");
+    let t = db
+        .run_script("?[node, text] := *kleos_mem_profile{ns: 'u', node, text}", Default::default(), ScriptMutability::Immutable)
+        .unwrap();
+    let max = t.rows.iter().find(|r| r[0].get_str() == Some("max")).unwrap_or_else(|| panic!("{:?}", t.rows));
+    let text = max[1].get_str().unwrap();
+    assert!(text.starts_with("Profile: Max"), "{text}");
+    assert!(text.contains("frisbee"), "newest first: {text}");
+    // one mention is not enough for a profile
+    assert!(!t.rows.iter().any(|r| r[0].get_str() == Some("bella")), "{:?}", t.rows);
+    // the profile reaches the context block of a hit that mentions Max
+    let ctx = db.recall_context("What does Max like?", RecallOpts { ns: Some("u".into()), ..Default::default() }).unwrap();
+    assert!(ctx.text.contains("Profile: Max"), "{}", ctx.text);
+}
+
+#[test]
+fn summaries_leave_out_replaced_values() {
+    let db = db();
+    let lines = [
+        "I work as a nurse at the city hospital.",
+        "I volunteer at the animal shelter on weekends.",
+        "I am training for the city marathon this autumn.",
+        "I bake sourdough bread every Sunday morning.",
+        "I started learning Portuguese with an online tutor.",
+        "I repainted the kitchen walls a pale green colour.",
+        "I planted tomatoes and basil on the balcony garden.",
+        "I adopted a grey cat from the animal shelter.",
+        "I work as a teacher at the primary school now.",
+    ];
+    let ids: Vec<String> = lines.iter().enumerate().map(|(i, t)| rem(&db, t, i as i64, &format!("chat-9#{i}"))).collect();
+    // the newest claim may replace the first (a pending supersession, as a
+    // decider in the uncertain band leaves it)
+    db.run_script(
+        "?[ns, new, cand, template, label, p, band, decided_by, reason, status, at] <- \
+         [['u', $new, $old, 'supersedes', 'yes', 0.7, 'pending', 'test', null, 'pending', 0]] \
+         :put kleos_mem_decision {ns, new, cand, template => label, p, band, decided_by, reason, status, at}",
+        [("new".to_string(), kleos::DataValue::from(ids[8].as_str())), ("old".to_string(), kleos::DataValue::from(ids[0].as_str()))].into_iter().collect(),
+        ScriptMutability::Mutable,
+    )
+    .unwrap();
+    let r = db.memory_call("consolidate", json!({"ns": "u", "min_claims": 8, "max_summary": 8, "profiles": false})).unwrap();
+    assert!(r["summaries"]["replaced_dropped"].as_u64().unwrap() >= 1, "{r}");
+    let t = db
+        .run_script("?[text] := *kleos_mem{ns: 'u', kind: 'summary', text @ 'NOW'}", Default::default(), ScriptMutability::Immutable)
+        .unwrap();
+    assert_eq!(t.rows.len(), 1, "{r}");
+    for row in &t.rows {
+        let s = row[0].get_str().unwrap();
+        assert!(!s.contains("nurse"), "a replaced value in a summary: {s}");
+    }
+}
+
+/// The abstractive (LLM) summary path against a live OpenAI-compatible
+/// endpoint. Ignored by default; run with KLEOS_TEST_LLM_URL,
+/// KLEOS_TEST_LLM_MODEL and the key in the variable KLEOS_TEST_LLM_KEY_ENV
+/// names (the key itself is never printed or stored).
+#[test]
+#[ignore]
+fn llm_summaries_live() {
+    let (Ok(url), Ok(model), Ok(key_env)) =
+        (std::env::var("KLEOS_TEST_LLM_URL"), std::env::var("KLEOS_TEST_LLM_MODEL"), std::env::var("KLEOS_TEST_LLM_KEY_ENV"))
+    else {
+        eprintln!("skipped: KLEOS_TEST_LLM_URL / _MODEL / _KEY_ENV not set");
+        return;
+    };
+    let db = db();
+    for (i, t) in CHAT.iter().enumerate() {
+        rem(&db, t, i as i64, &format!("chat-1#{i}"));
+    }
+    let r = db
+        .memory_call("consolidate", json!({"ns": "u", "min_claims": 8, "profiles": false, "llm": {"url": url, "model": model, "api_key_env": key_env, "params": {"reasoning_effort": "none"}}}))
+        .unwrap();
+    let s = &r["summaries"];
+    assert_eq!(s["llm_calls"], json!(1), "{r}");
+    assert_eq!(s["llm_errors"], json!(0), "{r}");
+    assert!(s["method"].as_str().unwrap().starts_with("llm:"), "{r}");
+    let t = db
+        .run_script("?[text] := *kleos_mem{ns: 'u', kind: 'summary', text @ 'NOW'}", Default::default(), ScriptMutability::Immutable)
+        .unwrap();
+    let text = t.rows[0][0].get_str().unwrap().to_string();
+    eprintln!("summary: {text}");
+    assert!(text.starts_with("Summary of chat-1"), "{text}");
+    assert!(!text.contains("<think>") && text.contains("Caroline"), "{text}");
+}

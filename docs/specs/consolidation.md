@@ -20,7 +20,22 @@ facts:
   in Lisbon now (since 2026-01-06)`);
 - each value with its valid-from and the memories behind it (`evidence`);
 - single-valued properties keep only the newest current value, so a profile
-  follows supersession on the next run.
+  follows supersession on the next run;
+- typed claims count when their type is cue- or rule-backed, or a prototype
+  match at a confident score (≥ 0.55, wave7/closeout; weaker prototype matches
+  stay out).
+
+**Entity profiles from the extractor** (wave7/closeout): a named entity
+(GLiNER, or `entities` passed to `remember`) that 3 to 150 current memories
+mention, and that no ontology profile covers (fewer than `min_facts` facts),
+gets a profile of what those memories say: by property when a claim is typed,
+`mentioned` otherwise, newest first, the entity's kind in the title
+(`Profile: Max (pet) — mentioned: …`). An entity mentioned by more than 150
+memories (a speaker of every turn) is a hub and gets none. Chat stores, where
+the ontology knows little beyond the speakers (24 profiles over LoCoMo's 10
+conversations before), get profiles for the people, pets and places they talk
+about. The count on LoCoMo and QA with profiles on vs off were **not
+re-measured** (measurement cut short by the user).
 
 The text is one line per node:
 
@@ -38,13 +53,30 @@ session) with at least `min_claims` (default 8) declarative claims:
   `min(max_summary, max(2, ⌈n/5⌉))` of them (default `max_summary` 6);
 - the summary is those claims in time order: `Summary of <group> (<first> – <last>): …`;
 - its valid-from is the group's newest claim, it has its own vector, and it is
-  found by `recall` like any memory (`kind: '!summary'` leaves it out).
+  found by `recall` like any memory (`kind: '!summary'` leaves it out);
+- **replaced values are left out** (wave7/closeout): a claim a newer one may
+  supersede (a pending `supersedes` decision), and an older value of a
+  single-valued property when a newer current claim of the same subject and
+  property is similar to it (cosine ≥ 0.6; stores with vectors only). Superseded
+  claims were already out (summaries read current memories). The run reports
+  `replaced_dropped`.
 
 **Optional abstractive summaries:** `llm: {url, model, api_key_env,
-max_tokens}` (an OpenAI-compatible endpoint; the key is read from the named
-environment variable, never stored) rewrites each summary from its extracted
-claims. Off by default; needs the `requests` feature; a failed call keeps the
-extractive text (`llm_errors`).
+max_tokens, params}` (an OpenAI-compatible endpoint; the key is read from the
+named environment variable, never stored) rewrites each summary from its
+extracted claims. Off by default; needs the `requests` feature. `params` is
+merged into the request body (e.g. `{"reasoning_effort": "none"}` for a
+reasoning model). HTTP 429/5xx and transport errors are retried three times
+with backoff; a `<think>…</think>` block in the answer is dropped. A failed
+call keeps the extractive text (`llm_errors`) and is stored as extractive, so
+the next run asks again.
+
+Tested live once (wave7/closeout, `kleos-core/tests/memory_consolidate.rs`
+`llm_summaries_live`, ignored by default) against Synthetic's OpenAI-compatible
+API with `syn:small:text` (GLM-4.7-Flash): one call, no errors, a faithful
+one-sentence summary; with `reasoning_effort: "none"` the run took about 5 s
+instead of 22 s. Nothing was broken; the retries, `params`, think-stripping and
+the retry-on-next-run signature were added from that run.
 
 ## Guarantees
 

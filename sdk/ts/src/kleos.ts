@@ -33,6 +33,9 @@ import type {
   FindSkillsOptions,
   FindSkillsResult,
   SkillOutcome,
+  ChangeEvent,
+  LiveHandle,
+  SubscriptionEvent,
 } from './types.js';
 
 type Opts = Record<string, unknown> | undefined;
@@ -266,6 +269,41 @@ export class Kleos {
    */
   hybridSearch(query: HybridQuery): Promise<NamedRows> {
     return this.backend.admin('hybrid_search', query as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * Register a reranker for `hybridSearch({rerank: {model: name}})` and the
+   * `Rerank` fixed rule: `fn(query, docs)` returns one score per document,
+   * synchronously. Embedded only.
+   */
+  registerReranker(name: string, fn: (query: string, docs: string[]) => number[]): void {
+    if (!this.backend.registerReranker) throw new KleosError('registerReranker needs an embedded store');
+    this.backend.registerReranker(name, fn);
+  }
+  /** Remove a reranker. */
+  unregisterReranker(name: string): boolean {
+    return this.backend.unregisterReranker?.(name) ?? false;
+  }
+
+  // ---- live updates -------------------------------------------------------
+
+  /**
+   * Committed writes to a stored relation (`kleos_mem` for memories,
+   * `kleos_doc` for documents, or your own), as they happen. Embedded: a
+   * change callback; remote: the server's `GET /changes/:relation` stream
+   * (admin secret). The handle keeps the process alive until `close()`.
+   */
+  watch(relation: string, onEvent: (e: ChangeEvent) => void): Promise<LiveHandle> {
+    return this.backend.watch(relation, onEvent);
+  }
+
+  /**
+   * A live query: `onEvent` gets the result now (`initial`), then `delta`
+   * (`added`, `removed`), `resync` or `error` events as writes change it
+   * (docs/specs/live-subscriptions.md). Remote: `GET /subscribe`.
+   */
+  subscribe(script: string, onEvent: (e: SubscriptionEvent) => void, opts?: { params?: Record<string, Json>; queue?: number }): Promise<LiveHandle> {
+    return this.backend.subscribe(script, opts?.params ?? {}, onEvent, opts?.queue ?? 0);
   }
 
   /** One typed decision with an enabled decider (e.g. template `supersedes`). Embedded only. */

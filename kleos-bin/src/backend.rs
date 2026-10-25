@@ -10,6 +10,8 @@
 //! `::memory`, `::doc`, `::flow`, `::ontology` and `::skill`.
 
 use std::collections::BTreeMap;
+use std::io::BufRead;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use kleos::{DataValue, DbInstance, ScriptMutability};
@@ -133,6 +135,78 @@ impl Backend {
     }
 }
 
+/// Writes to stored relations as they commit: each message is the relation
+/// and the rows written or removed (as JSON arrays). Dropping the watch stops
+/// it (embedded: the callbacks are unregistered; remote: the reader thread
+/// ends at its next event or keep-alive).
+pub struct Watch {
+    pub rx: mpsc::Receiver<(String, Vec<Value>)>,
+    db: Option<DbInstance>,
+    ids: Vec<u32>,
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some(db) = &self.db {
+            for id in &self.ids {
+                db.unregister_callback(*id);
+            }
+        }
+    }
+}
+
+impl Backend {
+    /// Watch `relations` (embedded: change callbacks; remote: the server's
+    /// `GET /changes/:relation` streams, which need the admin secret).
+    pub fn watch(&self, relations: &[&str]) -> Result<Watch, String> {
+        let (tx, rx) = mpsc::channel();
+        match self {
+            Backend::Embedded(db) => {
+                let mut ids = vec![];
+                for rel in relations {
+                    let (id, recv) = db.register_callback(rel, None);
+                    ids.push(id);
+                    let tx = tx.clone();
+                    let rel = rel.to_string();
+                    // ends when the callback is unregistered (the sender drops)
+                    std::thread::spawn(move || {
+                        for (_op, new, old) in recv {
+                            let rows: Vec<Value> = new.rows.into_iter().chain(old.rows).map(|r| Value::Array(r.into_iter().map(Value::from).collect())).collect();
+                            if tx.send((rel.clone(), rows)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                Ok(Watch { rx, db: Some(db.clone()), ids })
+            }
+            Backend::Remote(r) => {
+                for rel in relations {
+                    let lines = r.sse(&format!("/changes/{rel}"))?;
+                    let tx = tx.clone();
+                    let rel = rel.to_string();
+                    std::thread::spawn(move || {
+                        for line in lines {
+                            let Some(data) = line.strip_prefix("data:") else { continue };
+                            let Ok(v) = serde_json::from_str::<Value>(data.trim()) else { continue };
+                            let mut rows = vec![];
+                            for k in ["new_rows", "old_rows"] {
+                                if let Some(a) = v.get(k).and_then(|x| x.get("rows")).and_then(|x| x.as_array()) {
+                                    rows.extend(a.iter().cloned());
+                                }
+                            }
+                            if tx.send((rel.clone(), rows)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                Ok(Watch { rx, db: None, ids: vec![] })
+            }
+        }
+    }
+}
+
 /// A read of a store with no memories yet (its relations are created by the
 /// first `remember`) is an empty answer, not an error.
 fn empty_read(area: Area, op: &str, args: &Value, err: String) -> Result<Value, String> {
@@ -151,6 +225,28 @@ fn empty_read(area: Area, op: &str, args: &Value, err: String) -> Result<Value, 
 }
 
 impl Remote {
+    fn auth(&self, mut req: minreq::Request) -> minreq::Request {
+        if let Some(t) = &self.token {
+            if t.starts_with("kl_") || t.matches('.').count() == 2 {
+                req = req.with_header("Authorization", format!("Bearer {t}"));
+            } else {
+                req = req.with_header("x-cozo-auth", t.as_str());
+            }
+        }
+        req
+    }
+
+    /// The lines of a server-sent-events stream (`GET path`), read lazily.
+    pub fn sse(&self, path: &str) -> Result<impl Iterator<Item = String>, String> {
+        let req = self.auth(minreq::get(format!("{}{path}", self.url)).with_header("Accept", "text/event-stream"));
+        let resp = req.send_lazy().map_err(|e| format!("cannot reach the kleos server at {}: {e}", self.url))?;
+        if resp.status_code / 100 != 2 {
+            return Err(format!("HTTP {} from {path}", resp.status_code));
+        }
+        let bytes = resp.map_while(|b| b.ok().map(|(byte, _)| byte));
+        Ok(std::io::BufReader::new(ByteReader(Box::new(bytes))).lines().map_while(|l| l.ok()))
+    }
+
     fn raw_post(&self, path: &str, body: &Value) -> Result<Value, String> {
         let mut req = minreq::post(format!("{}{path}", self.url))
             .with_header("Content-Type", "application/json")
@@ -188,5 +284,27 @@ impl Remote {
             Some(Value::Bool(true)) => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
             _ => Err(v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()).unwrap_or_else(|| v.to_string())),
         }
+    }
+}
+
+/// `Read` over a byte iterator (a lazily read HTTP body).
+struct ByteReader(Box<dyn Iterator<Item = u8> + Send>);
+
+impl std::io::Read for ByteReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut n = 0;
+        while n < buf.len() {
+            match self.0.next() {
+                Some(b) => {
+                    buf[n] = b;
+                    n += 1;
+                    if b == b'\n' {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        Ok(n)
     }
 }

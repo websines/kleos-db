@@ -49,11 +49,43 @@ dependencies) rather than with an SDK:
   `resources/read`) carry `ttlMs` and `cacheScope` (`private` — results
   depend on the store) and are in a deterministic order.
 - Methods: `server/discover`, `tools/list`, `tools/call`, `resources/list`,
-  `resources/templates/list`, `resources/read`, `tasks/get`,
-  `tasks/update`, `tasks/cancel`. Unknown method → `-32601` (HTTP 404).
+  `resources/templates/list`, `resources/read`, `subscriptions/listen`,
+  `tasks/get`, `tasks/update`, `tasks/cancel`. Unknown method → `-32601`
+  (HTTP 404).
 - Not implemented (deprecated in 2026-07-28): roots, sampling, logging
-  (`logging/setLevel`), HTTP+SSE, `ping` (kept only for legacy clients),
-  `subscriptions/listen` (no server-pushed notifications yet).
+  (`logging/setLevel`), HTTP+SSE, `ping` (kept only for legacy clients).
+
+### Change notifications (`subscriptions/listen`)
+
+As the 2026-07-28 spec defines them (basic/patterns/subscriptions): there
+is no session and no standalone GET stream; a client opens a long-lived
+request and the notifications come on its response.
+
+- Request: `subscriptions/listen` with `params.notifications` —
+  `resourcesListChanged` (documents of the server's default namespace added
+  or removed: `notifications/resources/list_changed`) and
+  `resourceSubscriptions` (`notifications/resources/updated` for these URIs).
+  Watched URIs: `kleos://namespaces` (a new namespace), `kleos://ns/{ns}/documents`
+  and `kleos://doc/{ns}/{doc}` (document writes), `kleos://entity/{ns}/{name}`
+  (any memory write in `ns`: the profile may have changed). Other URIs,
+  `toolsListChanged` (the tool list is fixed) and `promptsListChanged` (no
+  prompts) are left out of the acknowledgment.
+- The first message is `notifications/subscriptions/acknowledged` with the
+  honoured filter; every message carries
+  `_meta["io.modelcontextprotocol/subscriptionId"]` = the request's JSON-RPC
+  id. Writes are gathered for 200 ms, then one notification per touched URI.
+- Source: the store's change callbacks on `kleos_mem` and `kleos_doc`
+  (embedded), or the server's `GET /changes/:relation` streams (`kleos mcp
+  --url`, admin secret).
+- Streamable HTTP: the response is `text/event-stream` (one JSON-RPC message
+  per event, keep-alive comments, `X-Accel-Buffering: no`); closing it ends
+  the subscription. stdio: notifications interleave with responses on stdout;
+  `notifications/cancelled` with the listen request's id ends one.
+  `McpServer::listen` returns the acknowledgment, the notification channel
+  and `close_response()` (the graceful-closure result).
+- Clients of earlier revisions get `-32601` (they have no listen); their
+  `initialize` capabilities say `resources: {listChanged: false}`.
+- Capabilities (modern): `resources: {listChanged: true, subscribe: true}`.
 
 ### State
 
@@ -268,9 +300,9 @@ installs no hooks.
 
 ### Left
 
-- `subscriptions/listen` (server-pushed list or resource changes) and
-  `notifications/progress` streaming (SSE responses) — every response is a
-  single JSON object today.
+- `notifications/progress` streaming (SSE responses of ordinary
+  requests) — only `subscriptions/listen` streams; every other response is a
+  single JSON object. ~~`subscriptions/listen`~~: built in wave7/closeout.
 - OAuth 2 / Client ID Metadata Documents for HTTP auth (bearer tokens only).
 - Tasks for other long calls (`::memory reembed`, consolidation) — only
   background document ingestion returns a task now.

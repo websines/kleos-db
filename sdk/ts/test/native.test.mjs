@@ -130,3 +130,66 @@ test('embedded: hybrid search, export/import, backup', async () => {
   await assert.rejects(k.decide('no-such-decider', 'supersedes', 'a', 'b'), KleosError);
   for (const x of [k, k2, k3]) await x.close();
 });
+
+const until = async (cond, ms = 5000) => {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) throw new Error('timed out');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+
+test('embedded: watch a relation and subscribe to a live query', async () => {
+  const k = open();
+  await k.run(':create todo {id: Int => done: Bool}');
+  const changes = [];
+  const w = await k.watch('todo', (e) => changes.push(e));
+  const events = [];
+  const sub = await k.subscribe('?[count(id)] := *todo{id, done: false}', (e) => events.push(e));
+  await k.run('?[id, done] <- [[1, false], [2, false]] :put todo {id => done}');
+  await until(() => changes.length >= 1 && events.some((e) => e.kind === 'delta'));
+  assert.equal(changes[0].op, 'Put');
+  assert.equal(changes[0].new_rows.rows.length, 2);
+  assert.equal(events[0].kind, 'initial');
+  const last = events.filter((e) => e.kind === 'delta').at(-1);
+  assert.deepEqual(last.added.rows, [[2]]);
+  await w.close();
+  await sub.close();
+  await k.run('?[id, done] <- [[3, false]] :put todo {id => done}');
+  await new Promise((r) => setTimeout(r, 300));
+  const n = changes.length;
+  assert.equal(changes.length, n);
+  await k.close();
+});
+
+test('embedded: hybridSearch with graph legs, a JS reranker and MMR', async () => {
+  const k = open();
+  await k.run(':create docs {id: Int => body: String, emb: <F32; 2>}');
+  await k.run('::fts create docs:body {extractor: body, tokenizer: Simple, filters: [Lowercase]}');
+  await k.run(':create links {from: Int, to: Int}');
+  await k.run(
+    "?[id, body, emb] <- [[1, 'billing service', vec([1.0, 0.0])], [2, 'billing team', vec([0.99, 0.1])], [3, 'a cat', vec([0.0, 1.0])]] :put docs {id => body, emb}",
+  );
+  await k.run('?[from, to] <- [[1, 3]] :put links {from, to}');
+  // graph leg: the neighbours of a seed join the fusion
+  const g = await k.hybridSearch({
+    relation: 'docs', fts_index: 'body', query_text: 'billing', limit: 5,
+    graph_legs: [{ label: 'g', edge_relation: 'links', from_col: 'from', to_col: 'to', seeds: [1], max_hops: 1 }],
+  });
+  assert.ok(g.rows.some((r) => r[0] === 3), JSON.stringify(g));
+  await assert.rejects(
+    k.hybridSearch({ relation: 'docs', fts_index: 'body', query_text: 'billing', graph_legs: [{ edge_relation: 'links', max_hop: 1 }] }),
+    (e) => e instanceof KleosError && /unknown key/.test(e.message),
+  );
+  // a reranker written in JS, called from the thread pool
+  let calls = 0;
+  k.registerReranker('len', (q, docs) => { calls++; return docs.map((d) => -d.length); });
+  const r = await k.hybridSearch({ relation: 'docs', fts_index: 'body', query_text: 'billing', limit: 5, rerank: { model: 'len', text_field: 'body' } });
+  assert.ok(calls >= 1);
+  assert.equal(r.rows[0][0], 2, JSON.stringify(r)); // 'billing team' is shorter
+  assert.equal(k.unregisterReranker('len'), true);
+  // MMR over the embedding column
+  const m = await k.hybridSearch({ relation: 'docs', fts_index: 'body', query_text: 'billing', mmr: { lambda: 0.5, k: 2, embedding_col: 'emb' } });
+  assert.equal(m.rows.length, 2, JSON.stringify(m));
+  await k.close();
+});

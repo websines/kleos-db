@@ -337,8 +337,16 @@ pub fn warp_affine_row_sums(src: &Gray, m: [[f64; 3]; 2], w: usize, h: usize) ->
     // neighbourhood of four zeros is skipped without interpolating.
     let mut out = vec![0f64; h];
     let (mut bx0, mut by0, mut bx1, mut by1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    // inked source rows before each row (blank rows between text lines let a
+    // whole destination row be skipped: its sum is exactly 0)
+    let mut inked_before = vec![0u32; sh as usize + 1];
     for yy in 0..sh {
         let row = &data[(yy * sw) as usize..((yy + 1) * sw) as usize];
+        let inked = row.iter().any(|&v| v != 0);
+        inked_before[yy as usize + 1] = inked_before[yy as usize] + inked as u32;
+        if !inked {
+            continue;
+        }
         if let Some(f) = row.iter().position(|&v| v != 0) {
             let l = row.iter().rposition(|&v| v != 0).unwrap();
             bx0 = bx0.min(f as i64);
@@ -360,6 +368,7 @@ pub fn warp_affine_row_sums(src: &Gray, m: [[f64; 3]; 2], w: usize, h: usize) ->
             (p.min(q), p.max(q))
         }
     };
+    let (mut ixs, mut iys): (Vec<i64>, Vec<i64>) = (Vec::with_capacity(w), Vec::with_capacity(w));
     for (y, o) in out.iter_mut().enumerate() {
         let (ax0, ax1) = span(a12 * y as f64 + b1, a11, lx, hx);
         let (ay0, ay1) = span(a22 * y as f64 + b2, a21, ly, hy);
@@ -372,22 +381,39 @@ pub fn warp_affine_row_sums(src: &Gray, m: [[f64; 3]; 2], w: usize, h: usize) ->
         let mut acc = 0u64;
         // the same sums as `a11 * x + a12 * y + b1` (left to right), with the
         // y terms hoisted; the 1/32 quantisation in integers: round(s * 32)
-        // gives floor (>> 5) and fraction (& 31) / 32 exactly
+        // gives floor (>> 5) and fraction (& 31) / 32 exactly. The source
+        // positions of the row are computed first (a loop the compiler
+        // vectorises), then the pixels are read.
         let (cy1, cy2) = (a12 * y as f64, a22 * y as f64);
-        for x in xs..xe {
-            let sx = a11 * x as f64 + cy1 + b1;
-            let sy = a21 * x as f64 + cy2 + b2;
-            let ix = (sx * 32.0).round() as i64;
-            let iy = (sy * 32.0).round() as i64;
+        // the source rows this destination row reads (y is linear in x, so
+        // its ends bound it): none inked, nothing to add
+        let row_of = |x: usize| (((a21 * x as f64 + cy2 + b2) * 32.0).round() as i64) >> 5;
+        let (ya, yb) = (row_of(xs), row_of(xe.saturating_sub(1).max(xs)));
+        let (r0, r1) = ((ya.min(yb)).clamp(0, sh), (ya.max(yb) + 2).clamp(0, sh));
+        if inked_before[r1 as usize] == inked_before[r0 as usize] {
+            continue;
+        }
+        ixs.clear();
+        iys.clear();
+        ixs.extend((xs..xe).map(|x| ((a11 * x as f64 + cy1 + b1) * 32.0).round() as i64));
+        iys.extend((xs..xe).map(|x| ((a21 * x as f64 + cy2 + b2) * 32.0).round() as i64));
+        for (&ix, &iy) in ixs.iter().zip(iys.iter()) {
             let x0 = ix >> 5;
             let y0 = iy >> 5;
             // whole 2x2 neighbourhood outside: zero
             if x0 >= -1 && y0 >= -1 && x0 < sw && y0 < sh {
                 let (p00, p10, p01, p11) = if x0 >= 0 && y0 >= 0 && x0 + 1 < sw && y0 + 1 < sh {
-                    // inside: direct reads
+                    // inside: direct reads; a neighbourhood of four zeros
+                    // (most of an ink image) interpolates to exactly 0
                     let i = (y0 * sw + x0) as usize;
                     let j = i + sw as usize;
-                    (data[i] as f32, data[i + 1] as f32, data[j] as f32, data[j + 1] as f32)
+                    // SAFETY: 0 <= x0 < sw - 1 and 0 <= y0 < sh - 1, so i + 1
+                    // and j + 1 are inside the sw * sh buffer
+                    let (q00, q10, q01, q11) = unsafe { (*data.get_unchecked(i), *data.get_unchecked(i + 1), *data.get_unchecked(j), *data.get_unchecked(j + 1)) };
+                    if (q00 | q10 | q01 | q11) == 0 {
+                        continue;
+                    }
+                    (q00 as f32, q10 as f32, q01 as f32, q11 as f32)
                 } else {
                     (get(x0, y0), get(x0 + 1, y0), get(x0, y0 + 1), get(x0 + 1, y0 + 1))
                 };

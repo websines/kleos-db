@@ -23,7 +23,7 @@ db.recall("What is the termination notice period?", format="context")
 | Piece | Where | What |
 |---|---|---|
 | OCR | `kleos-docs::ocr` | A Rust port of the Indra OCR pipeline (datalab-to/indra, Apache-2.0): orientation and skew, line detection, CTC recognition with script routing and an n-gram LM beam search, reading order, layout blocks, Markdown with HTML tables. Its ONNX graphs run on tract (pure Rust; no ONNX Runtime). |
-| PDF | `kleos-docs::pdf` | pdfium (BSD-3/Apache-2.0) loaded at run time: grayscale renders, the text layer with character boxes and angles. Digital pages use their text layer (no OCR); scans and broken layers go to OCR; mixed pages OCR only the lines the layer lacks. |
+| PDF | `kleos-docs::pdf` | pdfium (BSD-3/Apache-2.0) loaded at run time: grayscale renders, the text layer with character boxes and angles. Digital pages use their text layer (no OCR); scans and broken layers go to OCR; mixed pages OCR only the lines the layer lacks; a simple text layer with embedded images keeps the layer and OCRs only the image regions. |
 | Chunking | `kleos-docs::chunk` | Token, sentence, recursive (Markdown-, heading- and code-aware) and semantic chunkers, modelled on Chonkie (MIT). Every strategy respects layout blocks: tables are never split, headings stay with what follows, and each chunk carries its provenance. |
 | Ingestion | `kleos-core::docs` | Type detection, the pipeline, embedding, storage, durable resume, re-ingestion diffs, citations. |
 
@@ -168,7 +168,7 @@ With the `docs-url` feature (off by default; it pulls in `requests`), an attachm
 - the content type must be a document type (PDF, image, text, HTML, DOCX, or `application/octet-stream` with detection from the bytes);
 - the final URL is stored in the document row's `meta.url`; the bytes' hash still decides re-ingestion, so fetching the same file again is a no-op.
 
-Limitation: the address check and the connection resolve the host separately, so a DNS server that changes its answer between the two (rebinding) is not fully excluded; deployments that must exclude it should fetch through an egress proxy.
+- **No DNS rebinding** (wave7/closeout): each hop resolves its host once, checks every address, and the HTTP client (`ureq`, with a per-hop resolver) connects only to those checked addresses; it never asks DNS again, so an answer that changes between the check and the connection cannot redirect it. A literal IP host is checked as is. Test: `docs_url::tests::connections_are_pinned_to_the_checked_address` (a resolver that rebinds every name to a private address after its first lookup; the fetch, a redirect to a second host included, still reaches the checked loopback server, with one lookup per hop).
 
 ### Entities
 
@@ -351,6 +351,53 @@ but embedding its 1,660 chunks took ~400 s under the concurrent load (221 s
 before at load 5–9; the default embedder also became EmbeddingGemma 2, ~1.8×
 slower per text). That is the next lever for digital documents (EmbeddingGemma
 2 speed is a separate item).
+
+### Mixed pages and skew search (wave7/closeout)
+
+*Measured on 2026-10-25 on the branch build (base 0af7f19) while two other
+agents' builds kept the load average at 6–15. Tiny samples, labelled as such;
+the large document benchmarks were not re-run (measurement cut short by the
+user).*
+
+**Mixed pages: OCR only the images.** A page whose text layer passes the
+fast path's layout test (trusted, upright, horizontal, Latin, one column, few
+vector paths) but whose embedded images cover more than 1% (up to 60%) of the
+page, with no layer line drawn over an image, keeps the layer's text (read
+from its geometry, no full-page render or detector) and OCRs each image on
+its own: pdfium renders only the image's rectangle (`render_gray_region`, the
+same pixels as a crop of the full render), Indra's detector and recognizers
+run on it, and its lines join the page's lines in page pixels before reading
+order and layout. Source `hybrid`; note "OCR of the page's images only".
+Other mixed pages (columns, tables, text over images) keep the full path,
+which already OCRs only the detected lines the layer lacks.
+
+| Sample (`.bench-data/closeout/mixed/mixed.pdf`: 3 generated pages, prose + a figure image holding 4 text lines) | ms/page (pages 1–3) | words vs full path | figure text read |
+|---|---|---|---|
+| full path (`KLEOS_DOC_FAST=0`) | 383 / 309 / 346 | — | yes |
+| image regions only | 258 / 130 / 131 | identical (word ratio 1.000 on all 3) | yes |
+
+**Skew search.** `warp_affine_row_sums` computes each destination row's
+source positions in a first, vectorisable pass, reads pixels without bounds
+checks where they are known inside, skips 2×2 neighbourhoods of four zeros
+and whole destination rows whose source rows are all blank, and
+`estimate_skew` reuses the scores its last stage shares with the previous
+one. Output is bit-identical (the exact-equality tests against the reference
+kernel pass; the chosen angles on the sampled pages are identical).
+`kleos-docs/examples/skew_bench.rs` times the preview and the skew search
+(minimum of 9 runs per page) on rendered pages:
+
+| Zenobia scan, 8 pages, interleaved runs | skew search, mean ms/page |
+|---|---|
+| before | 53.7 / 73.4 / 80.8 |
+| after | 57.6 / 66.9 / 68.6 |
+
+On this scan the gain is within the noise to about 15%: the paper's grey
+background leaves almost no exactly-zero ink pixel or blank row, which is
+what the skips feed on; the preview resize is a no-op here (the 200-dpi
+render is under 1,600 px). Clean-background renders (digital pages, born-digital
+images) skip most rows. Larger gains need a different estimate (a coarser
+grid, or a background threshold before the search), which would change the
+chosen angle on some pages; that was left out to keep the output identical.
 
 ### End to end (`remember` and `recall` only)
 

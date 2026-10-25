@@ -7,7 +7,7 @@
  */
 import { enableScript, KleosError, scriptLiteral } from './backend.js';
 import type { AdminOp, Backend, ModelKind } from './backend.js';
-import type { Json, ModelSpec, NamedRows, PrincipalContext } from './types.js';
+import type { ChangeEvent, Json, LiveHandle, ModelSpec, NamedRows, PrincipalContext, SubscriptionEvent } from './types.js';
 
 /** Options of {@link HttpBackend}. */
 export interface ConnectOptions {
@@ -130,6 +130,78 @@ export class HttpBackend implements Backend {
     const r = await this.run(`::${kind} disable ${scriptLiteral(name)}`, {}, false);
     const v = r.rows?.[0]?.[r.headers.indexOf('disabled')] ?? r.rows?.[0]?.[0];
     return v === true || v === 'true' || v === 'OK';
+  }
+  /**
+   * Open a server-sent-events stream (`GET path`) and hand each event to
+   * `onEvent(name, data)`. Resolves once the server answered; `close()`
+   * aborts the stream.
+   */
+  private async sse(path: string, op: string, onEvent: (name: string, data: string) => void): Promise<LiveHandle> {
+    const headers: Record<string, string> = { accept: 'text/event-stream', ...this.headers };
+    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    const ctrl = new AbortController();
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.url + path, { method: 'GET', headers, signal: ctrl.signal });
+    } catch (e) {
+      throw new KleosError(`${op}: request failed: ${(e as Error).message}`, { op, cause: e });
+    }
+    const type = res.headers.get('content-type') ?? '';
+    if (!res.ok || !type.includes('text/event-stream') || !res.body) {
+      const text = await res.text().catch(() => '');
+      let msg = `HTTP ${res.status}`;
+      try {
+        const j = JSON.parse(text);
+        msg = j.message ?? j.display ?? msg;
+      } catch {
+        if (text) msg += `: ${text.slice(0, 200)}`;
+      }
+      throw new KleosError(`${op}: ${msg}`, { op, status: res.status });
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    (async () => {
+      let buf = '';
+      let name = 'message';
+      let data: string[] = [];
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl).replace(/\r$/, '');
+            buf = buf.slice(nl + 1);
+            if (line === '') {
+              if (data.length) onEvent(name, data.join('\n'));
+              name = 'message';
+              data = [];
+            } else if (line.startsWith('event:')) name = line.slice(6).trim();
+            else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+          }
+        }
+      } catch {
+        // aborted or dropped
+      }
+    })();
+    return {
+      close: async () => {
+        ctrl.abort();
+        await reader.cancel().catch(() => undefined);
+      },
+    };
+  }
+
+  /** Over `GET /changes/:relation` (needs the server's admin secret). */
+  watch(relation: string, onEvent: (e: ChangeEvent) => void): Promise<LiveHandle> {
+    return this.sse(`/changes/${encodeURIComponent(relation)}`, 'watch', (_n, d) => onEvent(JSON.parse(d)));
+  }
+  /** Over `GET /subscribe` (server-sent `initial` / `delta` / `resync` / `error` events). */
+  subscribe(script: string, params: Record<string, Json>, onEvent: (e: SubscriptionEvent) => void, queue = 0): Promise<LiveHandle> {
+    const q = new URLSearchParams({ script, params: JSON.stringify(params) });
+    if (queue > 0) q.set('queue', String(queue));
+    return this.sse(`/subscribe?${q}`, 'subscribe', (n, d) => onEvent({ kind: n, ...JSON.parse(d) } as SubscriptionEvent));
   }
   async close(): Promise<void> {
     // stateless: nothing to release

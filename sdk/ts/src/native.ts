@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { KleosError } from './backend.js';
 import type { AdminOp, Backend, ModelKind } from './backend.js';
-import type { FlowWorker, FlowWorkerOptions, Json, ModelSpec, NamedRows, PrincipalContext } from './types.js';
+import type { ChangeEvent, FlowWorker, FlowWorkerOptions, Json, LiveHandle, ModelSpec, NamedRows, PrincipalContext, SubscriptionEvent } from './types.js';
 
 interface NativeDb {
   runScript(script: string, paramsJson: string, immutable: boolean): Promise<string>;
@@ -25,6 +25,12 @@ interface NativeDb {
   tenantCall(op: string, argsJson: string): Promise<string>;
   memoryCallAs(ctxJson: string, op: string, argsJson: string): Promise<string>;
   flowWorker(optsJson: string): FlowWorker;
+  watch(relation: string, callback: (event: string) => void): number;
+  unwatch(id: number): boolean;
+  subscribe(script: string, paramsJson: string, queue: number, callback: (event: string) => void): number;
+  unsubscribe(id: number): boolean;
+  registerReranker(name: string, fn: (query: string, docs: string[]) => number[]): void;
+  unregisterReranker(name: string): boolean;
   close(): boolean;
 }
 
@@ -166,6 +172,34 @@ export class NativeBackend implements Backend {
     } catch (e) {
       throw parseError(e, 'flowWorker');
     }
+  }
+  async watch(relation: string, onEvent: (e: ChangeEvent) => void): Promise<LiveHandle> {
+    let id: number;
+    try {
+      id = this.db.watch(relation, (ev) => onEvent(JSON.parse(ev)));
+    } catch (e) {
+      throw parseError(e, 'watch');
+    }
+    return { close: async () => void this.db.unwatch(id) };
+  }
+  async subscribe(script: string, params: Record<string, Json>, onEvent: (e: SubscriptionEvent) => void, queue = 0): Promise<LiveHandle> {
+    let id: number;
+    try {
+      id = this.db.subscribe(script, JSON.stringify(params), queue, (ev) => onEvent(JSON.parse(ev)));
+    } catch (e) {
+      throw parseError(e, 'subscribe');
+    }
+    return { close: async () => void this.db.unsubscribe(id) };
+  }
+  registerReranker(name: string, fn: (query: string, docs: string[]) => number[]): void {
+    try {
+      this.db.registerReranker(name, fn);
+    } catch (e) {
+      throw parseError(e, 'registerReranker');
+    }
+  }
+  unregisterReranker(name: string): boolean {
+    return this.db.unregisterReranker(name);
   }
   async close(): Promise<void> {
     this.db.close();

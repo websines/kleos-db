@@ -380,3 +380,70 @@ fn principal_mode_tools() {
     assert_eq!(r["isError"], true, "{r}");
     assert!(r["content"][0]["text"].as_str().unwrap().contains("admin"), "{r}");
 }
+
+#[test]
+fn subscriptions_listen() {
+    let s = server();
+    let c = conn();
+    let msg = req(
+        41,
+        "subscriptions/listen",
+        json!({"notifications": {
+            "toolsListChanged": true,
+            "resourcesListChanged": true,
+            "resourceSubscriptions": ["kleos://entity/default/Anna", "kleos://namespaces", "file:///not/ours"]
+        }}),
+        json!({}),
+    );
+    let l = s.listen(&msg, &c).expect("listen opens");
+    // the acknowledgment: first, with the subscription id and the honoured subset
+    assert_eq!(l.ack["method"], "notifications/subscriptions/acknowledged");
+    assert_eq!(l.ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], 41);
+    let n = &l.ack["params"]["notifications"];
+    assert_eq!(n["resourcesListChanged"], true);
+    assert!(n.get("toolsListChanged").is_none(), "{n}");
+    assert_eq!(n["resourceSubscriptions"], json!(["kleos://entity/default/Anna", "kleos://namespaces"]));
+
+    // a memory written in `default`: the entity resource and (a new
+    // namespace) `namespaces` are updated
+    let mut c2 = conn();
+    tool(&s, &mut c2, "remember", json!({"text": "Anna lives in Lisbon.", "ns": "default"}));
+    let mut got = std::collections::BTreeSet::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while got.len() < 2 && std::time::Instant::now() < deadline {
+        if let Ok(m) = l.rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            assert_eq!(m["method"], "notifications/resources/updated", "{m}");
+            assert_eq!(m["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], 41);
+            got.insert(m["params"]["uri"].as_str().unwrap().to_string());
+        }
+    }
+    assert!(got.contains("kleos://entity/default/Anna"), "{got:?}");
+    assert!(got.contains("kleos://namespaces"), "{got:?}");
+
+    // another namespace: no update for `default`'s entity
+    tool(&s, &mut c2, "remember", json!({"text": "Bob likes tea.", "ns": "other"}));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Ok(m) = l.rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            assert_ne!(m["params"]["uri"], "kleos://entity/default/Anna", "{m}");
+        }
+    }
+    let close = l.close_response();
+    assert_eq!(close["id"], 41);
+    assert_eq!(close["result"]["resultType"], "complete");
+    drop(l);
+
+    // through `handle` (no stream) and for earlier-revision clients it is refused
+    let mut c3 = conn();
+    let (r, st) = call(&s, &mut c3, msg.clone());
+    assert_eq!(st, 400, "{r}");
+    let mut legacy = Conn { legacy: Some("2025-06-18".into()), ..conn() };
+    let e = s.listen(&json!({"jsonrpc": "2.0", "id": 2, "method": "subscriptions/listen", "params": {}}), &legacy).err().unwrap();
+    assert_eq!(e.0["error"]["code"], -32601);
+    let _ = &mut legacy;
+    // capabilities advertise it for modern clients only
+    let (r, _) = call(&s, &mut c3, req(1, "server/discover", json!({}), json!({})));
+    assert_eq!(r["result"]["capabilities"]["resources"]["subscribe"], true);
+    let (r, _) = call(&s, &mut c3, json!({"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}));
+    assert!(r["result"]["capabilities"]["resources"].get("subscribe").is_none(), "{r}");
+}

@@ -38,3 +38,20 @@ test('remote: errors carry status and op', { skip }, async () => {
   const bad = connect({ url: 'http://127.0.0.1:1' });
   await assert.rejects(bad.recall('x'), (e) => e instanceof KleosError && /request failed/.test(e.message));
 });
+
+test('remote: watch and subscribe over the server streams', { skip }, async () => {
+  const k = connect({ url: server.url });
+  await k.run(':create rtodo {id: Int => done: Bool}');
+  const changes = [];
+  const events = [];
+  const w = await k.watch('rtodo', (e) => changes.push(e));
+  const sub = await k.subscribe('?[count(id)] := *rtodo{id}', (e) => events.push(e));
+  await k.run('?[id, done] <- [[1, false]] :put rtodo {id => done}');
+  const t0 = Date.now();
+  while (!(changes.length && events.some((e) => e.kind === 'delta')) && Date.now() - t0 < 10000) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(changes[0]?.op, 'Put');
+  assert.equal(events[0]?.kind, 'initial');
+  assert.ok(events.some((e) => e.kind === 'delta'));
+  await w.close();
+  await sub.close();
+});

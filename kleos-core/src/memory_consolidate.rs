@@ -58,8 +58,16 @@ pub const CONSOLIDATE_WORKFLOW: &str = "memory.consolidate";
 const DEFAULT_MIN_CLAIMS: usize = 8;
 const DEFAULT_MAX_SUMMARY: usize = 6;
 const DEFAULT_MIN_FACTS: usize = 2;
+/// An extractor entity needs this many current memories mentioning it for a
+/// profile of its own …
+const ENTITY_MIN_MENTIONS: usize = 3;
+/// … and not more than this (a speaker of every turn is a hub).
+const ENTITY_MAX_MENTIONS: usize = 150;
 const MMR_LAMBDA: f64 = 0.7;
 const PROFILE_VALUE_CHARS: usize = 90;
+/// An older single-valued claim this similar to a newer one of the same
+/// subject and property is a replaced value (left out of summaries).
+const REPLACED_SIM: f64 = 0.6;
 
 /// Options of `::memory consolidate`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,6 +103,9 @@ pub struct LlmOpts {
     /// Environment variable holding the API key (never stored).
     pub api_key_env: Option<String>,
     pub max_tokens: Option<u64>,
+    /// Extra request fields merged into the body, e.g. `{"reasoning_effort":
+    /// "none"}` for a reasoning model.
+    pub params: Option<JsonValue>,
 }
 
 /// One entry of a profile.
@@ -318,14 +329,15 @@ impl<'s, S: Storage<'s>> Db<S> {
         if self.consol_exists(crate::ontology::MEM_TYPE) {
             for r in self
                 .mem_q(
-                    // cue- or rule-backed types only: a prototype match alone
-                    // is too loose to state a fact about someone
+                    // cue- or rule-backed types, and prototype matches at a
+                    // confident score (a weak prototype match alone is too
+                    // loose to state a fact about someone)
                     &format!(
-                        "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop, by}}, cls = 'fact', !is_null(subject), \
-                           !is_null(prop), by != 'proto'",
+                        "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop, by, score}}, cls = 'fact', !is_null(subject), \
+                           !is_null(prop), or(by != 'proto', score >= $conf)",
                         crate::ontology::MEM_TYPE
                     ),
-                    vec![("ns", s(ns))],
+                    vec![("ns", s(ns)), ("conf", DataValue::from(crate::ontology_type::CONFIDENT))],
                 )?
                 .rows
             {
@@ -351,8 +363,51 @@ impl<'s, S: Storage<'s>> Db<S> {
                 }
             });
         }
+        // extractor entities: a named entity that enough current memories
+        // mention gets a profile of what they say about it (by property when
+        // typed, `mentioned` otherwise), unless an ontology profile covers it
+        let mut ent_mems: BTreeMap<String, (Option<String>, BTreeSet<String>)> = BTreeMap::new();
+        if self.consol_exists(MEM_MENTION) && self.consol_exists(MEM_ENTITY) {
+            let view = self.entity_view(&sc)?;
+            let mut kinds: BTreeMap<String, String> = BTreeMap::new();
+            for r in self.mem_q(&format!("?[eid, kind] := *{MEM_ENTITY}{{ns: $ns, eid, kind}}, !is_null(kind)"), vec![("ns", s(ns))])?.rows {
+                if let (Some(e), Some(k)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    kinds.insert(view.canonical(&e), k);
+                }
+            }
+            // an extractor's entities carry their kind on the spans
+            if self.consol_exists(MEM_EXTRACT) {
+                for r in self.mem_q(&format!("?[eid, label] := *{MEM_EXTRACT}{{ns: $ns, eid, label, kept}}, kept, !is_null(eid)"), vec![("ns", s(ns))])?.rows {
+                    if let (Some(e), Some(k)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                        kinds.entry(view.canonical(&e)).or_insert(k);
+                    }
+                }
+            }
+            let mut by_e: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for r in self.mem_q(&format!("?[eid, id] := *{MEM_MENTION}{{ns: $ns, eid, id}}"), vec![("ns", s(ns))])?.rows {
+                if let (Some(e), Some(id)) = (cell_str(&r[0]), cell_str(&r[1])) {
+                    by_e.entry(view.canonical(&e)).or_default().insert(id);
+                }
+            }
+            for (e, ms) in by_e {
+                // a hub (a speaker of every turn) says nothing in particular
+                if ms.len() < ENTITY_MIN_MENTIONS || ms.len() > ENTITY_MAX_MENTIONS {
+                    continue;
+                }
+                let Some((name, _)) = view.rows.get(&e) else { continue };
+                let node = graph_node(name);
+                if node.len() < 2 || NOT_NAMES.contains(&node.as_str()) {
+                    continue;
+                }
+                let x = ent_mems.entry(node.clone()).or_insert_with(|| (None, BTreeSet::new()));
+                x.0 = x.0.take().or_else(|| kinds.get(&e).cloned());
+                x.1.extend(ms);
+                labels.entry(node).or_insert_with(|| name.clone());
+            }
+        }
         let mut ids: Vec<String> = claims.iter().map(|c| c.0.clone()).collect();
         ids.extend(fact_mems);
+        ids.extend(ent_mems.values().flat_map(|x| x.1.iter().cloned()));
         ids.sort();
         ids.dedup();
         // current texts and valid-from of those memories
@@ -397,6 +452,31 @@ impl<'s, S: Storage<'s>> Db<S> {
                 evidence: vec![id.clone()],
             });
         }
+        let claim_prop: BTreeMap<&str, &str> = claims.iter().map(|(id, _, p)| (id.as_str(), p.as_str())).collect();
+        let mut ent_kind: BTreeMap<String, String> = BTreeMap::new();
+        for (node, (kind, ms)) in &ent_mems {
+            let have: usize = by.get(node).map_or(0, |p| p.values().map(|v| v.len()).sum());
+            if have >= min_facts {
+                continue;
+            }
+            let mut n = 0;
+            for id in ms {
+                let Some(t) = text.get(id) else { continue };
+                let body = t.split_once(": ").filter(|(a, _)| a.split_whitespace().count() <= 3).map_or(t.as_str(), |x| x.1);
+                let p = claim_prop.get(id.as_str()).map_or("mentioned", |p| *p);
+                by.entry(node.clone()).or_default().entry(p.to_string()).or_default().push(ProfileEntry {
+                    value: short(body, PROFILE_VALUE_CHARS),
+                    since: since(&Some(id.clone())),
+                    evidence: vec![id.clone()],
+                });
+                n += 1;
+            }
+            if n > 0 {
+                if let Some(k) = kind {
+                    ent_kind.insert(node.clone(), k.to_lowercase());
+                }
+            }
+        }
         // single-valued properties: the newest value only
         for props in by.values_mut() {
             for (p, v) in props.iter_mut() {
@@ -426,7 +506,10 @@ impl<'s, S: Storage<'s>> Db<S> {
                 continue;
             }
             keep.insert(node.clone());
-            let name = labels.get(node).cloned().unwrap_or_else(|| title(node));
+            let mut name = labels.get(node).cloned().unwrap_or_else(|| title(node));
+            if let Some(k) = ent_kind.get(node) {
+                name = format!("{name} ({k})");
+            }
             let parts: Vec<String> = props
                 .iter()
                 .map(|(p, v)| {
@@ -551,8 +634,17 @@ impl<'s, S: Storage<'s>> Db<S> {
                 rows.push((id, t, memory_recall::source_group(&src).to_string()));
             }
         }
+        // replaced values never reach a summary: a claim a newer one may
+        // supersede (pending), or an older value of a single-valued property
+        // whose newer value (same subject) says nearly the same thing
+        let replaced = self.replaced_claims(&sc, ns, &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), now, cfg.dim.is_some())?;
         let mut groups: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        let mut dropped = 0usize;
         for (id, t, g) in rows {
+            if replaced.contains(&id) {
+                dropped += 1;
+                continue;
+            }
             if memory_claims::is_declarative(&t) && t.split_whitespace().count() >= 4 {
                 groups.entry(g).or_default().push((id, t));
             }
@@ -594,11 +686,16 @@ impl<'s, S: Storage<'s>> Db<S> {
             let to = ids.iter().filter_map(|i| iv.get(i).map(|x| x.0)).max().unwrap_or(now);
             let chosen: Vec<String> = pick.iter().map(|&i| texts[i].trim().trim_end_matches('.').to_string() + ".").collect();
             let mut body = chosen.join(" ");
+            let mut sig = sig;
             if let Some(l) = llm {
                 llm_calls += 1;
                 match llm_summary(l, &chosen) {
                     Ok(t) if !t.trim().is_empty() => body = t.trim().to_string(),
-                    _ => llm_errors += 1,
+                    _ => {
+                        llm_errors += 1;
+                        // stored as extractive: the next run asks the LLM again
+                        sig = hash_of(&(&ids, "extractive-fallback", max_summary));
+                    }
                 }
             }
             let range = if memory_recall::fmt_date(from) == memory_recall::fmt_date(to) {
@@ -656,8 +753,78 @@ impl<'s, S: Storage<'s>> Db<S> {
         Ok(serde_json::json!({
             "built": built, "unchanged": same, "removed": gone.len(), "groups": keep.len(), "method": method,
             "llm_calls": llm_calls, "llm_errors": llm_errors,
-            "source_tokens": src_tokens, "summary_tokens": sum_tokens,
+            "source_tokens": src_tokens, "summary_tokens": sum_tokens, "replaced_dropped": dropped,
         }))
+    }
+
+    /// Current claims among `ids` that a summary must not quote: the
+    /// candidates of a pending supersession, and older values of a
+    /// single-valued property when a newer current claim of the same
+    /// subject and property is similar to them (cosine at least
+    /// [`REPLACED_SIM`]; a store without vectors uses the pending rule only).
+    fn replaced_claims(&'s self, sc: &Scope, ns: &str, ids: &[String], now: i64, vectors: bool) -> Result<BTreeSet<String>> {
+        let mut out = BTreeSet::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let current: BTreeSet<&String> = ids.iter().collect();
+        if self.consol_exists(MEM_DECISION) {
+            for r in self
+                .mem_q(
+                    &format!("?[id] := *{MEM_DECISION}{{ns: $ns, cand: id, template: 'supersedes', status: 'pending'}}"),
+                    vec![("ns", s(ns))],
+                )?
+                .rows
+            {
+                if let Some(id) = cell_str(&r[0]).filter(|i| current.contains(i)) {
+                    out.insert(id);
+                }
+            }
+        }
+        // the property rule needs vectors: a shared property alone ("adopted
+        // a dog" / "plans to adopt a second dog") is no replacement
+        let Some(act) = self.onto_active(ns)? else { return Ok(out) };
+        if !vectors || !self.consol_exists(crate::ontology::MEM_TYPE) {
+            return Ok(out);
+        }
+        let mut by: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        for r in self
+            .mem_q(
+                &format!(
+                    "?[id, subject, prop] := *{}{{ns: $ns, id, cls, subject, prop}}, cls = 'fact', !is_null(subject), !is_null(prop)",
+                    crate::ontology::MEM_TYPE
+                ),
+                vec![("ns", s(ns))],
+            )?
+            .rows
+        {
+            if let (Some(id), Some(sub), Some(p)) = (cell_str(&r[0]), cell_str(&r[1]), cell_str(&r[2])) {
+                if current.contains(&id) && act.prop(&p).is_some_and(|x| x.single()) {
+                    by.entry((sub, p)).or_default().push(id);
+                }
+            }
+        }
+        by.retain(|_, v| v.len() >= 2);
+        if by.is_empty() {
+            return Ok(out);
+        }
+        let all: Vec<String> = by.values().flatten().cloned().collect();
+        let iv = intervals(&self.mem_history(sc, &all)?, now);
+        let vm = self.vecs_of(sc, &all)?;
+        for v in by.values_mut() {
+            v.sort_by_key(|i| (iv.get(i).map_or(0, |x| x.0), i.clone()));
+            for (k, old) in v.iter().enumerate() {
+                let newer = &v[k + 1..];
+                let hit = newer.iter().any(|n| match (vm.get(old), vm.get(n)) {
+                    (Some(a), Some(b)) => cosine(a, b) >= REPLACED_SIM,
+                    _ => false,
+                });
+                if hit {
+                    out.insert(old.clone());
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn retract_summaries(&'s self, ns: &str, sids: &[String], at: i64) -> Result<()> {
@@ -838,23 +1005,63 @@ fn llm_summary(l: &LlmOpts, claims: &[String]) -> Result<String> {
         "Summarize these statements from one conversation in at most three sentences. Keep names, numbers and dates; add nothing.\n{}",
         claims.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n")
     );
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": l.model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": l.max_tokens.unwrap_or(2000),
         "temperature": 0,
     });
-    let mut req = minreq::post(url).with_header("Content-Type", "application/json").with_timeout(120);
-    if let Some(env) = &l.api_key_env {
-        let key = std::env::var(env).map_err(|_| miette::miette!("memory consolidate: environment variable '{env}' is not set"))?;
-        req = req.with_header("Authorization", format!("Bearer {key}"));
+    if let (Some(JsonValue::Object(extra)), JsonValue::Object(b)) = (&l.params, &mut body) {
+        for (k, v) in extra {
+            b.insert(k.clone(), v.clone());
+        }
     }
-    let resp = req.with_body(body.to_string()).send().map_err(|e| miette::miette!("memory consolidate: llm request failed: {e}"))?;
-    if resp.status_code / 100 != 2 {
-        bail!("memory consolidate: llm returned HTTP {}", resp.status_code);
+    let key = match &l.api_key_env {
+        Some(env) => Some(std::env::var(env).map_err(|_| miette::miette!("memory consolidate: environment variable '{env}' is not set"))?),
+        None => None,
+    };
+    // rate limits and transient failures: a few tries with backoff
+    let mut last = String::new();
+    for attempt in 0..4u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1000 << (attempt - 1)));
+        }
+        let mut req = minreq::post(url.as_str()).with_header("Content-Type", "application/json").with_timeout(120);
+        if let Some(k) = &key {
+            req = req.with_header("Authorization", format!("Bearer {k}"));
+        }
+        let resp = match req.with_body(body.to_string()).send() {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("llm request failed: {e}");
+                continue;
+            }
+        };
+        if resp.status_code == 429 || resp.status_code >= 500 {
+            last = format!("llm returned HTTP {}", resp.status_code);
+            continue;
+        }
+        if resp.status_code / 100 != 2 {
+            bail!("memory consolidate: llm returned HTTP {}", resp.status_code);
+        }
+        let v: JsonValue = serde_json::from_str(resp.as_str().map_err(|e| miette::miette!("{e}"))?).into_diagnostic()?;
+        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+        return Ok(strip_thinking(text));
     }
-    let v: JsonValue = serde_json::from_str(resp.as_str().map_err(|e| miette::miette!("{e}"))?).into_diagnostic()?;
-    Ok(v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string())
+    bail!("memory consolidate: {last}")
+}
+
+/// A reasoning model's answer without its `<think>…</think>` block.
+#[cfg(feature = "requests")]
+fn strip_thinking(t: &str) -> String {
+    let mut s = t.to_string();
+    while let Some(a) = s.find("<think>") {
+        match s[a..].find("</think>") {
+            Some(b) => s.replace_range(a..a + b + "</think>".len(), ""),
+            None => s.truncate(a),
+        }
+    }
+    s.trim().to_string()
 }
 
 #[cfg(not(feature = "requests"))]
@@ -884,6 +1091,14 @@ mod tests {
         // not both near-duplicate adoption claims
         assert!(!(p.contains(&0) && p.contains(&1)), "{p:?}");
         assert!(!p.contains(&3), "{p:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "requests")]
+    fn thinking_is_stripped() {
+        assert_eq!(strip_thinking("<think>hmm</think> Anna lives in Lisbon."), "Anna lives in Lisbon.");
+        assert_eq!(strip_thinking("Anna lives in Lisbon. <think>unfinished"), "Anna lives in Lisbon.");
+        assert_eq!(strip_thinking("plain"), "plain");
     }
 
     #[test]

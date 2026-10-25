@@ -37,6 +37,10 @@ const TASKS_EXT: &str = "io.modelcontextprotocol/tasks";
 pub const SKILLS_EXT: &str = "io.modelcontextprotocol/skills";
 /// Skills in a `skills/list` answered with a task (kleos extension: `task`).
 const SKILLS_TOP_K: u64 = 8;
+const META_SUB: &str = "io.modelcontextprotocol/subscriptionId";
+/// How long change events are gathered before a `subscriptions/listen`
+/// stream sends them (one notification per URI per window).
+const LISTEN_WINDOW_MS: u64 = 200;
 
 pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
@@ -195,7 +199,8 @@ impl McpServer {
     fn capabilities() -> Value {
         json!({
             "tools": {"listChanged": false},
-            "resources": {"listChanged": false},
+            // change notifications over `subscriptions/listen`
+            "resources": {"listChanged": true, "subscribe": true},
             "extensions": {TASKS_EXT: {}, SKILLS_EXT: {"directoryRead": true}}
         })
     }
@@ -278,6 +283,9 @@ impl McpServer {
             conn.legacy = Some(version.to_string());
             let mut caps = Self::capabilities();
             caps.as_object_mut().unwrap().remove("extensions");
+            // earlier revisions subscribe with `resources/subscribe` and a
+            // session's GET stream, neither of which this server has
+            caps["resources"] = json!({"listChanged": false});
             return Ok((
                 json!({"protocolVersion": version, "capabilities": caps, "serverInfo": Self::server_info(), "instructions": INSTRUCTIONS}),
                 Era::Legacy,
@@ -363,6 +371,9 @@ impl McpServer {
                     return Err(e);
                 }
                 self.tasks(method, params)?
+            }
+            "subscriptions/listen" => {
+                return Err(RpcError::new(INVALID_REQUEST, "subscriptions/listen needs a streaming transport (Streamable HTTP or stdio)"));
             }
             "prompts/list" => {
                 let mut r = json!({"prompts": []});
@@ -1466,6 +1477,85 @@ impl McpServer {
         }
     }
 
+    // ----- subscriptions/listen -----
+
+    /// Opens a `subscriptions/listen` stream (protocol 2026-07-28,
+    /// basic/patterns/subscriptions): validates the request, answers the
+    /// acknowledged filter and starts watching the store. The transport
+    /// sends [`Listen::ack`] first, then every message of [`Listen::rx`],
+    /// until the client cancels (closes the stream / `notifications/cancelled`)
+    /// or drops it. `Err` is a JSON-RPC error response and its HTTP status.
+    ///
+    /// Honoured: `resourcesListChanged` (documents of the default namespace
+    /// added or removed) and `resourceSubscriptions` for `kleos://` URIs
+    /// (`namespaces`, `ns/{ns}/documents`, `doc/{ns}/{doc}`,
+    /// `entity/{ns}/{name}`: updated when a memory of `ns` is written).
+    /// `toolsListChanged` and `promptsListChanged` are dropped from the
+    /// acknowledgment: the tool list is fixed and there are no prompts.
+    pub fn listen(&self, msg: &Value, conn: &Conn) -> Result<Listen, (Value, u16)> {
+        let id = msg.get("id").filter(|v| !v.is_null()).cloned();
+        let fail = |e: RpcError| {
+            let st = e.http_status();
+            (e.to_response(id.as_ref()), st)
+        };
+        let Some(id) = id.clone() else {
+            return Err(fail(RpcError::new(INVALID_REQUEST, "subscriptions/listen is a request (it needs an id)")));
+        };
+        let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
+        match self.era(&params, conn).map_err(fail)? {
+            Era::Modern { .. } => {}
+            Era::Legacy => return Err(fail(RpcError::new(METHOD_NOT_FOUND, "Method not found: subscriptions/listen"))),
+        }
+        let want = params.get("notifications").cloned().unwrap_or_else(|| json!({}));
+        if !want.is_object() {
+            return Err(fail(RpcError::new(INVALID_PARAMS, "'notifications' must be an object")));
+        }
+        let list_changed = want.get("resourcesListChanged").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut uris: Vec<String> = vec![];
+        if let Some(a) = want.get("resourceSubscriptions") {
+            let a = a.as_array().ok_or_else(|| fail(RpcError::new(INVALID_PARAMS, "'resourceSubscriptions' must be a list of URIs")))?;
+            for u in a {
+                if let Some(u) = u.as_str() {
+                    if watched_uri(u).is_some() && !uris.iter().any(|x| x == u) {
+                        uris.push(u.to_string());
+                    }
+                }
+            }
+        }
+        let mut ack = Map::new();
+        if list_changed {
+            ack.insert("resourcesListChanged".into(), json!(true));
+        }
+        if !uris.is_empty() {
+            ack.insert("resourceSubscriptions".into(), json!(uris));
+        }
+        let ack = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {"_meta": {META_SUB: id.clone()}, "notifications": Value::Object(ack)},
+        });
+        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if list_changed || !uris.is_empty() {
+            let watch = self.backend.watch(&["kleos_mem", "kleos_doc"]).map_err(|e| fail(RpcError::new(INTERNAL_ERROR, format!("cannot watch the store: {e}"))))?;
+            let stop2 = stop.clone();
+            let default_ns = self.default_ns.clone();
+            let sub = id.clone();
+            // namespaces that exist when the stream opens are not news
+            let known: std::collections::BTreeSet<String> = self
+                .backend
+                .query("?[ns] := *kleos_mem{ns}", &Value::Null)
+                .ok()
+                .and_then(|v| v.get("rows").and_then(|r| r.as_array()).cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| row.get(0).and_then(|x| x.as_str()).map(String::from))
+                .collect();
+            std::thread::spawn(move || listen_loop(watch, uris, list_changed, default_ns, sub, tx, stop2, known));
+        }
+        Ok(Listen { id, ack, rx, stop })
+    }
+
     // ----- resources -----
 
     fn resources_list(&self) -> Vec<Value> {
@@ -1743,25 +1833,208 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// An open `subscriptions/listen` stream (see [`McpServer::listen`]).
+/// Dropping it ends the subscription.
+pub struct Listen {
+    /// The JSON-RPC id of the `subscriptions/listen` request (the
+    /// subscription id).
+    pub id: Value,
+    /// `notifications/subscriptions/acknowledged`: the first message.
+    pub ack: Value,
+    /// The notifications, in order; disconnected when the store watch ends.
+    pub rx: std::sync::mpsc::Receiver<Value>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Listen {
+    /// The response that ends the subscription gracefully (server-initiated
+    /// close, e.g. at shutdown).
+    pub fn close_response(&self) -> Value {
+        json!({"jsonrpc": "2.0", "id": self.id, "result": {"resultType": "complete", "_meta": {META_SUB: self.id}}})
+    }
+}
+
+impl Drop for Listen {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What a `kleos://` URI watches: `(kind, ns)` with kind `namespaces`,
+/// `documents`, `doc:<id>` or `entity`.
+fn watched_uri(uri: &str) -> Option<(String, Option<String>)> {
+    let rest = uri.strip_prefix("kleos://")?;
+    let parts: Vec<String> = rest.split('/').map(unpct).collect();
+    match parts.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice() {
+        ["namespaces"] => Some(("namespaces".into(), None)),
+        ["ns", ns, "documents"] => Some(("documents".into(), Some(ns.to_string()))),
+        ["doc", ns, doc] => Some((format!("doc:{doc}"), Some(ns.to_string()))),
+        ["entity", ns, _] => Some(("entity".into(), Some(ns.to_string()))),
+        _ => None,
+    }
+}
+
+/// The URIs (and whether the default namespace's resource list changed) a
+/// batch of committed writes touches. `kleos_mem` rows start with `ns`;
+/// `kleos_doc` rows with `ns, doc`. `known` is the namespaces seen so far.
+fn touched(
+    batch: &[(String, Vec<Value>)],
+    uris: &[String],
+    default_ns: &str,
+    known: &mut std::collections::BTreeSet<String>,
+) -> (Vec<String>, bool) {
+    let mut mem_ns = std::collections::BTreeSet::new();
+    let mut docs: std::collections::BTreeSet<(String, String)> = Default::default();
+    for (rel, rows) in batch {
+        for r in rows {
+            let ns = r.get(0).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            if rel == "kleos_doc" {
+                docs.insert((ns, r.get(1).and_then(|x| x.as_str()).unwrap_or_default().to_string()));
+            } else {
+                mem_ns.insert(ns);
+            }
+        }
+    }
+    let new_ns = mem_ns.iter().any(|n| !known.contains(n));
+    known.extend(mem_ns.iter().cloned());
+    let mut out = vec![];
+    for u in uris {
+        let Some((kind, ns)) = watched_uri(u) else { continue };
+        let ns = ns.unwrap_or_default();
+        let hit = match kind.as_str() {
+            "namespaces" => new_ns,
+            "documents" => docs.iter().any(|d| d.0 == ns),
+            "entity" => mem_ns.contains(&ns),
+            k => k.strip_prefix("doc:").is_some_and(|d| docs.contains(&(ns.clone(), d.to_string()))),
+        };
+        if hit {
+            out.push(u.clone());
+        }
+    }
+    (out, docs.iter().any(|d| d.0 == default_ns))
+}
+
+/// The watcher behind one `subscriptions/listen` stream: gathers commits
+/// for [`LISTEN_WINDOW_MS`], then sends one notification per touched URI.
+fn listen_loop(
+    watch: crate::backend::Watch,
+    uris: Vec<String>,
+    list_changed: bool,
+    default_ns: String,
+    sub: Value,
+    tx: std::sync::mpsc::Sender<Value>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mut known: std::collections::BTreeSet<String>,
+) {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::RecvTimeoutError;
+    let window = std::time::Duration::from_millis(LISTEN_WINDOW_MS);
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut batch = vec![];
+        match watch.rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(x) => batch.push(x),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        let until = std::time::Instant::now() + window;
+        while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+            match watch.rx.recv_timeout(left) {
+                Ok(x) => batch.push(x),
+                Err(_) => break,
+            }
+        }
+        let (hit, lc) = touched(&batch, &uris, &default_ns, &mut known);
+        let mut msgs = vec![];
+        if list_changed && lc {
+            msgs.push(json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed", "params": {"_meta": {META_SUB: sub}}}));
+        }
+        for u in hit {
+            msgs.push(json!({"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"_meta": {META_SUB: sub}, "uri": u}}));
+        }
+        for m in msgs {
+            if stop.load(Ordering::SeqCst) || tx.send(m).is_err() {
+                return;
+            }
+        }
+    }
+}
+
 /// Serves MCP over stdio: one JSON-RPC message per line on stdin, responses
-/// on stdout, diagnostics on stderr.
+/// on stdout, diagnostics on stderr. `subscriptions/listen` streams run
+/// beside the request loop; their notifications share stdout (each line one
+/// message, correlated by `_meta.subscriptionId`), and
+/// `notifications/cancelled` with the listen request's id ends one.
 pub fn serve_stdio(server: &McpServer) -> std::io::Result<()> {
+    use std::sync::{Arc, Mutex};
     let stdin = std::io::stdin();
-    let mut out = std::io::stdout().lock();
+    let out = Arc::new(Mutex::new(std::io::stdout()));
+    let write = |out: &Arc<Mutex<std::io::Stdout>>, v: &Value| -> std::io::Result<()> {
+        let mut o = out.lock().unwrap();
+        writeln!(o, "{}", v)?;
+        o.flush()
+    };
     let mut conn = Conn { principal: "local".into(), ..Default::default() };
+    // open subscriptions by request id (their JSON text)
+    let mut subs: std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>> = Default::default();
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let resp = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => server.handle(&msg, &mut conn).map(|(r, _)| r),
-            Err(e) => Some(RpcError::new(PARSE_ERROR, format!("Parse error: {e}")).to_response(None)),
+        let msg = match serde_json::from_str::<Value>(&line) {
+            Ok(msg) => msg,
+            Err(e) => {
+                write(&out, &RpcError::new(PARSE_ERROR, format!("Parse error: {e}")).to_response(None))?;
+                continue;
+            }
         };
-        if let Some(r) = resp {
-            writeln!(out, "{}", r)?;
-            out.flush()?;
+        match msg.get("method").and_then(|m| m.as_str()) {
+            Some("subscriptions/listen") => {
+                match server.listen(&msg, &conn) {
+                    Ok(l) => {
+                        write(&out, &l.ack)?;
+                        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        subs.insert(l.id.to_string(), gone.clone());
+                        let out2 = out.clone();
+                        std::thread::spawn(move || {
+                            while !gone.load(std::sync::atomic::Ordering::SeqCst) {
+                                match l.rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                                    Ok(n) if !gone.load(std::sync::atomic::Ordering::SeqCst) => {
+                                        let mut o = out2.lock().unwrap();
+                                        if writeln!(o, "{}", n).and_then(|_| o.flush()).is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Ok(_) => return,
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                                }
+                            }
+                        });
+                    }
+                    Err((r, _)) => write(&out, &r)?,
+                }
+                continue;
+            }
+            Some("notifications/cancelled") => {
+                if let Some(rid) = msg.pointer("/params/requestId") {
+                    if let Some(g) = subs.remove(&rid.to_string()) {
+                        g.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                continue;
+            }
+            _ => {}
         }
+        if let Some((r, _)) = server.handle(&msg, &mut conn) {
+            write(&out, &r)?;
+        }
+    }
+    for g in subs.values() {
+        g.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     Ok(())
 }
