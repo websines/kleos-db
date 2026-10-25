@@ -168,7 +168,7 @@ With the `docs-url` feature (off by default; it pulls in `requests`), an attachm
 - the content type must be a document type (PDF, image, text, HTML, DOCX, or `application/octet-stream` with detection from the bytes);
 - the final URL is stored in the document row's `meta.url`; the bytes' hash still decides re-ingestion, so fetching the same file again is a no-op.
 
-Limitation: the address check and the connection resolve the host separately, so a DNS server that changes its answer between the two (rebinding) is not fully excluded; deployments that must exclude it should fetch through an egress proxy.
+- **No DNS rebinding** (wave7/closeout): each hop resolves its host once, checks every address, and the HTTP client (`ureq`, with a per-hop resolver) connects only to those checked addresses; it never asks DNS again, so an answer that changes between the check and the connection cannot redirect it. A literal IP host is checked as is. Test: `docs_url::tests::connections_are_pinned_to_the_checked_address` (a resolver that rebinds every name to a private address after its first lookup; the fetch, a redirect to a second host included, still reaches the checked loopback server, with one lookup per hop).
 
 ### Entities
 
