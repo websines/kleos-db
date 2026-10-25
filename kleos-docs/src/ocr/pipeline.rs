@@ -181,7 +181,16 @@ pub fn estimate_skew(gray: &Gray, side: usize, threads: usize) -> f64 {
         }
     }
     let last = arange(a1 - 0.5, a1 + 0.5, 0.1);
-    let lv = par_map(&last, threads, |&a| row_sharpness(&fine, a));
+    // angles the previous stage already scored (bit-identical) are reused
+    let todo: Vec<f64> = last.iter().copied().filter(|a| !uniq.iter().any(|u| u.to_bits() == a.to_bits())).collect();
+    let tv = par_map(&todo, threads, |&a| row_sharpness(&fine, a));
+    let lv: Vec<f64> = last
+        .iter()
+        .map(|a| match uniq.iter().position(|u| u.to_bits() == a.to_bits()) {
+            Some(i) => vals[i],
+            None => tv[todo.iter().position(|t| t.to_bits() == a.to_bits()).unwrap()],
+        })
+        .collect();
     let mut best = 0;
     for k in 1..last.len() {
         if lv[k] > lv[best] {

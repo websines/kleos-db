@@ -27,6 +27,8 @@ to kleos.
 
 - **Mixed PDF pages OCR only their images:** a page with a simple text layer and embedded images keeps the layer's text and runs Indra only on the image regions (rendered alone); 3-page sample: identical words, 130–258 ms/page against 309–383 ms on the full path.
 
+- **Skew search, faster with identical output:** vectorisable source-position pass, unchecked interior reads, zero-neighbourhood and blank-row skips in the rotated row sums, and reuse of already-scored angles; bit-identical results. On the Zenobia scan the gain is 0–15% (its grey background has few exactly-zero pixels); `kleos-docs/examples/skew_bench.rs` measures it.
+
 ### Changed
 - **Graph recall and consolidation are on by default** (the user's choice): `recall` defaults to `graph: 'ppr'` (which also follows inferred ontology links; `graph: 'off'` opts out), and each namespace consolidates automatically after every 200 new memories (`every: 0` opts out), run by a lazily started in-process thread (`DbInstance::consolidate_kick`) on the flow queue `consolidate`; profiles and summaries appear in the context block once built. The auto-consolidation counters are per open store, not per process.
 - **Claim-typing policy: thin pairs need sure types.** Two claims a typer puts on the same single-valued property no longer replace each other automatically when either is thin (nothing concrete, under 5 content words) unless both types are cue- or rule-backed; the pair is capped at pending. Under EmbeddingGemma 2 this takes the 180-pair audit's wrongly allowed replacements from 13 to 7 (offline replay of the gate on 0af7f19 types; the end-to-end audit, KU and life stream were not re-run).
