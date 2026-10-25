@@ -180,3 +180,42 @@ fn authenticated_endpoint() {
     let (st, _) = modern(&s, "tools/list", None, json!({}), &[("Authorization", &bearer), ("Origin", "https://evil.example")]);
     assert_eq!(st, 403);
 }
+
+#[test]
+fn listen_streams_notifications() {
+    use std::io::{BufRead, BufReader, Write};
+    let s = start(false);
+    let mut p = json!({"notifications": {"resourceSubscriptions": ["kleos://entity/h/Anna"]}});
+    p["_meta"] = meta();
+    let body = json!({"jsonrpc": "2.0", "id": 9, "method": "subscriptions/listen", "params": p}).to_string();
+    let mut sock = std::net::TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        sock,
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
+         MCP-Protocol-Version: 2026-07-28\r\nMcp-Method: subscriptions/listen\r\nContent-Length: {}\r\n\r\n{}",
+        s.port,
+        body.len(),
+        body
+    )
+    .unwrap();
+    let mut rd = BufReader::new(sock.try_clone().unwrap());
+    let mut next_data = || -> Value {
+        loop {
+            let mut line = String::new();
+            assert!(rd.read_line(&mut line).unwrap() > 0, "stream closed");
+            if let Some(d) = line.trim_end().strip_prefix("data:") {
+                return serde_json::from_str(d.trim()).unwrap();
+            }
+        }
+    };
+    let ack = next_data();
+    assert_eq!(ack["method"], "notifications/subscriptions/acknowledged", "{ack}");
+    assert_eq!(ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], 9);
+    let (st, r) = modern(&s, "tools/call", Some("remember"), json!({"name": "remember", "arguments": {"text": "Anna moved to Porto.", "ns": "h"}}), &[]);
+    assert_eq!(st, 200, "{r}");
+    let n = next_data();
+    assert_eq!(n["method"], "notifications/resources/updated", "{n}");
+    assert_eq!(n["params"]["uri"], "kleos://entity/h/Anna");
+    assert_eq!(n["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], 9);
+}

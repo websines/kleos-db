@@ -1030,7 +1030,8 @@ async fn memory_op(
     }
 }
 
-/// `GET`/`DELETE /mcp`: protocol 2026-07-28 has no standalone stream and no
+/// `GET`/`DELETE /mcp`: protocol 2026-07-28 has no standalone stream (change
+/// notifications come on a `subscriptions/listen` response stream) and no
 /// sessions.
 async fn mcp_not_allowed() -> StatusCode {
     StatusCode::METHOD_NOT_ALLOWED
@@ -1202,12 +1203,54 @@ async fn mcp_post(
             None => conn.legacy = Some("2025-03-26".to_string()),
         }
     }
+    if method == "subscriptions/listen" {
+        return mcp_listen(server, msg, conn).await;
+    }
     let result = spawn_blocking(move || server.handle(&msg, &mut conn)).await;
     match result {
         Ok(Some((resp, status))) => mcp_json(status, resp),
         Ok(None) => Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap(),
         Err(err) => mcp_json(500, RpcError::new(-32603, format!("internal error: {err}")).to_response(None)),
     }
+}
+
+/// `subscriptions/listen` over Streamable HTTP: the response is an SSE stream
+/// (the acknowledgment, then change notifications, one JSON-RPC message per
+/// event, with keep-alive comments). Closing it cancels the subscription.
+async fn mcp_listen(server: Arc<kleos_bin::mcp::McpServer>, msg: serde_json::Value, conn: kleos_bin::mcp::Conn) -> Response<Body> {
+    use axum::response::IntoResponse;
+    let opened = spawn_blocking(move || server.listen(&msg, &conn)).await;
+    let listen = match opened {
+        Ok(Ok(l)) => l,
+        Ok(Err((resp, status))) => return mcp_json(status, resp),
+        Err(err) => return mcp_json(500, kleos_bin::mcp::RpcError::new(-32603, format!("internal error: {err}")).to_response(None)),
+    };
+    let ack = listen.ack.clone();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<serde_json::Value>(64);
+    spawn_blocking(move || {
+        // ends when the client disconnects (the sender closes) or the watch
+        // ends; dropping `listen` stops its watcher
+        while !sender.is_closed() {
+            match listen.rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(n) => {
+                    if sender.blocking_send(n).is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(Event::default().data(ack.to_string()));
+        while let Some(n) = receiver.recv().await {
+            yield Ok::<_, Infallible>(Event::default().data(n.to_string()));
+        }
+    };
+    let mut resp = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    resp.headers_mut().insert("x-accel-buffering", HeaderValue::from_static("no"));
+    resp
 }
 
 /// Durable workflows (kleos fork; docs/specs/durable-workflows.md): `POST
